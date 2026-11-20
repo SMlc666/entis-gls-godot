@@ -65,6 +65,37 @@ func _run() -> void:
 				"shadow_matches": label.get_theme_constant("shadow_offset_y") == int(sprite.message_style["shadow"]["y"]),
 			})
 	)
+	var elapsed := 0.0
+	var saw_activation_poll := false
+	while (native_outputs.is_empty() or not player.host.is_waiting_input) and elapsed < 8.0:
+		await process_frame
+		elapsed += player.get_process_delta_time()
+		saw_activation_poll = saw_activation_poll or player.host.yield_for_sprite_activation
+	if native_outputs.is_empty() or not player.host.is_waiting_input:
+		printerr("FAIL The opening animation must finish without a click and reach the first dialogue wait")
+		quit(1)
+		return
+	var first_message := native_outputs.size()
+	for frame in range(3):
+		await process_frame
+	if native_outputs.size() != first_message or not player.host.is_waiting_input:
+		printerr("FAIL The dialogue wait must hold until input arrives")
+		quit(1)
+		return
+
+	var enter := InputEventKey.new()
+	enter.keycode = KEY_ENTER
+	enter.pressed = true
+	player._unhandled_input(enter)
+	elapsed = 0.0
+	while native_outputs.size() == first_message and elapsed < 5.0:
+		await process_frame
+		elapsed += player.get_process_delta_time()
+	if native_outputs.size() == first_message:
+		printerr("FAIL One Enter press must advance to the next native message")
+		quit(1)
+		return
+
 	var total_frames := 0
 	while dialogues_seen.size() < 16 and total_frames < 800:
 		await process_frame
@@ -81,6 +112,7 @@ func _run() -> void:
 					(" (voice: %s)" % entry.get("voice")) if not entry.get("voice", "").is_empty() else ""
 				])
 
+		saw_activation_poll = saw_activation_poll or player.host.yield_for_sprite_activation
 		if player.host != null and player.host.is_waiting_input:
 			player._advance_line()
 
@@ -121,6 +153,10 @@ func _run() -> void:
 		return
 
 	# The native message command must update the visible shell with its payload.
+	if not saw_activation_poll:
+		printerr("FAIL Expected to observe at least one native activation input poll")
+		quit(1)
+		return
 	if native_outputs.size() < 10:
 		printerr("FAIL Expected at least 10 native body text commands")
 		quit(1)

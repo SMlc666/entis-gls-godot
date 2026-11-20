@@ -1601,6 +1601,10 @@ func _sprite_has_checked_button(sprite: CsxHostClass.HostSprite, button_id: Stri
 	return false
 
 
+func _is_polling_sprite_activation() -> bool:
+	return not call_stack.is_empty() and call_stack.back().name == "WaitUntilSpriteActive"
+
+
 func _dispatch_input_filter_method(flt: CsxHostClass.HostInputFilter, method: String, args: Array) -> Variant:
 	match method:
 		"LoadInputFilter":
@@ -1626,7 +1630,7 @@ func _dispatch_input_filter_method(flt: CsxHostClass.HostInputFilter, method: St
 		"GetJoyButtonPushed":
 			var key := int(args[0]) if args.size() > 0 else 0
 			var dev := int(args[1]) if args.size() > 1 else 0
-			return flt.get_joy_button_pushed(key, dev)
+			return flt.get_joy_button_pushed(key, dev, _is_polling_sprite_activation())
 		"FlushJoyButtonPushed":
 			var dev := int(args[0]) if args.size() > 0 else 0
 			var key := int(args[1]) if args.size() > 1 else -1
@@ -1897,7 +1901,7 @@ func _dispatch_window_method(win: CsxHostClass.HostWindow, method: String, args:
 		"GetJoyButtonPushed":
 			var key := _to_int(args[0]) if args.size() > 0 else 0
 			var dev := _to_int(args[1]) if args.size() > 1 else 0
-			return win.get_joy_button_pushed(key, dev)
+			return win.get_joy_button_pushed(key, dev, _is_polling_sprite_activation())
 		"IsJoyButtonPushing", "FlushJoyButtonPushed":
 			return 0
 		"UpdateRect":

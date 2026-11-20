@@ -68,7 +68,8 @@ func _run() -> void:
 	print("[3/5] Advancing dialogue until choice selection prompt appears ...")
 	var choice_reached := false
 	var advance_count := 0
-	for f in range(500):
+	const CHOICE_FRAME_BUDGET := 1200
+	for f in range(CHOICE_FRAME_BUDGET):
 		await process_frame
 		if player.host.is_waiting_choice:
 			choice_reached = true
@@ -79,7 +80,7 @@ func _run() -> void:
 			advance_count += 1
 
 	if not choice_reached:
-		printerr("FAIL Did not reach interactive choice in 500 frames (advanced %d times)" % advance_count)
+		printerr("FAIL Did not reach interactive choice in %d frames (advanced %d times)" % [CHOICE_FRAME_BUDGET, advance_count])
 		quit(1)
 		return
 

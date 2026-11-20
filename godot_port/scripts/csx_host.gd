@@ -62,6 +62,7 @@ var advance_requested: bool = false
 var advance_ticks: int = 0
 var advance_query_count: int = 0
 var is_waiting_input: bool = false
+var yield_for_sprite_activation: bool = false
 var is_movie_playing: bool = false
 var current_choices: Array[String] = []
 var is_waiting_choice: bool = false
@@ -267,19 +268,8 @@ class HostInputFilter extends RefCounted:
 	func is_joy_button_pushing(_key: int, _dev: int = 0) -> int:
 		return 0
 
-	func get_joy_button_pushed(key: int, _dev: int = 0) -> int:
-		# print("query key=", key, " adv_ticks=", host.advance_ticks if host else 0)
-		if host != null:
-			if host.advance_ticks > 0 and key == 1:
-				host.advance_ticks -= 1
-				host.is_waiting_input = false
-				return 1
-			if host.auto_advance and key == 1:
-				host.is_waiting_input = false
-				return 1
-			if key == 1:
-				host.is_waiting_input = true
-		return 0
+	func get_joy_button_pushed(key: int, _dev: int = 0, during_activation: bool = false) -> int:
+		return host.poll_advance_button(key, during_activation) if host != null else 0
 
 	func flush_joy_button_pushed(_dev: int = 0, _key: int = -1) -> int:
 		return 0
@@ -959,19 +949,8 @@ class HostWindow extends RefCounted:
 	func lock() -> int:
 		return 0
 
-	func get_joy_button_pushed(key: int, _dev: int = 0) -> int:
-		# print("query key=", key, " adv_ticks=", host.advance_ticks if host else 0)
-		if host != null:
-			if host.advance_ticks > 0 and key == 1:
-				host.advance_ticks -= 1
-				host.is_waiting_input = false
-				return 1
-			if host.auto_advance and key == 1:
-				host.is_waiting_input = false
-				return 1
-			if key == 1:
-				host.is_waiting_input = true
-		return 0
+	func get_joy_button_pushed(key: int, _dev: int = 0, during_activation: bool = false) -> int:
+		return host.poll_advance_button(key, during_activation) if host != null else 0
 
 	func unlock() -> int:
 		return 0
@@ -1084,6 +1063,18 @@ class HostFile extends RefCounted:
 		return 0
 
 
+
+
+func poll_advance_button(key: int, during_activation: bool) -> int:
+	if during_activation:
+		yield_for_sprite_activation = true
+	if key != 1:
+		return 0
+	var pushed := advance_ticks > 0 or auto_advance
+	if advance_ticks > 0:
+		advance_ticks -= 1
+	is_waiting_input = not pushed and not during_activation
+	return 1 if pushed else 0
 
 
 func advance_sprite_animations(delta: float) -> void:

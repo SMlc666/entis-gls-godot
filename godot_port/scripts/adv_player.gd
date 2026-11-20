@@ -781,7 +781,7 @@ func _process(delta: float) -> void:
 
 	# Handle blinking advance indicator
 	indicator_timer += delta * 4.0
-	if host != null and host.is_waiting_input and not host.is_waiting_choice:
+	if host.is_waiting_input and not host.is_waiting_choice:
 		indicator.visible = int(indicator_timer) % 2 == 0
 	else:
 		indicator.visible = false
@@ -791,7 +791,7 @@ func _process(delta: float) -> void:
 		return
 
 	# Auto advance handling
-	if auto_mode and host != null and host.is_waiting_input:
+	if auto_mode and host.is_waiting_input:
 		auto_timer += delta
 		if voice_player != null and voice_player.playing:
 			auto_timer = 0.0
@@ -803,11 +803,14 @@ func _process(delta: float) -> void:
 	if skip_mode and host != null and host.is_waiting_input:
 		_advance_line()
 
+	# Activation checks yield for one frame so the script can recheck the sprite.
+	host.yield_for_sprite_activation = false
+
 	# Run VM steps if not waiting for player input or choices
 	if host != null and not host.is_waiting_input and not host.is_waiting_choice:
 		var executed := 0
 		var limit := steps_per_frame if not skip_mode else steps_per_frame * 3
-		while not host.is_waiting_input and not host.is_waiting_choice and executed < limit and not vm.is_halted:
+		while not host.is_waiting_input and not host.is_waiting_choice and not host.yield_for_sprite_activation and executed < limit and not vm.is_halted:
 			if not vm.step():
 				is_running = false
 				message_label.text = "[color=#e06c75]VM 执行中断: %s[/color]" % vm.last_error
@@ -1675,7 +1678,8 @@ func _process_native_title() -> void:
 			_handle_native_title_return()
 		return
 	var executed := 0
-	while executed < NATIVE_TITLE_STEPS_PER_FRAME and not vm.is_halted:
+	host.yield_for_sprite_activation = false
+	while executed < NATIVE_TITLE_STEPS_PER_FRAME and not vm.is_halted and not host.yield_for_sprite_activation:
 		if not vm.step():
 			is_running = false
 			message_label.text = "[color=#e06c75]标题脚本执行中断: %s[/color]" % vm.last_error
