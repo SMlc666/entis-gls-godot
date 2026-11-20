@@ -20,6 +20,9 @@ func _run() -> void:
 	source_sprite.filename = "FRM_TEST.eri"
 	source_sprite.archive_hint = "fixture.noa"
 	source_sprite.position = Vector2i(31, 47)
+	source_sprite.rev_center = Vector2i(15, 20)
+	source_sprite.magnification = Vector2(0.95, 0.97)
+	source_sprite.message_style = {"id": "ID_FONT_MESSAGE", "font": {"size": "24"}}
 	source_sprite.is_visible = true
 	source_sprite.transparency = 12
 	source_sprite.fields = {"checked": true, "page": 3, "metadata": {"label": "fixture"}}
@@ -43,6 +46,13 @@ func _run() -> void:
 	expect(host.load_object_file(file_name, restored, vm), "The saved fixture must load")
 	expect(restored.type_name == "SaveFixture", "CsxInstance type must round-trip")
 	expect(restored.get_field("counter") == 42, "Primitive CSX fields must round-trip")
+	var old_sprite_document: Dictionary = CsxHostClass.serialize_value(source_sprite)
+	old_sprite_document.erase("rev_center")
+	old_sprite_document.erase("magnification")
+	old_sprite_document.erase("message_style")
+	var old_sprite = CsxHostClass.deserialize_into(null, old_sprite_document)
+	expect(old_sprite.rev_center == Vector2i.ZERO and old_sprite.magnification == Vector2.ONE, "Older sprite saves must use the original default transform")
+
 	var restored_sprite: Variant = restored.get_field("sprite")
 	expect(restored_sprite is CsxHostClass.HostSprite, "HostSprite must restore as a HostSprite")
 	expect(is_same(restored_sprite, restored.get_field("sprite_alias")), "Repeated HostSprite references must preserve object identity")
@@ -50,6 +60,9 @@ func _run() -> void:
 		expect(restored_sprite.filename == "FRM_TEST.eri", "HostSprite filename must round-trip")
 		expect(restored_sprite.archive_hint == "fixture.noa", "HostSprite archive identity must round-trip")
 		expect(restored_sprite.position == Vector2i(31, 47), "HostSprite position must round-trip")
+		expect(restored_sprite.rev_center == Vector2i(15, 20), "HostSprite pivot must round-trip")
+		expect(restored_sprite.magnification.is_equal_approx(Vector2(0.95, 0.97)), "HostSprite magnification must round-trip")
+		expect(restored_sprite.message_style.get("font", {}).get("size") == "24", "HostSprite message style must round-trip")
 		expect(restored_sprite.is_visible and restored_sprite.transparency == 12, "HostSprite visibility state must round-trip")
 		expect(restored_sprite.fields.get("checked") == true, "HostSprite.fields must round-trip")
 		expect(restored_sprite.fields.get("metadata", {}).get("label") == "fixture", "Nested HostSprite.fields must round-trip")

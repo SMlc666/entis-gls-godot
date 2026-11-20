@@ -1984,6 +1984,9 @@ static func _serialize_value_checked(val: Variant, active_stack: Array, depth: i
 				"filename": sprite.filename,
 				"archive_hint": sprite.archive_hint,
 				"position": [sprite.position.x, sprite.position.y],
+				"rev_center": [sprite.rev_center.x, sprite.rev_center.y],
+				"magnification": [sprite.magnification.x, sprite.magnification.y],
+				"message_style": _serialize_value_checked(sprite.message_style, active_stack, depth + 1, state),
 				"size": [sprite.size.x, sprite.size.y],
 				"z_order": sprite.z_order,
 				"is_visible": sprite.is_visible,
@@ -2067,6 +2070,14 @@ static func deserialize_into(target: Variant, data: Variant, vm: RefCounted = nu
 			sprite.archive_hint = str(data.get("archive_hint", ""))
 			var pos: Array = data.get("position", [0, 0])
 			sprite.position = Vector2i(int(pos[0]), int(pos[1])) if pos.size() >= 2 else Vector2i.ZERO
+			var center: Array = data.get("rev_center", [0, 0])
+			sprite.rev_center = Vector2i(int(center[0]), int(center[1])) if center.size() >= 2 else Vector2i.ZERO
+			var magnification: Array = data.get("magnification", [1.0, 1.0])
+			sprite.magnification = Vector2(float(magnification[0]), float(magnification[1])) if magnification.size() >= 2 else Vector2.ONE
+			if data.has("message_style"):
+				var style = deserialize_value(data["message_style"], vm, context)
+				if style is Dictionary:
+					sprite.message_style = style
 			var sprite_size: Array = data.get("size", [0, 0])
 			sprite.size = Vector2i(int(sprite_size[0]), int(sprite_size[1])) if sprite_size.size() >= 2 else Vector2i.ZERO
 			sprite.z_order = int(data.get("z_order", 0))
