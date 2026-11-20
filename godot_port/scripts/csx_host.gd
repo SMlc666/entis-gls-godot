@@ -609,6 +609,16 @@ class HostResourceManager extends RefCounted:
 			btn_spr.is_visible = true
 			btn_spr.transparency = 0
 			parent_sprite.add_sprite(0, btn_spr)
+		for item: Dictionary in page.get("static_texts", []):
+			var text_sprite := HostSprite.new(0, host)
+			text_sprite.fields["form_item_id"] = item["id"]
+			text_sprite.position = Vector2i(item["x"], item["y"])
+			text_sprite.size = Vector2i(item["width"], item["height"])
+			text_sprite.is_visible = true
+			text_sprite.attach_message_style(self, item["style"])
+			text_sprite.output_message(item["text"])
+			parent_sprite.add_sprite(buttons.size() + 1, text_sprite)
+
 		parent_sprite.refresh_command_ids()
 
 		return 1

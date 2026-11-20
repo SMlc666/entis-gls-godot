@@ -1813,9 +1813,47 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 	if native_label != null:
 		native_label.text = sprite.text_content
 		native_label.visible = not sprite.text_content.is_empty()
+		if not sprite.message_style.is_empty() and native_label.get_meta("message_style", {}) != sprite.message_style:
+			_apply_native_text_style(native_label, sprite.message_style)
+			native_label.set_meta("message_style", sprite.message_style)
 	for child_sprite in sprite.children:
 		if child_sprite is CsxHostClass.HostSprite:
 			_sync_native_title_sprite(child_sprite, wrapper, seen, z_max, z_scale, filter_title_depth)
+
+
+func _apply_native_text_style(label: Label, style: Dictionary) -> void:
+	var font: Dictionary = style.get("font", {})
+	var arrange: Dictionary = style.get("arrange", {})
+	var text: Dictionary = style.get("text", {})
+	var shadow: Dictionary = style.get("shadow", {})
+	var face := str(font.get("face", ""))
+	if not face.is_empty():
+		var system_font := SystemFont.new()
+		system_font.font_names = PackedStringArray([face])
+		system_font.font_weight = 700 if font.get("bold") == "true" else 400
+		system_font.font_italic = font.get("italic") == "true"
+		label.add_theme_font_override("font", system_font)
+	var font_size := maxi(1, int(font.get("size", 13)))
+	label.add_theme_font_size_override("font_size", font_size)
+	label.add_theme_color_override("font_color", _native_text_color(text))
+	label.add_theme_color_override("font_shadow_color", _native_text_color(shadow) if not shadow.is_empty() else Color.TRANSPARENT)
+	label.add_theme_constant_override("shadow_offset_x", int(shadow.get("x", 0)))
+	label.add_theme_constant_override("shadow_offset_y", int(shadow.get("y", 0)))
+	label.vertical_alignment = VERTICAL_ALIGNMENT_TOP
+	match arrange.get("align", "left"):
+		"center": label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		"right": label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		_: label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	if arrange.has("line_height"):
+		var metrics := label.get_theme_font("font").get_height(font_size)
+		label.add_theme_constant_override("line_spacing", int(arrange["line_height"]) - roundi(metrics))
+
+
+func _native_text_color(attributes: Dictionary) -> Color:
+	var value := str(attributes.get("color", "00FFFFFFH")).to_upper().trim_suffix("H")
+	var color := Color.hex(((value.hex_to_int() & 0xffffff) << 8) | 0xff)
+	color.a = 1.0 - clampf(float(attributes.get("transparency", 0)) / 256.0, 0.0, 1.0)
+	return color
 
 
 func _on_native_title_button_pressed(sprite: CsxHostClass.HostSprite) -> void:

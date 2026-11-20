@@ -81,6 +81,27 @@ func _run() -> void:
 		expect(child.texture == child.btn_normal_tex, "Child %s texture must switch to normal" % expected_id)
 		print("  Button %s: size=%s, pos=%s, sub-atlas verified" % [expected_id, child.size, child.position])
 
+	var select_page := CsxHostClass.HostSprite.new(11, host)
+	expect(frame_mgr.create_form_page(select_page, "ID_PAGE_ADVSELECT") == 1, "The native choice form must load")
+	var text_sprite: CsxHostClass.HostSprite = null
+	for child in select_page.children:
+		if child.fields.get("form_item_id") == "ID_TEXT":
+			text_sprite = child
+			break
+	expect(text_sprite != null, "The choice form must create its original static text sprite")
+	if text_sprite != null:
+		expect(text_sprite.position == Vector2i(6, 8) and text_sprite.size == Vector2i(565, 36), "Static text must keep its original bounds")
+		expect(text_sprite.message_style.get("id") == "ID_FONT_SELECT", "Static text must use its declared style")
+		expect(text_sprite.text_content == frame_mgr.skin_pages["ID_PAGE_ADVSELECT"]["static_texts"][0]["text"], "Static text must use its declared content")
+		var player = load("res://scenes/adv_player.tscn").instantiate()
+		var label := Label.new()
+		root.add_child(label)
+		player._apply_native_text_style(label, text_sprite.message_style)
+		expect(label.get_theme_font_size("font_size") == int(text_sprite.message_style["font"]["size"]), "The native canvas must use the declared font size")
+		expect(label.get_theme_constant("shadow_offset_y") == int(text_sprite.message_style["shadow"]["y"]), "The native canvas must use the declared shadow offset")
+		label.free()
+		player.free()
+
 	print("[4/5] Testing VM execution of native Title() with Command Injection ...")
 	var vm := CsxVMReader.new(host)
 	var load_res := vm.load_csx(game_dir.path_join("system/yosuga.csx"))
@@ -117,6 +138,7 @@ func _run() -> void:
 	# Inject ID_START into host command queue
 	host.push_command("ID_START")
 	while steps < 6000 and not vm.is_halted:
+		host.advance_sprite_animations(1.0 / 60.0)
 		if not vm.step():
 			break
 		steps += 1
