@@ -1067,6 +1067,12 @@ func _on_dialogue_updated(entry: Dictionary) -> void:
 func _on_message_output(sprite: CsxHostClass.HostSprite) -> void:
 	if not is_initialized or is_title_mode or sprite.message_style.get("id") != "ID_FONT_MESSAGE":
 		return
+	message_label.position = Vector2(sprite.position - sprite.rev_center)
+	if sprite.size.x > 0 and sprite.size.y > 0:
+		message_label.size = Vector2(sprite.size)
+	if message_label.get_meta("message_style", {}) != sprite.message_style:
+		_apply_native_text_style(message_label, sprite.message_style)
+		message_label.set_meta("message_style", sprite.message_style)
 	message_label.text = sprite.display_text()
 
 
@@ -1827,21 +1833,26 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 			_sync_native_title_sprite(child_sprite, wrapper, seen, z_max, z_scale, filter_title_depth)
 
 
-func _apply_native_text_style(label: Label, style: Dictionary) -> void:
+func _apply_native_text_style(label: Control, style: Dictionary) -> void:
 	var font: Dictionary = style.get("font", {})
 	var arrange: Dictionary = style.get("arrange", {})
 	var text: Dictionary = style.get("text", {})
 	var shadow: Dictionary = style.get("shadow", {})
+	var rich := label is RichTextLabel
+	var font_key := "normal_font" if rich else "font"
+	var font_size_key := "normal_font_size" if rich else "font_size"
+	var color_key := "default_color" if rich else "font_color"
+	var spacing_key := "line_separation" if rich else "line_spacing"
 	var face := str(font.get("face", ""))
 	if not face.is_empty():
 		var system_font := SystemFont.new()
 		system_font.font_names = PackedStringArray([face])
 		system_font.font_weight = 700 if font.get("bold") == "true" else 400
 		system_font.font_italic = font.get("italic") == "true"
-		label.add_theme_font_override("font", system_font)
+		label.add_theme_font_override(font_key, system_font)
 	var font_size := maxi(1, int(font.get("size", 13)))
-	label.add_theme_font_size_override("font_size", font_size)
-	label.add_theme_color_override("font_color", _native_text_color(text))
+	label.add_theme_font_size_override(font_size_key, font_size)
+	label.add_theme_color_override(color_key, _native_text_color(text))
 	label.add_theme_color_override("font_shadow_color", _native_text_color(shadow) if not shadow.is_empty() else Color.TRANSPARENT)
 	label.add_theme_constant_override("shadow_offset_x", int(shadow.get("x", 0)))
 	label.add_theme_constant_override("shadow_offset_y", int(shadow.get("y", 0)))
@@ -1851,8 +1862,8 @@ func _apply_native_text_style(label: Label, style: Dictionary) -> void:
 		"right": label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 		_: label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	if arrange.has("line_height"):
-		var metrics := label.get_theme_font("font").get_height(font_size)
-		label.add_theme_constant_override("line_spacing", int(arrange["line_height"]) - roundi(metrics))
+		var metrics := label.get_theme_font(font_key).get_height(font_size)
+		label.add_theme_constant_override(spacing_key, int(arrange["line_height"]) - roundi(metrics))
 
 
 func _native_text_color(attributes: Dictionary) -> Color:

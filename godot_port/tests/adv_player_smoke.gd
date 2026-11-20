@@ -56,7 +56,14 @@ func _run() -> void:
 	var native_outputs: Array[Dictionary] = []
 	player.host.message_output.connect(func(sprite):
 		if sprite.message_style.get("id") == "ID_FONT_MESSAGE":
-			native_outputs.append({"raw": sprite.text_content, "displayed": player.message_label.text})
+			var label: RichTextLabel = player.message_label
+			native_outputs.append({
+				"raw": sprite.text_content,
+				"displayed": label.text,
+				"position_matches": label.position == Vector2(sprite.position - sprite.rev_center),
+				"font_matches": label.get_theme_font_size("normal_font_size") == int(sprite.message_style["font"]["size"]),
+				"shadow_matches": label.get_theme_constant("shadow_offset_y") == int(sprite.message_style["shadow"]["y"]),
+			})
 	)
 	var total_frames := 0
 	while dialogues_seen.size() < 16 and total_frames < 800:
@@ -123,6 +130,10 @@ func _run() -> void:
 		var raw: String = output["raw"]
 		if not raw.begins_with(MESSAGE_PREFIX) or output["displayed"] != raw.trim_prefix(MESSAGE_PREFIX):
 			printerr("FAIL Native body text must display without its control prefix")
+			quit(1)
+			return
+		if not output["position_matches"] or not output["font_matches"] or not output["shadow_matches"]:
+			printerr("FAIL Native body text must use the MessageSprite position, font size, and shadow")
 			quit(1)
 			return
 
