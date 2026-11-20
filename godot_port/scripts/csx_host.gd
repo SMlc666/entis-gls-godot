@@ -703,6 +703,12 @@ class HostSprite extends RefCounted:
 		message_style = style
 		return 0
 
+	func clear_message() -> int:
+		text_content = ""
+		if host != null:
+			host.message_output.emit(self)
+		return 0
+
 	func output_message(text: String) -> int:
 		text_content = text
 		if host != null:

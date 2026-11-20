@@ -54,8 +54,11 @@ func _run() -> void:
 	print("[2/4] Advancing scenario lines via simulated player clicks ...")
 	var dialogues_seen: Array[Dictionary] = []
 	var native_outputs: Array[Dictionary] = []
+	var native_names: Array[Dictionary] = []
 	player.host.message_output.connect(func(sprite):
-		if sprite.message_style.get("id") == "ID_FONT_MESSAGE":
+		if sprite.message_style.get("id") == "ID_FONT_NAME" and not sprite.text_content.is_empty():
+			native_names.append({"text": sprite.text_content, "displayed": player.speaker_label.text, "size": player.speaker_label.get_theme_font_size("font_size")})
+		if sprite.message_style.get("id") == "ID_FONT_MESSAGE" and not sprite.text_content.is_empty():
 			var label: RichTextLabel = player.message_label
 			native_outputs.append({
 				"raw": sprite.text_content,
@@ -154,6 +157,16 @@ func _run() -> void:
 		printerr("FAIL Message label is empty")
 		quit(1)
 		return
+
+	if native_names.is_empty():
+		printerr("FAIL Original script must output at least one speaker name")
+		quit(1)
+		return
+	for name in native_names:
+		if name["text"] != name["displayed"] or name["size"] != 32:
+			printerr("FAIL The name label must follow the original MessageSprite")
+			quit(1)
+			return
 
 	# The native message command must update the visible shell with its payload.
 	if not saw_dialogue_scale:

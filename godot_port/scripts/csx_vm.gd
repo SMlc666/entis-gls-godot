@@ -703,9 +703,11 @@ func step() -> bool:
 						last_error = "局部变量索引超出范围：%d" % key
 						return false
 					var var_name: String = frame.local_order[key]
-					eval_stack.append(CsxRef.new(frame.locals, var_name))
+					var local_value: Variant = frame.locals.get(var_name)
+					eval_stack.append(local_value if local_value is CsxRef else CsxRef.new(frame.locals, var_name))
 				else:
-					eval_stack.append(CsxRef.new(frame.locals, str(key)))
+					var local_value: Variant = frame.locals.get(str(key))
+					eval_stack.append(local_value if local_value is CsxRef else CsxRef.new(frame.locals, str(key)))
 			elif mode == 2: # this member
 				var cur_this = _get_current_this()
 				if type_code == 1:
@@ -855,6 +857,9 @@ func step() -> bool:
 						var p_val: Variant = null
 						if i < pending_call_args.size():
 							p_val = pending_call_args[i]
+							var resolved: Variant = resolve_value(p_val)
+							if int(p_info["type"]) != 1 or p_info["name"] == "this" or resolved is RefCounted:
+								p_val = resolved
 						else:
 							p_val = _default_for_type(p_info["type"])
 						frame.add_local(p_info["name"], p_val)
@@ -994,7 +999,7 @@ func step() -> bool:
 					if has_function(full_name):
 						pending_return_ip = ip
 						ip = get_function_address(full_name)
-						pending_call_args = [inst] + method_args
+						pending_call_args = [inst] + args.slice(1)
 						return true
 					elif inst.type_name == "InputFilter":
 						var f_dummy := CsxHostClass.HostInputFilter.new(host)
@@ -1179,13 +1184,13 @@ func step() -> bool:
 						if functions.has(full_name):
 							pending_return_ip = ip
 							ip = functions[full_name]
-							pending_call_args = [inst] + resolved_args
+							pending_call_args = [inst] + args
 							return true
 
 				if has_function(func_name):
 					pending_return_ip = ip
 					ip = get_function_address(func_name)
-					pending_call_args = resolved_args
+					pending_call_args = args
 					return true
 
 				var host_res := host.call_host_function(func_name, resolved_args, self)
@@ -1601,6 +1606,8 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 			var res_mgr = args[0] if args.size() > 0 else null
 			var style_id: String = str(args[1]) if args.size() > 1 else ""
 			return spr.attach_message_style(res_mgr, style_id)
+		"ClearMessage":
+			return spr.clear_message()
 		"OutputMessage":
 			var msg: String = str(args[0]) if args.size() > 0 else ""
 			return spr.output_message(msg)

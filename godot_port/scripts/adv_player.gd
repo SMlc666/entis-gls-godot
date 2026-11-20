@@ -1074,10 +1074,7 @@ func _on_video_finished() -> void:
 
 
 func _on_dialogue_updated(entry: Dictionary) -> void:
-	var spk: String = entry.get("speaker", "")
 	var voc: String = entry.get("voice", "")
-
-	speaker_label.text = spk
 	voice_button.visible = not voc.is_empty()
 	auto_timer = 0.0
 
@@ -1087,7 +1084,16 @@ func _on_dialogue_updated(entry: Dictionary) -> void:
 
 
 func _on_message_output(sprite: CsxHostClass.HostSprite) -> void:
-	if not is_initialized or is_title_mode or sprite.message_style.get("id") != "ID_FONT_MESSAGE":
+	if not is_initialized or is_title_mode:
+		return
+	if sprite.message_style.get("id") == "ID_FONT_NAME":
+		speaker_label.position = Vector2(sprite.position - sprite.rev_center)
+		if speaker_label.get_meta("message_style", {}) != sprite.message_style:
+			_apply_native_text_style(speaker_label, sprite.message_style)
+			speaker_label.set_meta("message_style", sprite.message_style)
+		speaker_label.text = sprite.display_text()
+		return
+	if sprite.message_style.get("id") != "ID_FONT_MESSAGE":
 		return
 	message_label.position = Vector2(sprite.position - sprite.rev_center)
 	if sprite.size.x > 0 and sprite.size.y > 0:
