@@ -638,6 +638,8 @@ class HostSprite extends RefCounted:
 	var transparency: int = 0 # 0 = opaque, 256 = transparent
 	var blending: int = 0
 	var position: Vector2i = Vector2i.ZERO
+	var magnification: Vector2 = Vector2.ONE
+	var activation_curves: Array = [[], [], []]
 	var rev_center: Vector2i = Vector2i.ZERO
 	var size: Vector2i = Vector2i.ZERO
 	var z_order: int = 0
@@ -757,6 +759,7 @@ class HostSprite extends RefCounted:
 		activation_duration_ms = float(duration_ms)
 		activation_elapsed_ms = 0.0
 		is_activating = true
+		_apply_activation_curves(0.0)
 		if duration_ms <= 0 or host == null:
 			flush_activation()
 			return
@@ -769,9 +772,25 @@ class HostSprite extends RefCounted:
 			return
 		var progress := activation_elapsed_ms / activation_duration_ms
 		transparency = roundi(lerpf(activation_start_alpha, activation_end_alpha, progress))
+		_apply_activation_curves(progress)
+
+	func _apply_activation_curves(progress: float) -> void:
+		for index in [0, 2]:
+			var points: Array = activation_curves[index]
+			if points.size() != 4:
+				continue
+			var inverse := 1.0 - progress
+			var value: Vector2 = points[0] * inverse * inverse * inverse + points[1] * 3.0 * inverse * inverse * progress + points[2] * 3.0 * inverse * progress * progress + points[3] * progress * progress * progress
+			if index == 0:
+				position = Vector2i(roundi(value.x), roundi(value.y))
+			else:
+				magnification = value
 
 	func flush_activation() -> void:
 		transparency = activation_end_alpha if is_activating else clampi(blending, 0, 256)
+		if is_activating:
+			_apply_activation_curves(1.0)
+		activation_curves = [[], [], []]
 		is_activating = false
 		if host != null:
 			host.active_sprites.erase(get_instance_id())

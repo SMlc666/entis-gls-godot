@@ -1478,6 +1478,22 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 			if args.size() > 0:
 				spr.set_transparency(_to_int(args[0]))
 			return 0
+		"SetBezierCurve":
+			spr.activation_curves = [[], [], []]
+			for index in mini(args.size(), 3):
+				var curve = args[index]
+				if not curve is CsxInstance:
+					continue
+				var source = curve.get_field("parent")
+				if not source is Array or source.size() != 4:
+					continue
+				var points: Array[Vector2] = []
+				for point in source:
+					if point is CsxInstance:
+						points.append(Vector2(_to_float(point.get_field("x")), _to_float(point.get_field("y"))))
+				if points.size() == 4:
+					spr.activation_curves[index] = points
+			return 0
 		"SetBlendingEnvelope":
 			if args.size() > 0:
 				spr.set_blending_envelope(_to_int(args[0]))
@@ -1920,6 +1936,12 @@ func _dispatch_window_method(win: CsxHostClass.HostWindow, method: String, args:
 
 
 func _apply_operate(op: int, a: Variant, b: Variant) -> Variant:
+	if a is CsxInstance and a.type_name == "Vector2D" and op in [0, 1, 2, 3]:
+		var result := CsxInstance.new("Vector2D")
+		for field in ["x", "y"]:
+			var right: Variant = b.get_field(field) if b is CsxInstance and b.type_name == "Vector2D" else b
+			result.set_field(field, _apply_operate(op, a.get_field(field), right))
+		return result
 	match op:
 		0: # Add
 			if a is Array:

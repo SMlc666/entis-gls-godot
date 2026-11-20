@@ -67,10 +67,12 @@ func _run() -> void:
 	)
 	var elapsed := 0.0
 	var saw_activation_poll := false
+	var saw_dialogue_scale := false
 	while (native_outputs.is_empty() or not player.host.is_waiting_input) and elapsed < 8.0:
 		await process_frame
 		elapsed += player.get_process_delta_time()
 		saw_activation_poll = saw_activation_poll or player.host.yield_for_sprite_activation
+		saw_dialogue_scale = saw_dialogue_scale or (player.dialogue_box.scale.x < 1.0 and player.dialogue_box.scale.x >= 0.95)
 	if native_outputs.is_empty() or not player.host.is_waiting_input:
 		printerr("FAIL The opening animation must finish without a click and reach the first dialogue wait")
 		quit(1)
@@ -113,6 +115,7 @@ func _run() -> void:
 				])
 
 		saw_activation_poll = saw_activation_poll or player.host.yield_for_sprite_activation
+		saw_dialogue_scale = saw_dialogue_scale or (player.dialogue_box.scale.x < 1.0 and player.dialogue_box.scale.x >= 0.95)
 		if player.host != null and player.host.is_waiting_input:
 			player._advance_line()
 
@@ -153,6 +156,10 @@ func _run() -> void:
 		return
 
 	# The native message command must update the visible shell with its payload.
+	if not saw_dialogue_scale:
+		printerr("FAIL Expected the native dialogue box scale animation")
+		quit(1)
+		return
 	if not saw_activation_poll:
 		printerr("FAIL Expected to observe at least one native activation input poll")
 		quit(1)

@@ -777,6 +777,7 @@ func _process(delta: float) -> void:
 		return
 
 	host.advance_sprite_animations(delta)
+	_update_native_dialogue_transform()
 	_update_bustups()
 
 	# Handle blinking advance indicator
@@ -934,6 +935,21 @@ func _advance_line() -> void:
 		host.advance_ticks = 1
 		host.is_waiting_input = false
 		auto_timer = 0.0
+
+
+func _update_native_dialogue_transform() -> void:
+	if vm == null or vm.data_vars.size() <= 4 or dialogue_box == null:
+		return
+	var window = vm.data_vars[4].get("value", null)
+	if not window is CsxHostClass.HostWindow:
+		return
+	for sprite in window.root_sprites:
+		for child in sprite.children:
+			if child.message_style.get("id") == "ID_FONT_MESSAGE":
+				dialogue_box.pivot_offset = Vector2(sprite.rev_center)
+				dialogue_box.scale = sprite.magnification
+				dialogue_box.modulate.a = 1.0 - float(sprite.transparency) / 256.0
+				return
 
 
 func _update_bustups() -> void:
@@ -1796,6 +1812,8 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 	elif wrapper.get_parent() != parent:
 		wrapper.reparent(parent)
 	wrapper.position = Vector2(sprite.position)
+	wrapper.pivot_offset = Vector2(sprite.rev_center)
+	wrapper.scale = sprite.magnification
 	var display_text := sprite.display_text()
 	var fallback_size := Vector2(72, 22) if not display_text.is_empty() else Vector2.ZERO
 	if sprite.is_button:
