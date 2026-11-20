@@ -182,9 +182,15 @@ func _run() -> void:
 
 	start_button.emit_signal("pressed")
 	var transition_seconds := 0.0
+	var saw_start_fade := false
 	while player.is_title_mode and transition_seconds < 5.0:
 		await process_frame
 		transition_seconds += player.get_process_delta_time()
+		for sprite in native_window.root_sprites:
+			if sprite.is_activating and sprite.activation_duration_ms == 3000.0 and sprite.transparency > 0 and sprite.transparency < 256:
+				saw_start_fade = true
+				break
+	if not _require(saw_start_fade, "Native Start must render an intermediate frame of the scripted fade"): return
 	if not _require(not player.is_title_mode, "Native ID_START must leave the title screen"): return
 	if not _require(player.is_running, "ID_START must start the scenario loop"): return
 	var timeout_result: Dictionary = player.vm.call_function_sync("Title", [], 1)
