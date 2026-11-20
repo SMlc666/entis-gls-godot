@@ -1,0 +1,26 @@
+# Original game data: keep NOA/CSX archives outside version control.
+*.noa
+*.csx
+
+# Godot generated editor/import cache and local exports.
+**/.godot/
+**/.import/
+/export.cfg
+/exported/
+
+# Local tools and build outputs.
+godot_port/.tools/
+godot_port/tools/bin/linux/
+godot_port/android/libs/
+*.so
+*.dll
+*.dylib
+*.apk
+*.aab
+
+# Local runtime data and logs.
+*.log
+.DS_Store
+
+# Original game installation and backups are local-only.
+/缘之空（全cg步兵版）/

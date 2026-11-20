@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=缘之空 (Yosuga no Sora)
+Comment=《缘之空》Godot 原生移植版
+Exec=/mnt/sdb1/devs/yzk2godot/play.sh
+Path=/mnt/sdb1/devs/yzk2godot
+Icon=applications-games
+Terminal=false
+Categories=Game;
