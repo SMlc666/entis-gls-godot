@@ -863,6 +863,9 @@ func _gui_input(event: InputEvent) -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_CTRL:
+		if host != null and not _is_story_paused():
+			host.skip_input_pending = true
 	if event is InputEventKey and event.pressed:
 		if event.keycode == KEY_ESCAPE:
 			if is_title_mode and native_appreciation_mode:

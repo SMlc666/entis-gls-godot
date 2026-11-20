@@ -1902,8 +1902,10 @@ func _dispatch_window_method(win: CsxHostClass.HostWindow, method: String, args:
 			var key := _to_int(args[0]) if args.size() > 0 else 0
 			var dev := _to_int(args[1]) if args.size() > 1 else 0
 			return win.get_joy_button_pushed(key, dev, _is_polling_sprite_activation())
-		"IsJoyButtonPushing", "FlushJoyButtonPushed":
+		"IsJoyButtonPushing":
 			return 0
+		"FlushJoyButtonPushed":
+			return win.flush_joy_button_pushed()
 		"UpdateRect":
 			return win.update_rect()
 		"GetCommand":

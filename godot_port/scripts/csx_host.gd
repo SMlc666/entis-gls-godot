@@ -60,6 +60,7 @@ var current_env_se: String = ""
 var auto_advance: bool = false
 var advance_requested: bool = false
 var advance_ticks: int = 0
+var skip_input_pending: bool = false
 var advance_query_count: int = 0
 var is_waiting_input: bool = false
 var yield_for_sprite_activation: bool = false
@@ -272,6 +273,8 @@ class HostInputFilter extends RefCounted:
 		return host.poll_advance_button(key, during_activation) if host != null else 0
 
 	func flush_joy_button_pushed(_dev: int = 0, _key: int = -1) -> int:
+		if host != null:
+			host.skip_input_pending = false
 		return 0
 
 	func reset_joy_button_pushing(_dev: int = 0, _key: int = -1) -> int:
@@ -966,6 +969,8 @@ class HostWindow extends RefCounted:
 		return 0
 
 	func flush_joy_button_pushed() -> int:
+		if host != null:
+			host.skip_input_pending = false
 		return 0
 
 	func flush_command_queue(_flag: int = -1) -> int:
@@ -1068,6 +1073,10 @@ class HostFile extends RefCounted:
 func poll_advance_button(key: int, during_activation: bool) -> int:
 	if during_activation:
 		yield_for_sprite_activation = true
+	if key == 4:
+		var skip_pressed := skip_input_pending
+		skip_input_pending = false
+		return 1 if skip_pressed else 0
 	if key != 1:
 		return 0
 	var pushed := advance_ticks > 0 or auto_advance
