@@ -181,10 +181,10 @@ func _run() -> void:
 	if not _require(start_button.texture_normal == start_sprite.btn_normal_tex, "ID_START must use the original button texture"): return
 
 	start_button.emit_signal("pressed")
-	frames = 0
-	while player.is_title_mode and frames < 60:
+	var transition_seconds := 0.0
+	while player.is_title_mode and transition_seconds < 5.0:
 		await process_frame
-		frames += 1
+		transition_seconds += player.get_process_delta_time()
 	if not _require(not player.is_title_mode, "Native ID_START must leave the title screen"): return
 	if not _require(player.is_running, "ID_START must start the scenario loop"): return
 	var timeout_result: Dictionary = player.vm.call_function_sync("Title", [], 1)

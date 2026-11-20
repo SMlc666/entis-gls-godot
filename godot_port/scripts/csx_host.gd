@@ -68,6 +68,7 @@ var selected_choice: int = -1
 var current_tone_filter: String = "NORMAL"
 var command_queue: Array = []
 var virtual_time_ms: int = 1000
+var active_sprites: Dictionary[int, WeakRef] = {}
 var save_dir: String = "user://saves"
 const SAVE_SCHEMA_VERSION := 2
 const MAX_SAVE_DOCUMENT_BYTES := 16 * 1024 * 1024
@@ -423,6 +424,9 @@ class HostResourceManager extends RefCounted:
 				elif nname == "arrange":
 					if not current_style.is_empty():
 						current_style["arrange_type"] = attrs.get("type", "")
+						current_style["arrange"] = attrs
+				elif nname in ["font", "text", "shadow"] and not current_style.is_empty():
+					current_style[nname] = attrs
 				elif nname in ["normal", "pushed", "focus", "disabled", "mask", "tracking"]:
 					if not current_style.is_empty():
 						if attrs.has("image"):
@@ -639,8 +643,13 @@ class HostSprite extends RefCounted:
 	var image: Image = null
 	var texture: ImageTexture = null
 	var is_activating: bool = false
+	var activation_duration_ms: float = 0.0
+	var activation_elapsed_ms: float = 0.0
+	var activation_start_alpha: int = 0
+	var activation_end_alpha: int = 0
 	var children: Array[HostSprite] = []
 	var text_content: String = ""
+	var message_style: Dictionary = {}
 	var btn_id: String = ""
 	var full_btn_id: String = ""
 	var is_button: bool = false
@@ -679,7 +688,13 @@ class HostSprite extends RefCounted:
 					texture = btn_normal_tex
 					if btn_normal_img != null: image = btn_normal_img
 
-	func attach_message_style(_res_mgr: Variant, _style_id: String) -> int:
+	func attach_message_style(res_mgr: Variant, style_id: String) -> int:
+		if not (res_mgr is HostResourceManager):
+			return 0
+		var style: Dictionary = res_mgr.skin_styles.get(style_id, {})
+		if style.get("type", "") != "static_text":
+			return 0
+		message_style = style
 		return 0
 
 	func output_message(text: String) -> int:
@@ -725,13 +740,30 @@ class HostSprite extends RefCounted:
 	func set_blending_envelope(b: int) -> void:
 		blending = b
 
-	func begin_activation(_duration_ms: int) -> void:
-		is_activating = false
-		transparency = blending
+	func begin_activation(duration_ms: int) -> void:
+		activation_start_alpha = transparency
+		activation_end_alpha = clampi(blending, 0, 256)
+		activation_duration_ms = float(duration_ms)
+		activation_elapsed_ms = 0.0
+		is_activating = true
+		if duration_ms <= 0 or host == null:
+			flush_activation()
+			return
+		host.active_sprites[get_instance_id()] = weakref(self)
+
+	func advance_activation(delta_ms: float) -> void:
+		activation_elapsed_ms += delta_ms
+		if activation_elapsed_ms >= activation_duration_ms:
+			flush_activation()
+			return
+		var progress := activation_elapsed_ms / activation_duration_ms
+		transparency = roundi(lerpf(activation_start_alpha, activation_end_alpha, progress))
 
 	func flush_activation() -> void:
+		transparency = activation_end_alpha if is_activating else clampi(blending, 0, 256)
 		is_activating = false
-		transparency = blending
+		if host != null:
+			host.active_sprites.erase(get_instance_id())
 
 	func is_activation() -> int:
 		return -1 if is_activating else 0
@@ -765,6 +797,9 @@ class HostSprite extends RefCounted:
 		children.clear()
 
 	func release() -> int:
+		is_activating = false
+		if host != null:
+			host.active_sprites.erase(get_instance_id())
 		is_visible = false
 		attached_resource = null
 		image = null
@@ -1031,6 +1066,15 @@ class HostFile extends RefCounted:
 		return 0
 
 
+
+
+func advance_sprite_animations(delta: float) -> void:
+	for sprite_id in active_sprites.keys():
+		var sprite := active_sprites[sprite_id].get_ref() as HostSprite
+		if sprite == null:
+			active_sprites.erase(sprite_id)
+		else:
+			sprite.advance_activation(delta * 1000.0)
 
 
 func push_command(cmd: String, full_id: String = "") -> void:

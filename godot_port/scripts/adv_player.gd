@@ -769,11 +769,13 @@ func _process(delta: float) -> void:
 	if is_title_mode:
 		if not is_running or is_appreciation_open or is_config_open or is_save_load_open or confirm_panel.visible:
 			return
+		host.advance_sprite_animations(delta)
 		_process_native_title()
 		return
 	if _is_story_paused():
 		return
 
+	host.advance_sprite_animations(delta)
 	_update_bustups()
 
 	# Handle blinking advance indicator

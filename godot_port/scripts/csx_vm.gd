@@ -218,6 +218,7 @@ var call_stack: Array[StackFrame] = []
 var pending_call_args: Array = []
 var pending_return_ip: int = -1
 var is_halted: bool = true
+var is_synchronous_call: bool = false
 var last_return_value: Variant = null
 var last_error := ""
 var executed_instructions: int = 0
@@ -552,6 +553,8 @@ func call_address_sync(address: int, args: Array, max_steps: int = 1_000_000) ->
 	call_stack.clear()
 	eval_stack.clear()
 
+	var was_synchronous := is_synchronous_call
+	is_synchronous_call = true
 	var steps := 0
 	while not is_halted and steps < max_steps:
 		if not step():
@@ -565,6 +568,7 @@ func call_address_sync(address: int, args: Array, max_steps: int = 1_000_000) ->
 			pending_return_ip = saved_pending_ret
 			call_stack = saved_call_stack
 			eval_stack = saved_eval_stack
+			is_synchronous_call = was_synchronous
 			return {"ok": false, "error": err, "ip": fail_ip, "steps": steps, "stack": st}
 		steps += 1
 
@@ -578,6 +582,7 @@ func call_address_sync(address: int, args: Array, max_steps: int = 1_000_000) ->
 	pending_return_ip = saved_pending_ret
 	call_stack = saved_call_stack
 	eval_stack = saved_eval_stack
+	is_synchronous_call = was_synchronous
 	if timed_out:
 		last_error = "同步调用超过步数上限 (%d) @ 0x%X" % [max_steps, timeout_ip]
 		return {"ok": false, "timeout": true, "error": last_error, "ip": timeout_ip, "steps": steps, "stack": timeout_stack}
@@ -1479,12 +1484,15 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 			return 0
 		"BeginActivation":
 			if args.size() > 0:
-				spr.begin_activation(_to_int(args[0]))
+				# Blocking entry points cannot present intermediate frames.
+				spr.begin_activation(0 if is_synchronous_call else _to_int(args[0]))
 			return 0
 		"FlushActivation":
 			spr.flush_activation()
 			return 0
 		"IsActivation":
+			if is_synchronous_call and spr.is_activating:
+				spr.flush_activation()
 			return spr.is_activation()
 		"IsVisible":
 			return -1 if spr.is_visible else 0
