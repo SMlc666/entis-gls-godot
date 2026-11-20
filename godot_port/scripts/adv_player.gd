@@ -703,6 +703,7 @@ func _start_engine() -> void:
 	_apply_config_state()
 
 	host.dialogue_updated.connect(_on_dialogue_updated)
+	host.message_output.connect(_on_message_output)
 	host.bg_updated.connect(_on_bg_updated)
 	host.choices_updated.connect(_on_choices_updated)
 	host.movie_requested.connect(_on_movie_requested)
@@ -1052,17 +1053,21 @@ func _on_video_finished() -> void:
 
 func _on_dialogue_updated(entry: Dictionary) -> void:
 	var spk: String = entry.get("speaker", "")
-	var txt: String = entry.get("text", "")
 	var voc: String = entry.get("voice", "")
 
 	speaker_label.text = spk
-	message_label.text = txt
 	voice_button.visible = not voc.is_empty()
 	auto_timer = 0.0
 
 	# Check background texture
 	if host != null and host.current_bg_texture != null and bg_rect.texture != host.current_bg_texture:
 		bg_rect.texture = host.current_bg_texture
+
+
+func _on_message_output(sprite: CsxHostClass.HostSprite) -> void:
+	if not is_initialized or is_title_mode or sprite.message_style.get("id") != "ID_FONT_MESSAGE":
+		return
+	message_label.text = sprite.display_text()
 
 
 func _on_bg_updated(bg_name: String, texture: Texture2D) -> void:
@@ -1778,7 +1783,8 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 	elif wrapper.get_parent() != parent:
 		wrapper.reparent(parent)
 	wrapper.position = Vector2(sprite.position)
-	var fallback_size := Vector2(72, 22) if not sprite.text_content.is_empty() else Vector2.ZERO
+	var display_text := sprite.display_text()
+	var fallback_size := Vector2(72, 22) if not display_text.is_empty() else Vector2.ZERO
 	if sprite.is_button:
 		fallback_size = Vector2(127, 24)
 	wrapper.size = Vector2(sprite.size) if sprite.size.x > 0 and sprite.size.y > 0 else fallback_size
@@ -1811,8 +1817,8 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 		native_texture.visible = sprite.texture != null
 	var native_label: Label = wrapper.get_node_or_null("NativeText")
 	if native_label != null:
-		native_label.text = sprite.text_content
-		native_label.visible = not sprite.text_content.is_empty()
+		native_label.text = display_text
+		native_label.visible = not display_text.is_empty()
 		if not sprite.message_style.is_empty() and native_label.get_meta("message_style", {}) != sprite.message_style:
 			_apply_native_text_style(native_label, sprite.message_style)
 			native_label.set_meta("message_style", sprite.message_style)

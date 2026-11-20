@@ -53,6 +53,11 @@ func _run() -> void:
 
 	print("[2/4] Advancing scenario lines via simulated player clicks ...")
 	var dialogues_seen: Array[Dictionary] = []
+	var native_outputs: Array[Dictionary] = []
+	player.host.message_output.connect(func(sprite):
+		if sprite.message_style.get("id") == "ID_FONT_MESSAGE":
+			native_outputs.append({"raw": sprite.text_content, "displayed": player.message_label.text})
+	)
 	var total_frames := 0
 	while dialogues_seen.size() < 16 and total_frames < 800:
 		await process_frame
@@ -107,6 +112,19 @@ func _run() -> void:
 		printerr("FAIL Message label is empty")
 		quit(1)
 		return
+
+	# The native message command must update the visible shell with its payload.
+	if native_outputs.size() < 10:
+		printerr("FAIL Expected at least 10 native body text commands")
+		quit(1)
+		return
+	const MESSAGE_PREFIX := "\\s:\\h:\\nb\\ni\\f:"
+	for output in native_outputs:
+		var raw: String = output["raw"]
+		if not raw.begins_with(MESSAGE_PREFIX) or output["displayed"] != raw.trim_prefix(MESSAGE_PREFIX):
+			printerr("FAIL Native body text must display without its control prefix")
+			quit(1)
+			return
 
 	# Check audio players
 	print("  EnvSE playing stream: %s" % str(player.env_se_player.stream))

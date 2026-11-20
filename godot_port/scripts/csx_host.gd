@@ -2,6 +2,7 @@ extends RefCounted
 class_name CsxHost
 
 signal dialogue_updated(entry: Dictionary)
+signal message_output(sprite: HostSprite)
 signal bg_updated(bg_name: String, texture: Texture2D)
 signal bgm_updated(bgm_name: String)
 signal movie_requested(movie_file: String)
@@ -616,7 +617,7 @@ class HostResourceManager extends RefCounted:
 			text_sprite.size = Vector2i(item["width"], item["height"])
 			text_sprite.is_visible = true
 			text_sprite.attach_message_style(self, item["style"])
-			text_sprite.output_message(item["text"])
+			text_sprite.text_content = item["text"]
 			parent_sprite.add_sprite(buttons.size() + 1, text_sprite)
 
 		parent_sprite.refresh_command_ids()
@@ -709,7 +710,14 @@ class HostSprite extends RefCounted:
 
 	func output_message(text: String) -> int:
 		text_content = text
+		if host != null:
+			host.message_output.emit(self)
 		return 0
+
+	func display_text() -> String:
+		# MessageFrame sends this exact leading sequence before dialogue.
+		# Retain the raw text for CSX and save data.
+		return text_content.trim_prefix("\\s:\\h:\\nb\\ni\\f:")
 
 	func load_image(p_filename: String) -> int:
 		filename = p_filename
