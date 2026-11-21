@@ -14,6 +14,7 @@ signal message_progress(sprite: HostSprite)
 signal bg_updated(bg_name: String, texture: Texture2D)
 signal bgm_updated(bgm_name: String)
 signal movie_requested(movie_file: String)
+signal movie_stop_requested
 signal choices_updated(choices: Array)
 signal tone_filter_updated(filter_type: String)
 
@@ -1746,13 +1747,13 @@ class HostSprite extends RefCounted:
 
 	func open_movie(p_filename: String) -> int:
 		filename = p_filename
-		if host != null:
-			print("[CSX Host] OpenMovie requested: %s" % p_filename)
-			host.emit_signal("movie_requested", p_filename)
-		return 1
+		return 1 if not filename.is_empty() else 0
 
 	func play_movie(_mode: int = 0) -> int:
-		return 0
+		if host == null or filename.is_empty():
+			return 0
+		host.emit_signal("movie_requested", filename)
+		return 1
 
 	func is_movie_playing() -> int:
 		if host != null and host.is_movie_playing:
@@ -1762,11 +1763,12 @@ class HostSprite extends RefCounted:
 	func stop_movie() -> int:
 		if host != null:
 			host.is_movie_playing = false
+			host.emit_signal("movie_stop_requested")
 		return 0
 
 	func close_movie() -> int:
-		if host != null:
-			host.is_movie_playing = false
+		stop_movie()
+		filename = ""
 		return 0
 
 

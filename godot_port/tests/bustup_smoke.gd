@@ -126,7 +126,20 @@ func _run() -> void:
 	expect(scObj.fields.get("isLoad") == -1, "scObj.isLoad should be -1 after quick load")
 	print("  QuickLoad restored scenario state successfully!")
 
-	# Video Fallback test
+	# Movie host lifecycle: OpenMovie selects the source; PlayMovie starts it.
+	var movie_sprite := CsxHostClass.HostSprite.new(9801, host)
+	var movie_requests: Array[String] = []
+	var stop_requests := [0]
+	host.movie_requested.connect(func(filename: String): movie_requests.append(filename))
+	host.movie_stop_requested.connect(func(): stop_requests[0] += 1)
+	expect(movie_sprite.open_movie("opening.mei") == 1, "OpenMovie must retain the original MEI path")
+	expect(movie_requests.is_empty(), "OpenMovie must not start playback before PlayMovie")
+	expect(movie_sprite.play_movie() == 1 and movie_requests == ["opening.mei"], "PlayMovie must dispatch the selected original movie to the host")
+	movie_sprite.stop_movie()
+	expect(stop_requests[0] == 1 and not host.is_movie_playing, "StopMovie must stop host playback and clear its state")
+	movie_sprite.close_movie()
+	expect(movie_sprite.filename.is_empty() and stop_requests[0] == 2, "CloseMovie must stop playback and release the selected path")
+	# Unsupported MEI decoding must still finish safely without hanging.
 	player._on_movie_requested("opening.mei")
 	expect(not host.is_movie_playing, "Proprietary MEI movie should safely fallback/skip without hanging")
 	print("  Movie fallback handled gracefully!")

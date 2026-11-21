@@ -711,6 +711,7 @@ func _start_engine() -> void:
 	host.bg_updated.connect(_on_bg_updated)
 	host.choices_updated.connect(_on_choices_updated)
 	host.movie_requested.connect(_on_movie_requested)
+	host.movie_stop_requested.connect(_on_movie_stop_requested)
 	host.tone_filter_updated.connect(_on_tone_filter_updated)
 	_apply_dialogue_skin()
 	_apply_config_skin()
@@ -1088,6 +1089,14 @@ func _on_video_finished() -> void:
 	if host != null:
 		host.is_movie_playing = false
 	print("[AdvPlayer] Video playback finished.")
+
+
+func _on_movie_stop_requested() -> void:
+	if video_player != null:
+		video_player.stop()
+		video_player.visible = false
+	if host != null:
+		host.is_movie_playing = false
 
 
 func _on_dialogue_updated(entry: Dictionary) -> void:

@@ -10,7 +10,8 @@ const AUDITED_METHODS := [
 	"Stop", "Pause", "Restart", "Release", "SetVolume", "SetVolumeEnvelope",
 	"CancelVolumeEnvelope", "GetSoundInfo", "GetWaveData", "LoadMidi", "SaveImage",
 	"GetPixel", "GetPixelRect", "SetPixelRect", "GetInfo", "GetImageInfo",
-	"SetEffectParameter", "SetMeshWarpEffect",
+	"SetEffectParameter", "SetMeshWarpEffect", "OpenMovie", "PlayMovie",
+	"IsMoviePlaying", "StopMovie", "CloseMovie",
 ]
 
 const EFFECT_TYPES := [
@@ -35,6 +36,7 @@ func _initialize() -> void:
 
 	var calls: Dictionary = {}
 	var callsites: Dictionary = {}
+	var movie_callsites: Dictionary = {}
 	var effect_literals: Dictionary = {}
 	var cursor := 0
 	while cursor < vm.image.size():
@@ -60,6 +62,8 @@ func _initialize() -> void:
 			calls[key] = int(calls.get(key, 0)) + 1
 			if method_name == "SetEffectParameter":
 				callsites[int(instruction["address"])] = _function_owner(vm.functions, int(instruction["address"]))
+			if method_name in ["OpenMovie", "PlayMovie", "IsMoviePlaying", "StopMovie", "CloseMovie"]:
+				movie_callsites[int(instruction["address"])] = "%s mode=%d" % [_function_owner(vm.functions, int(instruction["address"])), mode]
 		cursor = int(batch.get("next_address", cursor))
 		if cursor <= 0:
 			push_error("CSX decoder failed to advance")
@@ -82,6 +86,11 @@ func _initialize() -> void:
 	print("Effect type literals:")
 	for effect_type in literal_names:
 		print("  %s count=%d" % [effect_type, effect_literals[effect_type]])
+	var movie_addresses: Array = movie_callsites.keys()
+	movie_addresses.sort()
+	print("Movie callsites:")
+	for address in movie_addresses:
+		print("  0x%X %s" % [address, movie_callsites[address]])
 	quit(0)
 
 
