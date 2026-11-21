@@ -106,9 +106,9 @@ func _run() -> void:
 	player._sync_native_title_sprite(effect_sprite, player.native_title_canvas, {}, false)
 	if not _require(effect_material.get_shader_parameter("effect_mode") == 9 and effect_material.get_shader_parameter("shading_levels_ready") == true and effect_texture.get_meta("native_shading_levels")[1] == cached_second_level, "ShadingLight must reuse the native filtered levels"): return
 	var tile_sprite := CsxHostClass.HostSprite.new(9002, player.host)
-	tile_sprite.size = Vector2i(800, 600)
 	var original_tile_texture: Texture2D = start_sprite.btn_normal_tex if start_sprite.btn_normal_tex != null else start_sprite.texture
 	if not _require(original_tile_texture != null, "TileImage validation must use a texture loaded from the original game resources"): return
+	tile_sprite.size = Vector2i(original_tile_texture.get_size())
 	tile_sprite.texture = original_tile_texture
 	tile_sprite.image = original_tile_texture.get_image()
 	var tile_effect := CsxVMClass.CsxInstance.new("EffectParam")

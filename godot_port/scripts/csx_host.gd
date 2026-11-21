@@ -1990,19 +1990,20 @@ func advance_sprite_animations(delta: float) -> void:
 		if steps <= 0:
 			continue
 		if effect_type == "TileImage":
-			if (sprite_animation_flags & 4) == 0 or sprite.size.x <= 0 or sprite.size.y <= 0:
+			var tile_view_size := sprite.get_render_size()
+			if (sprite_animation_flags & 4) == 0 or tile_view_size.x <= 0 or tile_view_size.y <= 0:
 				continue
 			var scroll: Vector2i = sprite.fields.get("effect_scroll", Vector2i.ZERO)
 			var speed: Vector2i = sprite.fields.get("effect_scroll_speed", Vector2i.ZERO)
 			scroll += speed * steps
 			if speed.x > 0:
-				scroll.x = posmod(scroll.x, sprite.size.x) - sprite.size.x
+				scroll.x = posmod(scroll.x, tile_view_size.x) - tile_view_size.x
 			elif speed.x < 0:
-				scroll.x = posmod(scroll.x, sprite.size.x)
+				scroll.x = posmod(scroll.x, tile_view_size.x)
 			if speed.y > 0:
-				scroll.y = posmod(scroll.y, sprite.size.y) - sprite.size.y
+				scroll.y = posmod(scroll.y, tile_view_size.y) - tile_view_size.y
 			elif speed.y < 0:
-				scroll.y = posmod(scroll.y, sprite.size.y)
+				scroll.y = posmod(scroll.y, tile_view_size.y)
 			sprite.fields["effect_scroll"] = scroll
 		elif (sprite_animation_flags & 4) != 0:
 			var degree := sprite.blending + steps * int(sprite.fields.get("effect_degree_step", 0))

@@ -45,11 +45,13 @@ func _initialize() -> void:
 	tile_effect.set_field("ptSpeed", tile_speed)
 	tile_effect.set_field("nInterval", 100)
 	tile_effect.set_field("nDegreeStep", 0)
-	sprite.size = Vector2i(800, 600)
+	# The CSX sprite remains at source-image dimensions; TileImage's sizeView
+	# defines the tiled viewport and therefore the scroll wrap boundary.
+	sprite.size = Vector2i(96, 36)
 	if sprite.set_effect_parameter(tile_effect) != 0:
 		_fail("Original TileImage parameters must be accepted")
 		return
-	if sprite.fields.get("effect_size") != Vector2i(800, 600) or sprite.fields.get("effect_scroll_speed") != Vector2i(1, 0):
+	if sprite.get_render_size() != Vector2i(800, 600) or sprite.fields.get("effect_scroll_speed") != Vector2i(1, 0):
 		_fail("TileImage must preserve the original view size and pixel speed")
 		return
 	host.sprite_animation_flags |= 4
