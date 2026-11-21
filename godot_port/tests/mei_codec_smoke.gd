@@ -118,10 +118,60 @@ func _initialize() -> void:
 		if first_frame[pixel_index] != 255:
 			_fail("first I-frame alpha is not opaque at byte %d" % pixel_index)
 			return
+	if not codec.has_method("decode_mei_p_frame"):
+		_fail("YzkCodec must expose reference-based MEI P-frame decoding")
+		return
+	var first_p: Variant = codec.call("decode_mei_p_frame", original, 3, first_frame)
+	if not first_p is Dictionary or not first_p.get("ok", false):
+		_fail("first P-frame decode failed: %s" % (first_p.get("error", "invalid result") if first_p is Dictionary else "invalid result"))
+		return
+	var p_pixels: PackedByteArray = first_p.get("rgba", PackedByteArray())
+	if p_pixels.size() != 800 * 600 * 4:
+		_fail("first P-frame RGBA output has wrong size: %d" % p_pixels.size())
+		return
+	for pixel_index: int in range(3, p_pixels.size(), 4):
+		if p_pixels[pixel_index] != 255:
+			_fail("first P-frame alpha is not opaque at byte %d" % pixel_index)
+			return
+	var second_p: Variant = codec.call("decode_mei_p_frame", original, 6, p_pixels)
+	if not second_p is Dictionary or not second_p.get("ok", false):
+		_fail("second P-frame decode failed: %s" % (second_p.get("error", "invalid result") if second_p is Dictionary else "invalid result"))
+		return
+	var second_p_pixels: PackedByteArray = second_p.get("rgba", PackedByteArray())
+	if second_p_pixels.size() != 800 * 600 * 4:
+		_fail("second P-frame RGBA output has wrong size: %d" % second_p_pixels.size())
+		return
+	if not codec.has_method("decode_mei_b_frame"):
+		_fail("YzkCodec must expose reference-based MEI B-frame decoding")
+		return
+	var first_b: Variant = codec.call("decode_mei_b_frame", original, 1, first_frame, p_pixels)
+	if not first_b is Dictionary or not first_b.get("ok", false):
+		_fail("first B-frame decode failed: %s" % (first_b.get("error", "invalid result") if first_b is Dictionary else "invalid result"))
+		return
+	var b_pixels: PackedByteArray = first_b.get("rgba", PackedByteArray())
+	if b_pixels.size() != 800 * 600 * 4:
+		_fail("first B-frame RGBA output has wrong size: %d" % b_pixels.size())
+		return
+	for pixel_index: int in range(3, b_pixels.size(), 4):
+		if b_pixels[pixel_index] != 255:
+			_fail("first B-frame alpha is not opaque at byte %d" % pixel_index)
+			return
+	var second_b: Variant = codec.call("decode_mei_b_frame", original, 2, first_frame, p_pixels)
+	if not second_b is Dictionary or not second_b.get("ok", false):
+		_fail("second B-frame decode failed: %s" % (second_b.get("error", "invalid result") if second_b is Dictionary else "invalid result"))
+		return
+	var second_b_pixels: PackedByteArray = second_b.get("rgba", PackedByteArray())
+	if second_b_pixels.size() != 800 * 600 * 4:
+		_fail("second B-frame RGBA output has wrong size: %d" % second_b_pixels.size())
+		return
+	var b_as_p: Variant = codec.call("decode_mei_p_frame", original, 1, first_frame)
+	if not b_as_p is Dictionary or b_as_p.get("ok", true):
+		_fail("P-frame decoder must reject a bidirectional B-frame")
+		return
 	if FileAccess.get_file_as_bytes(movie_path) != original:
 		_fail("decode_mei modified the original movie")
 		return
-	print("PASS MEI container/audio decode and random access to native I-frames")
+	print("PASS MEI audio, random I-frame decode, and first reference-based P/B frames")
 	quit(0)
 
 

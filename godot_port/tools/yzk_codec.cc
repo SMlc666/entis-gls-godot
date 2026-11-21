@@ -8,6 +8,7 @@
 #include <cstring>
 #include <limits>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "algo/locale.h"
@@ -161,12 +162,13 @@ bool mei_gamma_bytes(MeiBitReader &bits, size_t count, std::vector<int8_t> &deco
     return true;
 }
 
-bool decode_mei_first_frame_coefficients(const uint8_t *frame, size_t frame_size,
+bool decode_mei_i_frame_coefficients(const uint8_t *frame, size_t frame_size,
     size_t width, size_t height, std::vector<int8_t> &coefficients,
     std::array<uint8_t, 128> &quantization, std::vector<int8_t> &operations,
+    std::vector<int8_t> &motion_flags, std::vector<int8_t> &motion_vectors,
     std::string &error) {
     using namespace au::dec::entis::common;
-    if (!frame || frame_size < 4 || frame[0] != 0x28 || (frame[1] & 0x02) != 0
+    if (!frame || frame_size < 4 || frame[0] != 0x28
         || frame[2] != 1 || frame[3] != 8 || width == 0 || height == 0) {
         error = "First MEI image frame has unsupported ERI parameters.";
         return false;
@@ -196,11 +198,13 @@ bool decode_mei_first_frame_coefficients(const uint8_t *frame, size_t frame_size
     const size_t op_count = block_width * block_height * 2;
     if (!mei_gamma_bytes(bits, op_count, operations, error)) return false;
     if ((frame[1] & 0x01) != 0) {
-        std::vector<int8_t> motion_flags, motion_vectors;
         const size_t macroblocks = block_width * block_height;
         if (!mei_gamma_bytes(bits, macroblocks, motion_flags, error)
             || !mei_gamma_bytes(bits, macroblocks * 4, motion_vectors, error))
             return false;
+    } else {
+        motion_flags.clear();
+        motion_vectors.clear();
     }
     // ERINA's image stream has independent adaptive trees from the initial table.
     HuffmanTree data_tree, length_tree;
@@ -246,17 +250,33 @@ int8_t mei_clamp_sbyte(float value) {
     return static_cast<int8_t>(std::clamp(mei_round(value), -128, 127));
 }
 
-bool reconstruct_mei_first_i_frame(size_t width, size_t height,
+bool reconstruct_mei_frame_pixels(size_t width, size_t height,
     const std::vector<int8_t> &coefficients,
     const std::array<uint8_t, 128> &quantization,
     const std::vector<int8_t> &operations, std::vector<uint8_t> &rgba,
     int &minimum_luma, int &maximum_luma,
-    std::string &error) {
+    std::string &error, bool differential = false,
+    const std::vector<uint8_t> *reference = nullptr,
+    const std::vector<int8_t> *motion_flags = nullptr,
+    const std::vector<int8_t> *motion_vectors = nullptr,
+    const std::vector<uint8_t> *next_reference = nullptr,
+    bool allow_bidirectional = false) {
     const size_t block_width = (width + 15) / 16;
     const size_t block_height = (height + 15) / 16;
     if (coefficients.size() != block_width * block_height * 384
         || operations.size() != block_width * block_height * 2) {
-        error = "First MEI frame reconstruction buffers have invalid dimensions.";
+        error = "MEI frame reconstruction buffers have invalid dimensions.";
+        return false;
+    }
+    const size_t macroblock_count = block_width * block_height;
+    if (differential && ((!reference || reference->size() != width * height * 4)
+        && (!next_reference || next_reference->size() != width * height * 4))) {
+        error = "Differential MEI frame is missing its reference image.";
+        return false;
+    }
+    if (differential && (!motion_flags || motion_flags->size() != macroblock_count
+        || !motion_vectors || motion_vectors->size() != macroblock_count * 4)) {
+        error = "Differential MEI frame is missing its reference image or motion tables.";
         return false;
     }
     constexpr size_t kBlockArea = 64;
@@ -269,16 +289,92 @@ bool reconstruct_mei_first_i_frame(size_t width, size_t height,
                 static_cast<float>((2 * sample + 1) * frequency) * 3.14159265358979323846f / 16.0f);
         }
     }
-    rgba.assign(width * height * 4, 255);
+    rgba.assign(width * height * 4, differential ? 0 : 255);
     std::array<std::array<int8_t, kBlockArea>, 6> spatial{};
     std::array<std::array<float, kBlockArea>, 6> spectrum{};
     std::array<std::array<float, kBlockArea>, 6> horizontal{};
     minimum_luma = 255;
     maximum_luma = 0;
+    std::vector<int32_t> cumulative_vectors;
+    if (differential) {
+        cumulative_vectors.resize(motion_vectors->size());
+        for (size_t i = 0; i < motion_vectors->size(); ++i)
+            cumulative_vectors[i] = (*motion_vectors)[i];
+        for (size_t y = 1; y < block_height; ++y) {
+            for (size_t x = 0; x < block_width; ++x) {
+                const size_t current = (y * block_width + x) * 4;
+                const size_t above = current - block_width * 4;
+                for (size_t component = 0; component < 4; ++component)
+                    cumulative_vectors[current + component] += cumulative_vectors[above + component];
+            }
+        }
+        for (size_t y = 0; y < block_height; ++y) {
+            for (size_t x = 1; x < block_width; ++x) {
+                const size_t current = (y * block_width + x) * 4;
+                const size_t previous = current - 4;
+                for (size_t component = 0; component < 4; ++component)
+                    cumulative_vectors[current + component] += cumulative_vectors[previous + component];
+            }
+        }
+    }
     for (size_t by = 0; by < block_height; ++by) {
         for (size_t bx = 0; bx < block_width; ++bx) {
             const size_t macroblock = by * block_width + bx;
             const size_t coefficient_base = macroblock * 384;
+            if (differential) {
+                const int reference_mode = (*motion_flags)[macroblock];
+                if ((reference_mode == 2 || reference_mode == -1) && !allow_bidirectional) {
+                    error = "Bidirectional MEI frame requires both previous and next references.";
+                    return false;
+                }
+                if ((reference_mode != 0 && reference_mode != 1
+                    && reference_mode != 2 && reference_mode != -1)
+                    || (reference_mode == 1 && !reference)
+                    || ((reference_mode == -1 || reference_mode == 2) && !next_reference)) {
+                    error = "MEI motion flag requests a missing or unsupported reference.";
+                    return false;
+                }
+                const size_t dst_x = bx * 16;
+                const size_t dst_y = by * 16;
+                const size_t vector_index = macroblock * 4;
+                auto reference_origin = [&](size_t component) {
+                    int sx = static_cast<int>(dst_x) + (cumulative_vectors[vector_index + component] >> 1);
+                    int sy = static_cast<int>(dst_y) + (cumulative_vectors[vector_index + component + 1] >> 1);
+                    if (sx < 0 || sy < 0 || sx + 16 > static_cast<int>(width)
+                        || sy + 16 > static_cast<int>(height)) {
+                        sx = static_cast<int>(dst_x);
+                        sy = static_cast<int>(dst_y);
+                    }
+                    return std::pair<int, int>(sx, sy);
+                };
+                const auto previous_origin = reference_mode == 1 || reference_mode == 2
+                    ? reference_origin(0) : std::pair<int, int>(0, 0);
+                const auto next_origin = reference_mode == -1 || reference_mode == 2
+                    ? reference_origin(2) : std::pair<int, int>(0, 0);
+                for (size_t local_y = 0; local_y < 16 && dst_y + local_y < height; ++local_y) {
+                    for (size_t local_x = 0; local_x < 16 && dst_x + local_x < width; ++local_x) {
+                        const size_t dst_pixel = ((dst_y + local_y) * width + dst_x + local_x) * 4;
+                        const size_t prev_pixel = (static_cast<size_t>(previous_origin.second) + local_y) * width
+                            + static_cast<size_t>(previous_origin.first) + local_x;
+                        const size_t next_pixel = (static_cast<size_t>(next_origin.second) + local_y) * width
+                            + static_cast<size_t>(next_origin.first) + local_x;
+                        for (size_t channel = 0; channel < 4; ++channel) {
+                            const int previous_value = reference && (reference_mode == 1 || reference_mode == 2)
+                                ? (*reference)[prev_pixel * 4 + channel] : 0;
+                            const int next_value = next_reference && (reference_mode == -1 || reference_mode == 2)
+                                ? (*next_reference)[next_pixel * 4 + channel] : 0;
+                            if (reference_mode == 2)
+                                rgba[dst_pixel + channel] = static_cast<uint8_t>((previous_value + next_value) >> 1);
+                            else if (reference_mode == 1)
+                                rgba[dst_pixel + channel] = static_cast<uint8_t>(previous_value);
+                            else if (reference_mode == -1)
+                                rgba[dst_pixel + channel] = static_cast<uint8_t>(next_value);
+                            else
+                                rgba[dst_pixel + channel] = channel == 3 ? 255 : 0;
+                        }
+                    }
+                }
+            }
             for (size_t block = 0; block < 6; ++block) {
                 const size_t operation_index = macroblock * 2 + (block >= 4 ? 1 : 0);
                 const int operation = operations[operation_index];
@@ -316,7 +412,7 @@ bool reconstruct_mei_first_i_frame(size_t width, size_t height,
                         float sum = 0.0f;
                         for (size_t frequency = 0; frequency < 8; ++frequency)
                             sum += horizontal[block][frequency * 8 + x] * basis[y][frequency];
-                        spatial[block][y * 8 + x] = block < 4
+                        spatial[block][y * 8 + x] = block < 4 && !differential
                             ? static_cast<int8_t>(mei_clamp_byte(mei_round(sum)))
                             : mei_clamp_sbyte(sum);
                     }
@@ -330,21 +426,33 @@ bool reconstruct_mei_first_i_frame(size_t width, size_t height,
                     const size_t x_block = local_x / 8;
                     const size_t x_in_block = local_x % 8;
                     const size_t y_index = y_block * 2 + x_block;
-                    const int y_value = static_cast<uint8_t>(spatial[y_index][y_in_block * 8 + x_in_block]);
+                    const int y_value = differential
+                        ? static_cast<int>(spatial[y_index][y_in_block * 8 + x_in_block])
+                        : static_cast<int>(static_cast<uint8_t>(spatial[y_index][y_in_block * 8 + x_in_block]));
                     const int u = spatial[4][(local_y / 2) * 8 + local_x / 2];
                     const int v = spatial[5][(local_y / 2) * 8 + local_x / 2];
                     minimum_luma = std::min(minimum_luma, y_value);
                     maximum_luma = std::max(maximum_luma, y_value);
-                    const int blue = y_value + ((u * 7) >> 2);
-                    const int green = y_value - ((u * 3 + v * 6) >> 3);
-                    const int red = y_value + ((v * 3) >> 1);
+                    int blue = y_value + ((u * 7) >> 2);
+                    int green = y_value - ((u * 3 + v * 6) >> 3);
+                    int red = y_value + ((v * 3) >> 1);
                     const size_t x = bx * 16 + local_x;
                     const size_t y = by * 16 + local_y;
                     if (x >= width || y >= height) continue;
                     const size_t pixel = (y * width + x) * 4;
-                    rgba[pixel] = mei_clamp_byte(red);
-                    rgba[pixel + 1] = mei_clamp_byte(green);
-                    rgba[pixel + 2] = mei_clamp_byte(blue);
+                    if (differential) {
+                        blue = static_cast<int>(mei_clamp_byte(blue + 0x80)) - 0x80;
+                        green = static_cast<int>(mei_clamp_byte(green + 0x80)) - 0x80;
+                        red = static_cast<int>(mei_clamp_byte(red + 0x80)) - 0x80;
+                        rgba[pixel] = mei_clamp_byte(static_cast<int>(rgba[pixel]) + red * 2);
+                        rgba[pixel + 1] = mei_clamp_byte(static_cast<int>(rgba[pixel + 1]) + green * 2);
+                        rgba[pixel + 2] = mei_clamp_byte(static_cast<int>(rgba[pixel + 2]) + blue * 2);
+                        rgba[pixel + 3] = 255;
+                    } else {
+                        rgba[pixel] = mei_clamp_byte(red);
+                        rgba[pixel + 1] = mei_clamp_byte(green);
+                        rgba[pixel + 2] = mei_clamp_byte(blue);
+                    }
                 }
             }
         }
@@ -727,6 +835,10 @@ public:
     Dictionary decode_mio(const PackedByteArray &input) const;
     Dictionary decode_mei(const PackedByteArray &input) const;
     Dictionary decode_mei_i_frame(const PackedByteArray &input, int64_t frame_index) const;
+    Dictionary decode_mei_p_frame(const PackedByteArray &input, int64_t frame_index,
+        const PackedByteArray &previous_rgba) const;
+    Dictionary decode_mei_b_frame(const PackedByteArray &input, int64_t frame_index,
+        const PackedByteArray &previous_rgba, const PackedByteArray &next_rgba) const;
     Array build_shading_levels(const PackedByteArray &rgba, int64_t width, int64_t height) const;
 };
 
@@ -736,6 +848,8 @@ void YzkCodec::_bind_methods() {
     ClassDB::bind_method(D_METHOD("decode_mio", "input"), &YzkCodec::decode_mio);
     ClassDB::bind_method(D_METHOD("decode_mei", "input"), &YzkCodec::decode_mei);
     ClassDB::bind_method(D_METHOD("decode_mei_i_frame", "input", "frame_index"), &YzkCodec::decode_mei_i_frame);
+    ClassDB::bind_method(D_METHOD("decode_mei_p_frame", "input", "frame_index", "previous_rgba"), &YzkCodec::decode_mei_p_frame);
+    ClassDB::bind_method(D_METHOD("decode_mei_b_frame", "input", "frame_index", "previous_rgba", "next_rgba"), &YzkCodec::decode_mei_b_frame);
     ClassDB::bind_method(D_METHOD("build_shading_levels", "rgba", "width", "height"), &YzkCodec::build_shading_levels);
 }
 
@@ -924,17 +1038,17 @@ Dictionary YzkCodec::decode_mei(const PackedByteArray &input) const {
             return codec_failure("Decoded MEI audio is outside the supported bounds.");
         std::vector<int8_t> first_frame_coefficients;
         std::array<uint8_t, 128> first_frame_quantization{};
-        std::vector<int8_t> first_frame_operations;
+        std::vector<int8_t> first_frame_operations, first_frame_motion_flags, first_frame_motion_vectors;
         std::string video_error;
         const MeiFrameRecord &first_frame = frame_records.front();
-        const bool first_frame_entropy_decoded = decode_mei_first_frame_coefficients(
+        const bool first_frame_entropy_decoded = decode_mei_i_frame_coefficients(
             input.ptr() + first_frame.offset, first_frame.payload_size,
             width, height, first_frame_coefficients, first_frame_quantization,
-            first_frame_operations, video_error);
+            first_frame_operations, first_frame_motion_flags, first_frame_motion_vectors, video_error);
         std::vector<uint8_t> first_frame_rgba;
         int first_frame_min_luma = 0, first_frame_max_luma = 0;
         const bool first_frame_decoded = first_frame_entropy_decoded
-            && reconstruct_mei_first_i_frame(width, height, first_frame_coefficients,
+            && reconstruct_mei_frame_pixels(width, height, first_frame_coefficients,
                 first_frame_quantization, first_frame_operations, first_frame_rgba,
                 first_frame_min_luma, first_frame_max_luma, video_error);
         PackedByteArray samples;
@@ -1014,16 +1128,118 @@ Dictionary YzkCodec::decode_mei_i_frame(const PackedByteArray &input, int64_t fr
     const MeiFrameRecord &frame = frame_records[static_cast<size_t>(frame_index)];
     if (frame.picture_type != 'I' || frame.record_type != "ImageFrm")
         return codec_failure("Selected MEI frame is differential and needs reference frames.");
-    std::vector<int8_t> coefficients, operations;
+    std::vector<int8_t> coefficients, operations, motion_flags, motion_vectors;
     std::array<uint8_t, 128> quantization{};
     std::string frame_error;
-    if (!decode_mei_first_frame_coefficients(input.ptr() + frame.offset, frame.payload_size,
-        width, height, coefficients, quantization, operations, frame_error))
+    if (!decode_mei_i_frame_coefficients(input.ptr() + frame.offset, frame.payload_size,
+        width, height, coefficients, quantization, operations, motion_flags, motion_vectors, frame_error))
         return codec_failure(frame_error);
     std::vector<uint8_t> rgba;
     int minimum_luma = 0, maximum_luma = 0;
-    if (!reconstruct_mei_first_i_frame(width, height, coefficients, quantization,
+    if (!reconstruct_mei_frame_pixels(width, height, coefficients, quantization,
         operations, rgba, minimum_luma, maximum_luma, frame_error))
+        return codec_failure(frame_error);
+    PackedByteArray pixels;
+    pixels.resize(static_cast<int64_t>(rgba.size()));
+    std::memcpy(pixels.ptrw(), rgba.data(), rgba.size());
+    Dictionary result;
+    result["ok"] = true;
+    result["frame_index"] = frame_index;
+    result["width"] = static_cast<int64_t>(width);
+    result["height"] = static_cast<int64_t>(height);
+    result["rgba"] = pixels;
+    result["coefficient_count"] = static_cast<int64_t>(coefficients.size());
+    result["min_luma"] = minimum_luma;
+    result["max_luma"] = maximum_luma;
+    return result;
+}
+
+Dictionary YzkCodec::decode_mei_p_frame(const PackedByteArray &input, int64_t frame_index,
+    const PackedByteArray &previous_rgba) const {
+    if (input.size() < 64 || static_cast<size_t>(input.size()) > kMaxCodecInputBytes)
+        return codec_failure("MEI input size is outside the supported bounds.");
+    std::string validation_error;
+    size_t width = 0, height = 0;
+    std::vector<MeiFrameRecord> frame_records;
+    uint32_t declared_frames = 0, duration_ms = 0, declared_samples = 0;
+    uint32_t channels = 0, sample_rate = 0, bits_per_sample = 0;
+    if (!validate_mei_size(input.ptr(), static_cast<size_t>(input.size()), validation_error,
+        width, height, frame_records, declared_frames, duration_ms, declared_samples,
+        channels, sample_rate, bits_per_sample))
+        return codec_failure(validation_error);
+    if (frame_index < 0 || static_cast<uint64_t>(frame_index) >= frame_records.size())
+        return codec_failure("MEI frame index is outside the stream.");
+    const MeiFrameRecord &frame = frame_records[static_cast<size_t>(frame_index)];
+    if (frame.picture_type != 'P' || frame.record_type != "DiffeFrm")
+        return codec_failure("Selected MEI frame is not a unidirectional P-frame.");
+    if (width > SIZE_MAX / height / 4 || previous_rgba.size() != static_cast<int64_t>(width * height * 4))
+        return codec_failure("Previous MEI reference frame has invalid dimensions.");
+    std::vector<int8_t> coefficients, operations, motion_flags, motion_vectors;
+    std::array<uint8_t, 128> quantization{};
+    std::string frame_error;
+    if (!decode_mei_i_frame_coefficients(input.ptr() + frame.offset, frame.payload_size,
+        width, height, coefficients, quantization, operations, motion_flags, motion_vectors, frame_error))
+        return codec_failure(frame_error);
+    std::vector<uint8_t> previous(static_cast<size_t>(previous_rgba.size()));
+    std::memcpy(previous.data(), previous_rgba.ptr(), previous.size());
+    std::vector<uint8_t> rgba;
+    int minimum_luma = 0, maximum_luma = 0;
+    if (!reconstruct_mei_frame_pixels(width, height, coefficients, quantization,
+        operations, rgba, minimum_luma, maximum_luma, frame_error, true,
+        &previous, &motion_flags, &motion_vectors))
+        return codec_failure(frame_error);
+    PackedByteArray pixels;
+    pixels.resize(static_cast<int64_t>(rgba.size()));
+    std::memcpy(pixels.ptrw(), rgba.data(), rgba.size());
+    Dictionary result;
+    result["ok"] = true;
+    result["frame_index"] = frame_index;
+    result["width"] = static_cast<int64_t>(width);
+    result["height"] = static_cast<int64_t>(height);
+    result["rgba"] = pixels;
+    result["coefficient_count"] = static_cast<int64_t>(coefficients.size());
+    result["min_luma"] = minimum_luma;
+    result["max_luma"] = maximum_luma;
+    return result;
+}
+
+Dictionary YzkCodec::decode_mei_b_frame(const PackedByteArray &input, int64_t frame_index,
+    const PackedByteArray &previous_rgba, const PackedByteArray &next_rgba) const {
+    if (input.size() < 64 || static_cast<size_t>(input.size()) > kMaxCodecInputBytes)
+        return codec_failure("MEI input size is outside the supported bounds.");
+    std::string validation_error;
+    size_t width = 0, height = 0;
+    std::vector<MeiFrameRecord> frame_records;
+    uint32_t declared_frames = 0, duration_ms = 0, declared_samples = 0;
+    uint32_t channels = 0, sample_rate = 0, bits_per_sample = 0;
+    if (!validate_mei_size(input.ptr(), static_cast<size_t>(input.size()), validation_error,
+        width, height, frame_records, declared_frames, duration_ms, declared_samples,
+        channels, sample_rate, bits_per_sample))
+        return codec_failure(validation_error);
+    if (frame_index < 0 || static_cast<uint64_t>(frame_index) >= frame_records.size())
+        return codec_failure("MEI frame index is outside the stream.");
+    const MeiFrameRecord &frame = frame_records[static_cast<size_t>(frame_index)];
+    if (frame.picture_type != 'B' || frame.record_type != "DiffeFrm")
+        return codec_failure("Selected MEI frame is not a bidirectional B-frame.");
+    if (width > SIZE_MAX / height / 4
+        || previous_rgba.size() != static_cast<int64_t>(width * height * 4)
+        || next_rgba.size() != static_cast<int64_t>(width * height * 4))
+        return codec_failure("MEI B-frame reference images have invalid dimensions.");
+    std::vector<int8_t> coefficients, operations, motion_flags, motion_vectors;
+    std::array<uint8_t, 128> quantization{};
+    std::string frame_error;
+    if (!decode_mei_i_frame_coefficients(input.ptr() + frame.offset, frame.payload_size,
+        width, height, coefficients, quantization, operations, motion_flags, motion_vectors, frame_error))
+        return codec_failure(frame_error);
+    std::vector<uint8_t> previous(static_cast<size_t>(previous_rgba.size()));
+    std::memcpy(previous.data(), previous_rgba.ptr(), previous.size());
+    std::vector<uint8_t> next(static_cast<size_t>(next_rgba.size()));
+    std::memcpy(next.data(), next_rgba.ptr(), next.size());
+    std::vector<uint8_t> rgba;
+    int minimum_luma = 0, maximum_luma = 0;
+    if (!reconstruct_mei_frame_pixels(width, height, coefficients, quantization,
+        operations, rgba, minimum_luma, maximum_luma, frame_error, true,
+        &previous, &motion_flags, &motion_vectors, &next, true))
         return codec_failure(frame_error);
     PackedByteArray pixels;
     pixels.resize(static_cast<int64_t>(rgba.size()));
