@@ -289,6 +289,7 @@ var mei_movie_height := 0
 var mei_movie_elapsed := 0.0
 var mei_movie_active := false
 var mei_movie_loop := false
+var mei_movie_no_skip_frame := false
 
 # Audio Nodes
 var bgm_player: AudioStreamPlayer
@@ -1242,6 +1243,7 @@ func _start_native_mei_movie(path: String, play_mode: int = 0) -> bool:
 	mei_movie_elapsed = 0.0
 	mei_movie_active = true
 	mei_movie_loop = (play_mode & 0x02) != 0
+	mei_movie_no_skip_frame = (play_mode & 0x04) != 0
 	mei_audio_player.play()
 	_show_mei_frame(first_rgba, mei_movie_width, mei_movie_height, 0)
 	mei_video_backdrop.visible = true
@@ -1265,8 +1267,12 @@ func _process_mei_movie(delta: float) -> void:
 	if mei_movie_elapsed < mei_movie_frame_duration:
 		return
 	var due_frames := maxi(1, int(floor(mei_movie_elapsed / mei_movie_frame_duration)))
-	due_frames = mini(due_frames, mei_movie_frames.size())
-	mei_movie_elapsed = fposmod(mei_movie_elapsed, mei_movie_frame_duration)
+	if mei_movie_no_skip_frame:
+		due_frames = 1
+		mei_movie_elapsed -= mei_movie_frame_duration
+	else:
+		due_frames = mini(due_frames, mei_movie_frames.size())
+		mei_movie_elapsed = fposmod(mei_movie_elapsed, mei_movie_frame_duration)
 	for _step: int in range(due_frames):
 		if mei_movie_queue.is_empty() and not _prepare_next_mei_group():
 			if mei_movie_loop:
@@ -1384,6 +1390,7 @@ func _stop_mei_movie() -> void:
 	mei_movie_active = false
 	mei_movie_queue.clear()
 	mei_movie_loop = false
+	mei_movie_no_skip_frame = false
 	if mei_audio_player != null:
 		mei_audio_player.stop()
 	if mei_video_rect != null:

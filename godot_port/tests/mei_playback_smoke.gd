@@ -84,6 +84,18 @@ func _run() -> void:
 	if player.get("mei_movie_active") or player.get("mei_video_rect").visible:
 		_fail("native MEI stop did not clear playback state")
 		return
+	if not player.call("_start_native_mei_movie", GAME_DIR.path_join("opening.mei"), 0x07):
+		_fail("native MEI player refused SDK no-skip playback mode")
+		return
+	player.call("_process_mei_movie", float(player.get("mei_movie_frame_duration")) * 3.1)
+	if player.get("mei_movie_displayed_index") != 1 or (player.get("mei_movie_queue") as Array).size() != 2:
+		_fail("SDK NoSkipFrame mode dropped overdue frames instead of displaying one at a time")
+		return
+	player.call("_process_mei_movie", 0.001)
+	if player.get("mei_movie_displayed_index") != 2:
+		_fail("SDK NoSkipFrame mode did not continue through the overdue frame backlog")
+		return
+	player.call("_on_movie_stop_requested")
 	if player.get("mei_movie_codec") == null or movie_resource.get_total_frame() != 2521 or movie_resource.get_total_time() != 126000:
 		_fail("MovieSprite stop released its open decoder or metadata")
 		return
@@ -103,7 +115,7 @@ func _run() -> void:
 	if movie_resource.get_total_frame() != 0 or movie_resource.get_current_frame() != -1 or player.get("mei_movie_codec") != null:
 		_fail("MovieSprite close did not release decoder state and metadata")
 		return
-	print("PASS native MEI playback displays/reorders frames, honors loop mode, and stops")
+	print("PASS native MEI playback displays/reorders frames, honors loop/no-skip modes, seek, and lifecycle")
 	player.queue_free()
 	await process_frame
 	quit(0)
