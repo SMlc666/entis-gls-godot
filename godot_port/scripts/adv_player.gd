@@ -102,6 +102,10 @@ var settings_state = PlayerSettingsState.new()
 var bg_rect: TextureRect
 var bustup_container: Control
 var bustup_rects: Array[TextureRect] = []
+var adv_cg_layer: Control
+var adv_cg_canvas: Control
+var adv_cg_rect: TextureRect
+var adv_cg_material: ShaderMaterial
 var adv_temp_layer: Control
 var adv_temp_canvas: Control
 var adv_temp_controls: Dictionary[int, TextureRect] = {}
@@ -391,6 +395,23 @@ func _build_ui() -> void:
 	bg_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	bg_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
 	add_child(bg_rect)
+	adv_cg_layer = Control.new()
+	adv_cg_layer.name = "AdvCgSpriteLayer"
+	adv_cg_layer.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	adv_cg_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(adv_cg_layer)
+	adv_cg_canvas = Control.new()
+	adv_cg_canvas.name = "AdvCgSpriteCanvas"
+	adv_cg_canvas.size = Vector2(800, 600)
+	adv_cg_canvas.clip_contents = true
+	adv_cg_canvas.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	adv_cg_layer.add_child(adv_cg_canvas)
+	adv_cg_rect = TextureRect.new()
+	adv_cg_rect.name = "NativeAdvCgSprite"
+	adv_cg_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	adv_cg_rect.stretch_mode = TextureRect.STRETCH_SCALE
+	adv_cg_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	adv_cg_canvas.add_child(adv_cg_rect)
 
 	# Temporary native sprites are used by original AdvScreen transitions. Keep
 	# them in the original 800x600 coordinate space between the background and
@@ -847,6 +868,11 @@ func _process(delta: float) -> void:
 		return
 	if adv_temp_layer != null:
 		adv_temp_layer.visible = not is_title_mode
+	if is_title_mode:
+		if adv_cg_layer != null:
+			adv_cg_layer.visible = false
+		if bg_rect != null:
+			bg_rect.visible = true
 	if host != null:
 		host.advance_audio_envelopes(delta)
 	if mei_movie_active:
@@ -1044,6 +1070,7 @@ func _update_bustups() -> void:
 		return
 	_sync_adv_temp_sprites(adv)
 	var base_sprite: Variant = adv.get_field("sprAdvBase")
+	_sync_adv_cg_sprite(adv.get_field("sprCg"))
 	var active_tone_filter: CsxHostClass.HostToneFilter = base_sprite.tone_filter if base_sprite is CsxHostClass.HostSprite else null
 	if tone_material != null and active_tone_filter != null:
 		tone_material.set_shader_parameter("tone_lut", active_tone_filter.get_tone_texture())
@@ -1132,6 +1159,41 @@ func _sync_adv_temp_sprites(adv: CsxVMReader.CsxInstance) -> void:
 				node.queue_free()
 			adv_temp_controls.erase(id)
 			adv_temp_materials.erase(id)
+
+
+func _sync_adv_cg_sprite(sprite: Variant) -> void:
+	if adv_cg_layer == null or adv_cg_canvas == null or adv_cg_rect == null:
+		return
+	var viewport_size := get_viewport_rect().size
+	var scale_factor := minf(viewport_size.x / 800.0, viewport_size.y / 600.0)
+	adv_cg_canvas.scale = Vector2.ONE * scale_factor
+	adv_cg_canvas.position = (viewport_size - Vector2(800, 600) * scale_factor) * 0.5
+	var native_sprite: CsxHostClass.HostSprite = sprite as CsxHostClass.HostSprite
+	var visible_sprite: bool = native_sprite != null and native_sprite.is_visible and native_sprite.texture != null
+	adv_cg_layer.visible = not is_title_mode and visible_sprite
+	bg_rect.visible = not visible_sprite
+	if not visible_sprite:
+		return
+	adv_cg_rect.texture = native_sprite.texture
+	var render_size: Vector2i = native_sprite.get_render_size()
+	adv_cg_rect.size = Vector2(render_size) if render_size.x > 0 and render_size.y > 0 else Vector2(native_sprite.size)
+	adv_cg_rect.position = Vector2(native_sprite.position - native_sprite.rev_center)
+	adv_cg_rect.pivot_offset = Vector2(native_sprite.rev_center)
+	adv_cg_rect.scale = native_sprite.magnification
+	adv_cg_rect.modulate.a = 1.0 - clampf(float(native_sprite.transparency) / 256.0, 0.0, 1.0)
+	if adv_cg_material == null:
+		adv_cg_material = ShaderMaterial.new()
+		adv_cg_material.shader = tone_material.shader if tone_material != null else null
+	adv_cg_rect.material = adv_cg_material
+	if tone_material != null:
+		for parameter: String in ["filter_mode", "intensity", "use_tone_lut", "tone_lut", "tone_flags"]:
+			adv_cg_material.set_shader_parameter(parameter, tone_material.get_shader_parameter(parameter))
+	var active_mask: bool = native_sprite.alpha_texture != null and native_sprite.alpha_range > 0 and native_sprite.alpha_range < 256
+	adv_cg_material.set_shader_parameter("alpha_mask_ready", active_mask)
+	adv_cg_material.set_shader_parameter("alpha_mask_range", float(native_sprite.alpha_range))
+	adv_cg_material.set_shader_parameter("alpha_mask_blend", float(native_sprite.blending))
+	if active_mask:
+		adv_cg_material.set_shader_parameter("alpha_mask_texture", native_sprite.alpha_texture)
 
 
 func _on_choices_updated(choices: Array) -> void:
