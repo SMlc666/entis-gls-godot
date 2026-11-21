@@ -78,6 +78,17 @@ func _initialize() -> void:
 	if coefficients.size() != 729600:
 		_fail("first I-frame coefficient payload has wrong size: %d" % coefficients.size())
 		return
+	if not result.get("first_frame_decoded", false):
+		_fail("first I-frame pixel reconstruction failed: %s" % result.get("video_error", "missing error"))
+		return
+	var first_frame: PackedByteArray = result.get("first_frame_rgba", PackedByteArray())
+	if first_frame.size() != 800 * 600 * 4:
+		_fail("first I-frame RGBA output has wrong size: %d" % first_frame.size())
+		return
+	for pixel_index: int in range(3, first_frame.size(), 4):
+		if first_frame[pixel_index] != 255:
+			_fail("first I-frame alpha is not opaque at byte %d" % pixel_index)
+			return
 	if FileAccess.get_file_as_bytes(movie_path) != original:
 		_fail("decode_mei modified the original movie")
 		return

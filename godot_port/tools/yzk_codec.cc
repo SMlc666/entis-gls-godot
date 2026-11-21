@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <string>
@@ -125,7 +126,9 @@ bool mei_huffman(MeiBitReader &bits, au::dec::entis::common::HuffmanTree &tree,
 }
 
 bool decode_mei_first_frame_coefficients(const uint8_t *frame, size_t frame_size,
-    size_t width, size_t height, std::vector<int8_t> &coefficients, std::string &error) {
+    size_t width, size_t height, std::vector<int8_t> &coefficients,
+    std::array<uint8_t, 128> &quantization, std::vector<int8_t> &operations,
+    std::string &error) {
     using namespace au::dec::entis::common;
     if (!frame || frame_size < 4 || frame[0] != 0x28 || frame[1] != 0
         || frame[2] != 1 || frame[3] != 8 || width == 0 || height == 0) {
@@ -146,7 +149,6 @@ bool decode_mei_first_frame_coefficients(const uint8_t *frame, size_t frame_size
     }
     const size_t total = block_width * block_height * 384;
     HuffmanTree initial_tree;
-    std::array<uint8_t, 128> quantization{};
     for (uint8_t &item : quantization) {
         int symbol = 0;
         if (!mei_huffman(bits, initial_tree, false, symbol) || symbol < 0 || symbol > 255) {
@@ -156,7 +158,7 @@ bool decode_mei_first_frame_coefficients(const uint8_t *frame, size_t frame_size
         item = static_cast<uint8_t>(symbol);
     }
     const size_t op_count = block_width * block_height * 2;
-    std::vector<int8_t> operations(op_count);
+    operations.assign(op_count, 0);
     uint32_t zero_flag = 0;
     if (!bits.read(1, zero_flag)) {
         error = "First MEI frame operation table is truncated.";
@@ -212,6 +214,125 @@ bool decode_mei_first_frame_coefficients(const uint8_t *frame, size_t frame_size
             pending_zeros = static_cast<size_t>(run);
         } else {
             coefficients.push_back(static_cast<int8_t>(static_cast<uint8_t>(symbol)));
+        }
+    }
+    return true;
+}
+
+int mei_round(float value) {
+    return value >= 0.0f ? static_cast<int>(std::floor(value + 0.5f))
+        : static_cast<int>(std::ceil(value - 0.5f));
+}
+
+uint8_t mei_clamp_byte(int value) {
+    return static_cast<uint8_t>(std::clamp(value, 0, 255));
+}
+
+int8_t mei_clamp_sbyte(float value) {
+    return static_cast<int8_t>(std::clamp(mei_round(value), -128, 127));
+}
+
+bool reconstruct_mei_first_i_frame(size_t width, size_t height,
+    const std::vector<int8_t> &coefficients,
+    const std::array<uint8_t, 128> &quantization,
+    const std::vector<int8_t> &operations, std::vector<uint8_t> &rgba,
+    int &minimum_luma, int &maximum_luma,
+    std::string &error) {
+    const size_t block_width = (width + 15) / 16;
+    const size_t block_height = (height + 15) / 16;
+    if (coefficients.size() != block_width * block_height * 384
+        || operations.size() != block_width * block_height * 2) {
+        error = "First MEI frame reconstruction buffers have invalid dimensions.";
+        return false;
+    }
+    constexpr size_t kBlockArea = 64;
+    float basis[8][8]{};
+    for (size_t sample = 0; sample < 8; ++sample) {
+        for (size_t frequency = 0; frequency < 8; ++frequency) {
+            const float normalization = frequency == 0
+                ? 0.3535533905932738f : 0.5f;
+            basis[sample][frequency] = normalization * std::cos(
+                static_cast<float>((2 * sample + 1) * frequency) * 3.14159265358979323846f / 16.0f);
+        }
+    }
+    rgba.assign(width * height * 4, 255);
+    std::array<std::array<int8_t, kBlockArea>, 6> spatial{};
+    std::array<std::array<float, kBlockArea>, 6> spectrum{};
+    std::array<std::array<float, kBlockArea>, 6> horizontal{};
+    minimum_luma = 255;
+    maximum_luma = 0;
+    for (size_t by = 0; by < block_height; ++by) {
+        for (size_t bx = 0; bx < block_width; ++bx) {
+            const size_t macroblock = by * block_width + bx;
+            const size_t coefficient_base = macroblock * 384;
+            for (size_t block = 0; block < 6; ++block) {
+                const size_t operation_index = macroblock * 2 + (block >= 4 ? 1 : 0);
+                const int operation = operations[operation_index];
+                const int exponent = operation / 2;
+                const float scale = (operation & 1 ? 1.5f : 1.0f)
+                    * std::pow(2.0f, static_cast<float>(exponent)) * 64.0f;
+                const size_t quant_base = block < 4 ? 0 : 64;
+                const size_t stream_base = coefficient_base + block * kBlockArea;
+                spectrum[block].fill(0.0f);
+                static constexpr int zigzag[64] = {
+                    0,1,8,16,9,2,3,10,17,24,32,25,18,11,4,5,
+                    12,19,26,33,40,48,41,34,27,20,13,6,7,14,21,28,
+                    35,42,49,56,57,50,43,36,29,22,15,23,30,37,44,51,
+                    58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63
+                };
+                for (size_t index = 0; index < kBlockArea; ++index) {
+                    int coefficient = static_cast<int>(coefficients[stream_base + index]);
+                    // The four Y blocks share only the first (DC) coefficient.
+                    if (block > 0 && block < 4 && index == 0)
+                        coefficient += static_cast<int>(coefficients[coefficient_base + index]);
+                    spectrum[block][zigzag[index]] = static_cast<float>(coefficient)
+                        * scale * static_cast<float>(quantization[quant_base + index] + 1);
+                }
+                // Apply the orthonormal 8x8 inverse DCT in two separable passes.
+                for (size_t y = 0; y < 8; ++y) {
+                    for (size_t x = 0; x < 8; ++x) {
+                        float sum = 0.0f;
+                        for (size_t frequency = 0; frequency < 8; ++frequency)
+                            sum += spectrum[block][y * 8 + frequency] * basis[x][frequency];
+                        horizontal[block][y * 8 + x] = sum;
+                    }
+                }
+                for (size_t y = 0; y < 8; ++y) {
+                    for (size_t x = 0; x < 8; ++x) {
+                        float sum = 0.0f;
+                        for (size_t frequency = 0; frequency < 8; ++frequency)
+                            sum += horizontal[block][frequency * 8 + x] * basis[y][frequency];
+                        spatial[block][y * 8 + x] = block < 4
+                            ? static_cast<int8_t>(mei_clamp_byte(mei_round(sum)))
+                            : mei_clamp_sbyte(sum);
+                    }
+                }
+            }
+            // 4:1:1 stores U and V as 8x8 planes replicated to 16x16 pixels.
+            for (size_t local_y = 0; local_y < 16; ++local_y) {
+                const size_t y_block = local_y / 8;
+                const size_t y_in_block = local_y % 8;
+                for (size_t local_x = 0; local_x < 16; ++local_x) {
+                    const size_t x_block = local_x / 8;
+                    const size_t x_in_block = local_x % 8;
+                    const size_t y_index = y_block * 2 + x_block;
+                    const int y_value = static_cast<uint8_t>(spatial[y_index][y_in_block * 8 + x_in_block]);
+                    const int u = spatial[4][(local_y / 2) * 8 + local_x / 2];
+                    const int v = spatial[5][(local_y / 2) * 8 + local_x / 2];
+                    minimum_luma = std::min(minimum_luma, y_value);
+                    maximum_luma = std::max(maximum_luma, y_value);
+                    const int blue = y_value + ((u * 7) >> 2);
+                    const int green = y_value - ((u * 3 + v * 6) >> 3);
+                    const int red = y_value + ((v * 3) >> 1);
+                    const size_t x = bx * 16 + local_x;
+                    const size_t y = by * 16 + local_y;
+                    if (x >= width || y >= height) continue;
+                    const size_t pixel = (y * width + x) * 4;
+                    rgba[pixel] = mei_clamp_byte(red);
+                    rgba[pixel + 1] = mei_clamp_byte(green);
+                    rgba[pixel + 2] = mei_clamp_byte(blue);
+                }
+            }
         }
     }
     return true;
@@ -786,11 +907,20 @@ Dictionary YzkCodec::decode_mei(const PackedByteArray &input) const {
             || audio.bits_per_sample != bits_per_sample)
             return codec_failure("Decoded MEI audio is outside the supported bounds.");
         std::vector<int8_t> first_frame_coefficients;
+        std::array<uint8_t, 128> first_frame_quantization{};
+        std::vector<int8_t> first_frame_operations;
         std::string video_error;
         const MeiFrameRecord &first_frame = frame_records.front();
         const bool first_frame_entropy_decoded = decode_mei_first_frame_coefficients(
             input.ptr() + first_frame.offset, first_frame.payload_size,
-            width, height, first_frame_coefficients, video_error);
+            width, height, first_frame_coefficients, first_frame_quantization,
+            first_frame_operations, video_error);
+        std::vector<uint8_t> first_frame_rgba;
+        int first_frame_min_luma = 0, first_frame_max_luma = 0;
+        const bool first_frame_decoded = first_frame_entropy_decoded
+            && reconstruct_mei_first_i_frame(width, height, first_frame_coefficients,
+                first_frame_quantization, first_frame_operations, first_frame_rgba,
+                first_frame_min_luma, first_frame_max_luma, video_error);
         PackedByteArray samples;
         samples.resize(static_cast<int64_t>(expected_audio_bytes));
         std::memcpy(samples.ptrw(), audio.samples.get<const uint8_t>(), static_cast<size_t>(expected_audio_bytes));
@@ -823,16 +953,25 @@ Dictionary YzkCodec::decode_mei(const PackedByteArray &input) const {
         result["bits_per_sample"] = static_cast<int64_t>(bits_per_sample);
         result["audio_data"] = samples;
         result["first_frame_entropy_decoded"] = first_frame_entropy_decoded;
+        result["first_frame_decoded"] = first_frame_decoded;
         result["first_frame_coefficient_count"] = static_cast<int64_t>(first_frame_coefficients.size());
+        result["first_frame_min_luma"] = first_frame_min_luma;
+        result["first_frame_max_luma"] = first_frame_max_luma;
         if (first_frame_entropy_decoded) {
             PackedByteArray coefficient_bytes;
             coefficient_bytes.resize(static_cast<int64_t>(first_frame_coefficients.size()));
             std::memcpy(coefficient_bytes.ptrw(), first_frame_coefficients.data(), first_frame_coefficients.size());
             result["first_frame_coefficients"] = coefficient_bytes;
         }
+        if (first_frame_decoded) {
+            PackedByteArray rgba;
+            rgba.resize(static_cast<int64_t>(first_frame_rgba.size()));
+            std::memcpy(rgba.ptrw(), first_frame_rgba.data(), first_frame_rgba.size());
+            result["first_frame_rgba"] = rgba;
+        }
         result["video_frames_decoded"] = false;
-        result["video_error"] = first_frame_entropy_decoded
-            ? "First I-frame entropy decoded; inverse quantization, transforms, color reconstruction, and remaining frames are pending."
+        result["video_error"] = first_frame_decoded
+            ? "First I-frame reconstructed; remaining I/P/B frames are pending."
             : String::utf8(video_error.c_str());
         return result;
     } catch (const std::exception &error) {
