@@ -1307,7 +1307,7 @@ class HostSprite extends RefCounted:
 			if message_pending:
 				host.active_messages[get_instance_id()] = weakref(self)
 			host.message_output.emit(self)
-		return text.length()
+		return 0
 
 	func set_font_bordering(enabled: bool) -> int:
 		font_bordering = enabled

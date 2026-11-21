@@ -1495,15 +1495,16 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 			return 0
 		"AttachToneFilter":
 			var filter: Variant = args[0] if not args.is_empty() else null
-			return spr.attach_tone_filter(filter as CsxHostClass.HostToneFilter) if filter is CsxHostClass.HostToneFilter else -1
+			return spr.attach_tone_filter(filter as CsxHostClass.HostToneFilter) if filter is CsxHostClass.HostToneFilter else 1
 		"BeginAnimation":
-			return spr.begin_animation(
+			var animation_result := spr.begin_animation(
 				_to_int(args[0]) if args.size() > 0 else 1,
 				_to_int(args[1]) if args.size() > 1 else 0,
 				_to_int(args[2]) if args.size() > 2 else -1,
 				_to_int(args[3]) if args.size() > 3 else 0,
 				_to_int(args[4]) if args.size() > 4 else -1
 			)
+			return 0 if animation_result == 0 else 1
 		"EndAnimation":
 			return spr.end_animation()
 		"SetVisible":
@@ -1532,8 +1533,8 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 			return 0
 		"SetSpriteImage":
 			if args.size() >= 2:
-				return 1 if spr.set_form_image(str(args[0]), str(args[1])) else 0
-			return 0
+				return 0 if spr.set_form_image(str(args[0]), str(args[1])) else 1
+			return 1
 		"SetBezierCurve":
 			spr.activation_curves = [[], [], []]
 			for index in mini(args.size(), 3):
@@ -1560,13 +1561,14 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 		"SetEffectParameter":
 			return spr.set_effect_parameter(args[0] if not args.is_empty() else null, args[1] if args.size() > 1 else null)
 		"SetMeshWarpEffect":
-			return spr.set_mesh_warp_effect(
+			var mesh_result := spr.set_mesh_warp_effect(
 				args[0] if args.size() > 0 else null,
 			_to_int(args[1]) if args.size() > 1 else 0,
 			_to_int(args[2]) if args.size() > 2 else 0,
 			_to_int(args[3]) if args.size() > 3 else 0,
 			args[4] if args.size() > 4 else null
 		)
+			return 0 if mesh_result == 0 else 1
 		"ModifyAnimationFlags":
 			var add_flags := _to_int(args[0]) if not args.is_empty() else 0
 			var remove_flags := _to_int(args[1]) if args.size() > 1 else 0
@@ -1617,7 +1619,7 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 		"CreateMessage":
 			var message_width := _to_int(args[0]) if args.size() > 0 else 0
 			var message_height := _to_int(args[1]) if args.size() > 1 else 0
-			return spr.create_message(message_width, message_height)
+			return _sprite_error_code(spr.create_message(message_width, message_height), 1)
 		"SetBackColor":
 			var rgb := _to_int(args[0]) if args.size() > 0 else 0
 			var en := is_truthy(args[1]) if args.size() > 1 else false
@@ -1634,15 +1636,15 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 			return spr.fill_rect(rect, col, trans, flags)
 		"LoadImage":
 			var fname := str(args[0]) if args.size() > 0 else ""
-			return spr.load_image(fname)
+			return _sprite_error_code(spr.load_image(fname), 1)
 		"OpenMovie":
 			var mov_path := str(args[0]) if args.size() > 0 else ""
-			return spr.open_movie(mov_path)
+			return _sprite_error_code(spr.open_movie(mov_path), 1)
 		"PlayMovie":
 			var mode := _to_int(args[0]) if args.size() > 0 else 0
-			return spr.play_movie(mode)
+			return _sprite_error_code(spr.play_movie(mode), 1)
 		"IsMoviePlaying":
-			return spr.is_movie_playing()
+			return -1 if spr.is_movie_playing() != 0 else 0
 		"StopMovie":
 			return spr.stop_movie()
 		"CloseMovie":
@@ -1658,7 +1660,7 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 		"DrawImage":
 			var src = args[0] if args.size() > 0 else null
 			var param = args[1] if args.size() > 1 else null
-			return spr.draw_image(src, param)
+			return _sprite_error_code(spr.draw_image(src, param), 1)
 		"GetInfo", "GetImageInfo":
 			var info: CsxInstance = args[0] if (args.size() > 0 and args[0] is CsxInstance) else CsxInstance.new("ImageInfo")
 			var bpos := CsxInstance.new("Point")
@@ -1685,7 +1687,7 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 		"SetSpriteText":
 			var item_id := str(args[0]) if args.size() > 0 else ""
 			var text_value := str(args[1]) if args.size() > 1 else ""
-			return spr.set_sprite_text(item_id, text_value)
+			return _sprite_error_code(spr.set_sprite_text(item_id, text_value), 1)
 		"GetSpriteText":
 			return spr.get_sprite_text(str(args[0]) if not args.is_empty() else "")
 		"GetHorzScrollPos":
@@ -1693,21 +1695,21 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 		"SetHorzScrollPos":
 			var position := _to_int(args[0]) if args.size() > 0 else 0
 			var item_id := str(args[1]) if args.size() > 1 else ""
-			return spr.set_scroll_position(position, item_id, "horz")
+			return _sprite_error_code(spr.set_scroll_position(position, item_id, "horz"), 1)
 		"SetHorzScrollRange":
 			var range_value := _to_int(args[0]) if args.size() > 0 else 0
 			var item_id := str(args[1]) if args.size() > 1 else ""
-			return spr.set_scroll_range(range_value, item_id, "horz")
+			return _sprite_error_code(spr.set_scroll_range(range_value, item_id, "horz"), 1)
 		"GetVertScrollPos":
 			return spr.get_scroll_position(str(args[0]) if not args.is_empty() else "", "vert")
 		"SetVertScrollPos":
 			var position := _to_int(args[0]) if args.size() > 0 else 0
 			var item_id := str(args[1]) if args.size() > 1 else ""
-			return spr.set_scroll_position(position, item_id, "vert")
+			return _sprite_error_code(spr.set_scroll_position(position, item_id, "vert"), 1)
 		"SetVertScrollRange":
 			var range_value := _to_int(args[0]) if args.size() > 0 else 0
 			var item_id := str(args[1]) if args.size() > 1 else ""
-			return spr.set_scroll_range(range_value, item_id, "vert")
+			return _sprite_error_code(spr.set_scroll_range(range_value, item_id, "vert"), 1)
 		"GetRectangle":
 			var rect: Variant = args[0] if not args.is_empty() else null
 			if rect is CsxInstance and rect.type_name == "Rect":
@@ -1747,6 +1749,10 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 			if spr.host != null:
 				spr.host.report_unsupported("HostSprite.%s" % method)
 			return 0
+
+
+func _sprite_error_code(host_status: int, success_status: int = 0) -> int:
+	return 0 if host_status == success_status else 1
 
 
 func _sprite_has_checked_button(sprite: CsxHostClass.HostSprite, button_id: String) -> bool:

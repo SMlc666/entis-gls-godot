@@ -75,8 +75,8 @@ func _initialize() -> void:
 	if sprite.fields["effect_mesh_frames"].size() != 2 or sprite.fields["effect_mesh_base"].size() != 4:
 		_fail("SetMeshWarpEffect must retain all morph frames and its generated base mesh")
 		return
-	if vm._dispatch_sprite_method(sprite, "SetMeshWarpEffect", [[], 0, 0, 0]) != -1:
-		_fail("SetMeshWarpEffect must reject invalid mesh dimensions")
+	if vm._dispatch_sprite_method(sprite, "SetMeshWarpEffect", [[], 0, 0, 0]) != 1:
+		_fail("SetMeshWarpEffect must report invalid dimensions as Entis Error 1")
 		return
 	print("PASS WaveCircle and TileImage native parameters and animeEffect timing")
 	quit(0)
