@@ -64,7 +64,7 @@ func _initialize() -> void:
 			if method_name == "SetEffectParameter":
 				callsites[int(instruction["address"])] = _function_owner(vm.functions, int(instruction["address"]))
 			if method_name in ["SetVolume", "SetVolumeEnvelope", "GetVolume", "SetRewindingPortion"]:
-				volume_callsites[int(instruction["address"])] = "%s mode=%d" % [_function_owner(vm.functions, int(instruction["address"])), mode]
+				volume_callsites[int(instruction["address"])] = "%s %s mode=%d" % [method_name, _function_owner(vm.functions, int(instruction["address"])), mode]
 			if method_name in ["OpenMovie", "PlayMovie", "IsMoviePlaying", "StopMovie", "CloseMovie"]:
 				movie_callsites[int(instruction["address"])] = "%s mode=%d" % [_function_owner(vm.functions, int(instruction["address"])), mode]
 		cursor = int(batch.get("next_address", cursor))

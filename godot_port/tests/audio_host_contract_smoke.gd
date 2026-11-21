@@ -15,6 +15,8 @@ func _run() -> void:
 	host.se_player = _new_player("SE")
 	host.voice_player = _new_player("Voice")
 	host.system_player = _new_player("System")
+	for channel in ["bgm", "env_se", "se", "voice", "system"]:
+		host.audio_right_players[channel] = _new_player("%sRight" % channel)
 
 	var bgm: Variant = _resource(host, "BGM07.mio", "bgm")
 	var se: Variant = _resource(host, "SE001.mio", "se")
@@ -104,9 +106,28 @@ func _run() -> void:
 	host.advance_audio_envelopes(0.1)
 	expect(se.is_volume_envelope_pending() == 0 and is_equal_approx(host.get_audio_channel_volume("se"), 0.8), "A completed envelope must reach its endpoint and clear its pending state")
 
-	var volume_before_asymmetric_request := host.get_audio_channel_volume("se")
-	expect(se.set_volume(0.2, 0.8) == -1, "Asymmetric stereo volume must be explicitly unsupported")
-	expect(is_equal_approx(host.get_audio_channel_volume("se"), volume_before_asymmetric_request), "Unsupported stereo volume must not be averaged into a false result")
+	expect(se.set_volume(0.2, 0.8) == 1, "SetVolume must preserve independent left and right channel values")
+	var se_right_player: AudioStreamPlayer = host.audio_right_players["se"]
+	expect(bool(host.se_player.get_meta("csx_dual_channel", false)) and se_right_player.stream is AudioStreamWAV, "Asymmetric playback must split and route both output channels")
+	expect(host.se_player.stream.data.slice(0, 4) == PackedByteArray([0x34, 0x12, 0, 0]), "The left playback lane must preserve left PCM and silence its right lane")
+	expect(se_right_player.stream.data.slice(0, 4) == PackedByteArray([0, 0, 0xcc, 0xed]), "The right playback lane must preserve right PCM and silence its left lane")
+	var pcm8 := AudioStreamWAV.new()
+	pcm8.format = AudioStreamWAV.FORMAT_8_BITS
+	pcm8.mix_rate = 22050
+	pcm8.stereo = true
+	pcm8.data = PackedByteArray([10, 20, 30, 40])
+	var left8: AudioStreamWAV = host._make_audio_lane_stream(pcm8, 0)
+	var right8: AudioStreamWAV = host._make_audio_lane_stream(pcm8, 1)
+	expect(left8.data == PackedByteArray([10, 128, 30, 128]) and right8.data == PackedByteArray([128, 20, 128, 40]), "8-bit PCM splitting must use unsigned silence and retain channel samples")
+	expect(is_equal_approx(host.get_audio_channel_volume("se"), 0.2), "SetVolume must apply the left channel gain")
+	expect(is_equal_approx(db_to_linear(se_right_player.volume_db), 0.8), "SetVolume must apply the right channel gain independently")
+	var asymmetric_curve: Variant = _volume_curve(0.2, 0.8, 0.4, 0.6)
+	expect(se.set_volume_envelope(asymmetric_curve, 1000) == 1, "SetVolumeEnvelope must preserve separate channel curves")
+	host.advance_audio_envelopes(0.5)
+	expect(is_equal_approx(host.get_audio_channel_volume("se"), 0.3), "The left volume envelope must interpolate independently")
+	expect(is_equal_approx(db_to_linear(se_right_player.volume_db), 0.7), "The right volume envelope must interpolate independently")
+	expect(se.pause() == 1 and se_right_player.stream_paused, "Pausing an asymmetric stream must pause both channel players")
+	expect(se.restart() == 1 and not se_right_player.stream_paused, "Resuming an asymmetric stream must resume both channel players")
 
 	expect(host.resolve_audio_channel("BGM01.mio") == "bgm", "BGM filename classification must remain supported")
 	expect(host.resolve_audio_channel("SE270.mio") == "env_se", "Environment SE filename classification must remain supported")
@@ -165,19 +186,26 @@ func _silence_stream() -> AudioStreamWAV:
 	stream.stereo = true
 	var silence := PackedByteArray()
 	silence.resize(22050 * 2 * 2)
+	silence[0] = 0x34
+	silence[1] = 0x12
+	silence[2] = 0xcc
+	silence[3] = 0xed
 	stream.data = silence
 	return stream
 
 
 func _linear_volume_curve(start_volume: float, end_volume: float) -> Variant:
+	return _volume_curve(start_volume, start_volume, end_volume, end_volume)
+
+
+func _volume_curve(start_left: float, start_right: float, end_left: float, end_right: float) -> Variant:
 	var curve = CsxVMClass.CsxInstance.new("Bezier2D")
 	var points: Array = []
 	for step in range(4):
 		var point = CsxVMClass.CsxInstance.new("Point")
 		var t := float(step) / 3.0
-		var value := lerpf(start_volume, end_volume, t)
-		point.set_field("x", value)
-		point.set_field("y", value)
+		point.set_field("x", lerpf(start_left, end_left, t))
+		point.set_field("y", lerpf(start_right, end_right, t))
 		points.append(point)
 	curve.set_field("parent", points)
 	return curve

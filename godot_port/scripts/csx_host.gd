@@ -38,6 +38,7 @@ var image_cache_budget_bytes := 256 * 1024 * 1024
 var sound_cache_budget_bytes := 64 * 1024 * 1024
 
 var audio_players: Dictionary = {}
+var audio_right_players: Dictionary = {}
 var audio_total_volumes: Dictionary = {0: 1.0, 1: 1.0, 2: 1.0, 3: 1.0}
 var bgm_player: AudioStreamPlayer = null
 var env_se_player: AudioStreamPlayer = null
@@ -275,7 +276,7 @@ class HostResource extends RefCounted:
 		if audio_stream == null and load_sound(name) != 1:
 			return 0
 		play_type = next_play_type
-		if not host.play_audio_stream(audio_stream, name, audio_channel, start_frame, repeat, channel_default_loop, end_frame, rewind_frame, play_type, volume_left):
+		if not host.play_audio_stream(audio_stream, name, audio_channel, start_frame, repeat, channel_default_loop, end_frame, rewind_frame, play_type, volume_left, volume_right):
 			return 0
 		is_playing = true
 		current_position = start_frame
@@ -334,16 +335,12 @@ class HostResource extends RefCounted:
 	func set_volume(left: float, right: float) -> int:
 		var normalized_left := clampf(left, 0.0, 1.0)
 		var normalized_right := clampf(right, 0.0, 1.0)
-		if not is_equal_approx(normalized_left, normalized_right):
-			if host != null:
-				host.report_unsupported("HostResource.SetVolume asymmetric stereo values")
-			return -1
 		if host == null:
 			return 0
 		cancel_volume_envelope()
 		volume_left = normalized_left
 		volume_right = normalized_right
-		if play_type != AUDIO_PLAY_TYPE_NONE and not host.set_resource_audio_volume(audio_channel, volume_left, play_type):
+		if play_type != AUDIO_PLAY_TYPE_NONE and not host.set_resource_audio_volume(audio_channel, volume_left, volume_right, play_type, name):
 			return 0
 		return 1
 
@@ -364,10 +361,15 @@ class HostResource extends RefCounted:
 			var p := Vector2(float(x), float(y))
 			if not is_finite(p.x) or not is_finite(p.y):
 				return 0
-			if not is_equal_approx(p.x, p.y):
-				host.report_unsupported("HostResource.SetVolumeEnvelope asymmetric stereo values")
-				return -1
 			points.append(p)
+		var has_asymmetric_points := false
+		for point: Vector2 in points:
+			if not is_equal_approx(point.x, point.y):
+				has_asymmetric_points = true
+				break
+		if has_asymmetric_points and is_playing and not host.ensure_dual_channel_playback(audio_channel):
+			host._audio_error("无法为音量包络准备左右独立声道: %s" % name)
+			return -1
 		volume_envelope = points
 		volume_envelope_duration_ms = maxf(0.0, float(duration))
 		volume_envelope_elapsed_ms = 0.0
@@ -421,7 +423,7 @@ class HostResource extends RefCounted:
 			+ volume_envelope[3] * t * t * t
 		var left := clampf(value.x, 0.0, 1.0)
 		var right := clampf(value.y, 0.0, 1.0)
-		if host.set_resource_audio_volume(audio_channel, left, play_type):
+		if host.set_resource_audio_volume(audio_channel, left, right, play_type, name):
 			volume_left = left
 			volume_right = right
 
@@ -2384,7 +2386,47 @@ func _audio_player_for_channel(channel: String) -> AudioStreamPlayer:
 		_: return null
 
 
-func play_audio_stream(stream: AudioStreamWAV, name: String, channel_hint: String = "", start_frame: int = 0, repeat: bool = false, channel_default_loop: bool = true, end_frame: int = -1, rewind_frame: int = -1, play_type: int = -2, resource_volume: float = 1.0) -> bool:
+func _right_audio_player_for_channel(channel: String) -> AudioStreamPlayer:
+	var player: Variant = audio_right_players.get(channel.strip_edges().to_lower())
+	return player as AudioStreamPlayer if player is AudioStreamPlayer else null
+
+
+func _set_audio_player_volume(player: AudioStreamPlayer, linear_volume: float) -> void:
+	var volume := clampf(linear_volume, 0.0, 1.0)
+	player.volume_db = -80.0 if volume <= 0.0001 else linear_to_db(volume)
+
+
+func _make_audio_lane_stream(source: AudioStreamWAV, lane: int) -> AudioStreamWAV:
+	var result := source.duplicate() as AudioStreamWAV
+	if result == null or lane not in [0, 1]:
+		return null
+	var sample_bytes := 1 if source.format == AudioStreamWAV.FORMAT_8_BITS else 2
+	if source.format not in [AudioStreamWAV.FORMAT_8_BITS, AudioStreamWAV.FORMAT_16_BITS]:
+		return null
+	var source_channels := 2 if source.stereo else 1
+	var source_frame_bytes := sample_bytes * source_channels
+	if source_frame_bytes == 0 or source.data.size() % source_frame_bytes != 0:
+		return null
+	var frame_count := source.data.size() / source_frame_bytes
+	var output := PackedByteArray()
+	output.resize(frame_count * sample_bytes * 2)
+	if sample_bytes == 1:
+		output.fill(128)
+	else:
+		output.fill(0)
+	var source_data := source.data
+	for frame in range(frame_count):
+		var source_channel := lane if source.stereo else 0
+		var source_offset := frame * source_frame_bytes + source_channel * sample_bytes
+		var output_offset := frame * sample_bytes * 2 + lane * sample_bytes
+		for byte_index in range(sample_bytes):
+			output[output_offset + byte_index] = source_data[source_offset + byte_index]
+	result.data = output
+	result.stereo = true
+	return result
+
+
+func play_audio_stream(stream: AudioStreamWAV, name: String, channel_hint: String = "", start_frame: int = 0, repeat: bool = false, channel_default_loop: bool = true, end_frame: int = -1, rewind_frame: int = -1, play_type: int = -2, resource_volume: float = 1.0, resource_volume_right: float = -1.0) -> bool:
 	if stream == null:
 		_audio_error("音频流为空: %s" % name)
 		return false
@@ -2393,6 +2435,7 @@ func play_audio_stream(stream: AudioStreamWAV, name: String, channel_hint: Strin
 		_audio_error("无法确定音频资源的播放声道: %s" % name)
 		return false
 	var player := _audio_player_for_channel(channel)
+	var right_player := _right_audio_player_for_channel(channel)
 	if player == null:
 		_audio_error("音频声道尚未初始化: %s" % channel)
 		return false
@@ -2409,6 +2452,12 @@ func play_audio_stream(stream: AudioStreamWAV, name: String, channel_hint: Strin
 	var end := frame_count if end_frame == -1 else end_frame
 	var rewind := start_frame if rewind_frame == -1 else rewind_frame
 	var should_loop := repeat or (channel_default_loop and channel in ["bgm", "env_se"])
+	var left_volume := clampf(resource_volume, 0.0, 1.0)
+	var right_volume := left_volume if resource_volume_right < 0.0 else clampf(resource_volume_right, 0.0, 1.0)
+	var use_dual_channels := not is_equal_approx(left_volume, right_volume)
+	if use_dual_channels and right_player == null:
+		_audio_error("左右声道音量不同时需要双路音频播放器: %s" % name)
+		return false
 	if start_frame < 0 or start_frame >= end or end > frame_count or (should_loop and (rewind < 0 or rewind >= end)):
 		_audio_error("无效的音频采样帧区间: %s (start=%d, end=%d, rewind=%d, frames=%d)" % [name, start_frame, end, rewind, frame_count])
 		return false
@@ -2423,15 +2472,41 @@ func play_audio_stream(stream: AudioStreamWAV, name: String, channel_hint: Strin
 		playback_stream.loop_mode = AudioStreamWAV.LOOP_DISABLED
 		if end < frame_count:
 			playback_stream.data = pcm.slice(0, end * bytes_per_frame)
-	player.stream = playback_stream
+	if use_dual_channels:
+		var left_stream := _make_audio_lane_stream(playback_stream, 0)
+		var right_stream := _make_audio_lane_stream(playback_stream, 1)
+		if left_stream == null or right_stream == null:
+			_audio_error("无法拆分左右声道音频流: %s" % name)
+			return false
+		player.stream = left_stream
+		right_player.stream = right_stream
+	else:
+		player.stream = playback_stream
+		if right_player != null:
+			right_player.stop()
+			right_player.stream = null
 	player.stream_paused = false
 	player.set_meta("csx_audio_name", name.to_lower())
 	if play_type == -2:
 		play_type = _default_audio_play_type(channel)
 	player.set_meta("csx_play_type", play_type)
-	player.set_meta("csx_resource_volume", clampf(resource_volume, 0.0, 1.0))
-	set_resource_audio_volume(channel, resource_volume, play_type)
+	player.set_meta("csx_resource_volume", left_volume)
+	player.set_meta("csx_resource_volume_left", left_volume)
+	player.set_meta("csx_resource_volume_right", right_volume)
+	player.set_meta("csx_dual_channel", use_dual_channels)
+	if use_dual_channels:
+		right_player.stream_paused = false
+		right_player.set_meta("csx_audio_name", name.to_lower())
+		right_player.set_meta("csx_play_type", play_type)
+		right_player.set_meta("csx_resource_volume", right_volume)
+		right_player.set_meta("csx_resource_volume_left", left_volume)
+		right_player.set_meta("csx_resource_volume_right", right_volume)
+		right_player.set_meta("csx_dual_channel", true)
+	if not set_resource_audio_volume(channel, left_volume, right_volume, play_type, name):
+		return false
 	player.play(float(start_frame) / stream.mix_rate)
+	if use_dual_channels:
+		right_player.play(float(start_frame) / stream.mix_rate)
 	match channel:
 		"bgm":
 			current_bgm = name
@@ -2473,8 +2548,7 @@ func play_bgm(name: String) -> void:
 
 func stop_bgm() -> void:
 	current_bgm = ""
-	if bgm_player != null:
-		bgm_player.stop()
+	_stop_channel_players("bgm")
 	print("[CSX Host] Stopped BGM")
 
 
@@ -2484,8 +2558,7 @@ func play_env_se(name: String) -> void:
 
 func stop_env_se() -> void:
 	current_env_se = ""
-	if env_se_player != null:
-		env_se_player.stop()
+	_stop_channel_players("env_se")
 	print("[CSX Host] Stopped EnvSE")
 
 
@@ -2494,8 +2567,7 @@ func play_se(name: String) -> void:
 
 
 func stop_se() -> void:
-	if se_player != null:
-		se_player.stop()
+	_stop_channel_players("se")
 
 
 func play_voice(name: String) -> void:
@@ -2514,8 +2586,21 @@ func _play_named_audio(name: String, channel: String) -> bool:
 
 func stop_voice() -> void:
 	current_voice = ""
-	if voice_player != null:
-		voice_player.stop()
+	_stop_channel_players("voice")
+
+
+func _stop_channel_players(channel: String) -> void:
+	var player := _audio_player_for_channel(channel)
+	var right_player := _right_audio_player_for_channel(channel)
+	if player != null:
+		player.stop()
+		player.stream_paused = false
+		player.set_meta("csx_dual_channel", false)
+	if right_player != null:
+		right_player.stop()
+		right_player.stream = null
+		right_player.stream_paused = false
+		right_player.set_meta("csx_dual_channel", false)
 
 
 func stop_audio(name: String, channel_hint: String = "") -> bool:
@@ -2527,6 +2612,13 @@ func stop_audio(name: String, channel_hint: String = "") -> bool:
 	player.stop()
 	player.stream_paused = false
 	player.set_meta("csx_play_type", AUDIO_PLAY_TYPE_NONE)
+	var right_player := _right_audio_player_for_channel(channel)
+	if right_player != null:
+		right_player.stop()
+		right_player.stream = null
+		right_player.stream_paused = false
+		right_player.set_meta("csx_play_type", AUDIO_PLAY_TYPE_NONE)
+		player.set_meta("csx_dual_channel", false)
 	match channel:
 		"bgm":
 			current_bgm = ""
@@ -2543,6 +2635,9 @@ func pause_audio(name: String, channel_hint: String = "") -> bool:
 		last_error = "无法暂停当前未播放的音频声道: %s (%s)" % [channel, name]
 		return false
 	player.stream_paused = true
+	var right_player := _right_audio_player_for_channel(channel)
+	if right_player != null and bool(player.get_meta("csx_dual_channel", false)):
+		right_player.stream_paused = true
 	return true
 
 
@@ -2554,6 +2649,9 @@ func resume_audio(name: String, channel_hint: String = "") -> bool:
 		return false
 	if player.stream_paused:
 		player.stream_paused = false
+		var right_player := _right_audio_player_for_channel(channel)
+		if right_player != null and bool(player.get_meta("csx_dual_channel", false)):
+			right_player.stream_paused = false
 		return true
 	return false
 
@@ -2573,7 +2671,10 @@ func set_audio_channel_volume(channel: String, linear_volume: float) -> bool:
 		last_error = "音频声道尚未初始化，无法设置音量: %s" % normalized_channel
 		return false
 	var volume := clampf(linear_volume, 0.0, 1.0)
-	player.volume_db = -80.0 if volume <= 0.0001 else linear_to_db(volume)
+	_set_audio_player_volume(player, volume)
+	var right_player := _right_audio_player_for_channel(normalized_channel)
+	if right_player != null and bool(player.get_meta("csx_dual_channel", false)):
+		_set_audio_player_volume(right_player, volume)
 	return true
 
 
@@ -2590,14 +2691,85 @@ func _default_audio_play_type(channel: String) -> int:
 		_: return AUDIO_PLAY_TYPE_NONE
 
 
-func set_resource_audio_volume(channel: String, resource_volume: float, play_type: int) -> bool:
+func set_resource_audio_volume(channel: String, resource_volume: float, resource_volume_right: float = -1.0, play_type: int = -2, resource_name: String = "") -> bool:
+	if play_type == -2:
+		play_type = _default_audio_play_type(channel)
 	var factor := float(audio_total_volumes.get(play_type, 1.0)) if play_type in [0, 1, 2, 3] else 1.0
 	var player := _audio_player_for_channel(channel)
 	if player == null:
 		return false
-	player.set_meta("csx_resource_volume", clampf(resource_volume, 0.0, 1.0))
+	if not resource_name.is_empty() and str(player.get_meta("csx_audio_name", "")) != resource_name.to_lower():
+		return true
+	var left_volume := clampf(resource_volume, 0.0, 1.0)
+	var right_volume := left_volume if resource_volume_right < 0.0 else clampf(resource_volume_right, 0.0, 1.0)
+	if not is_equal_approx(left_volume, right_volume) and _right_audio_player_for_channel(channel) == null:
+		last_error = "左右声道音量不同时需要双路音频播放器: %s" % channel
+		return false
+	player.set_meta("csx_resource_volume", left_volume)
+	player.set_meta("csx_resource_volume_left", left_volume)
+	player.set_meta("csx_resource_volume_right", right_volume)
 	player.set_meta("csx_play_type", play_type)
-	return set_audio_channel_volume(channel, clampf(resource_volume, 0.0, 1.0) * factor)
+	if not is_equal_approx(left_volume, right_volume) and player.stream != null:
+		if not ensure_dual_channel_playback(channel):
+			return false
+	var right_player := _right_audio_player_for_channel(channel)
+	if bool(player.get_meta("csx_dual_channel", false)):
+		if right_player == null:
+			return false
+		right_player.set_meta("csx_resource_volume", right_volume)
+		right_player.set_meta("csx_resource_volume_left", left_volume)
+		right_player.set_meta("csx_resource_volume_right", right_volume)
+		right_player.set_meta("csx_play_type", play_type)
+		_set_audio_player_volume(player, left_volume * factor)
+		_set_audio_player_volume(right_player, right_volume * factor)
+		return true
+	return set_audio_channel_volume(channel, left_volume * factor)
+
+
+func ensure_dual_channel_playback(channel: String) -> bool:
+	var normalized_channel := channel.strip_edges().to_lower()
+	var player := _audio_player_for_channel(normalized_channel)
+	var right_player := _right_audio_player_for_channel(normalized_channel)
+	if player == null or right_player == null:
+		return false
+	if bool(player.get_meta("csx_dual_channel", false)):
+		return true
+	if player.stream == null or not player.stream is AudioStreamWAV:
+		return false
+	var name := str(player.get_meta("csx_audio_name", ""))
+	if name.is_empty():
+		return false
+	var source := player.stream as AudioStreamWAV
+	var left_stream := _make_audio_lane_stream(source, 0)
+	var right_stream := _make_audio_lane_stream(source, 1)
+	if left_stream == null or right_stream == null:
+		return false
+	var was_active := player.playing or player.stream_paused
+	var position := roundi(player.get_playback_position() * source.mix_rate) if was_active else 0
+	var was_paused := player.stream_paused
+	var play_type := int(player.get_meta("csx_play_type", _default_audio_play_type(normalized_channel)))
+	var left_volume := float(player.get_meta("csx_resource_volume_left", 1.0))
+	var right_volume := float(player.get_meta("csx_resource_volume_right", left_volume))
+	player.stop()
+	right_player.stop()
+	player.stream = left_stream
+	right_player.stream = right_stream
+	player.set_meta("csx_dual_channel", true)
+	right_player.set_meta("csx_audio_name", name)
+	right_player.set_meta("csx_play_type", play_type)
+	right_player.set_meta("csx_dual_channel", true)
+	right_player.set_meta("csx_resource_volume_left", left_volume)
+	right_player.set_meta("csx_resource_volume_right", right_volume)
+	right_player.set_meta("csx_resource_volume", right_volume)
+	if was_active:
+		player.play(float(position) / source.mix_rate)
+		right_player.play(float(position) / source.mix_rate)
+		player.stream_paused = was_paused
+		right_player.stream_paused = was_paused
+	var factor := float(audio_total_volumes.get(play_type, 1.0)) if play_type in [0, 1, 2, 3] else 1.0
+	_set_audio_player_volume(player, left_volume * factor)
+	_set_audio_player_volume(right_player, right_volume * factor)
+	return true
 
 
 func get_audio_total_volume(play_type: int) -> float:
@@ -2623,8 +2795,9 @@ func set_audio_total_volume(play_type: int, linear_volume: float) -> bool:
 	for channel in ["bgm", "env_se", "se", "voice", "system"]:
 		var player := _audio_player_for_channel(channel)
 		if player != null and player.stream != null and int(player.get_meta("csx_play_type", -1)) == play_type:
-			var resource_volume := float(player.get_meta("csx_resource_volume", 1.0))
-			set_resource_audio_volume(channel, resource_volume, play_type)
+			var resource_volume_left := float(player.get_meta("csx_resource_volume_left", player.get_meta("csx_resource_volume", 1.0)))
+			var resource_volume_right := float(player.get_meta("csx_resource_volume_right", resource_volume_left))
+			set_resource_audio_volume(channel, resource_volume_left, resource_volume_right, play_type, str(player.get_meta("csx_audio_name", "")))
 	return true
 
 

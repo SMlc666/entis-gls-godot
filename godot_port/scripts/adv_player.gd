@@ -276,6 +276,7 @@ var system_player: AudioStreamPlayer
 var env_se_player: AudioStreamPlayer
 var se_player: AudioStreamPlayer
 var voice_player: AudioStreamPlayer
+var audio_right_players: Dictionary = {}
 
 # Execution state
 var is_initialized := false
@@ -664,6 +665,11 @@ func _setup_audio() -> void:
 	voice_player = AudioStreamPlayer.new()
 	voice_player.name = "VoicePlayer"
 	add_child(voice_player)
+	for channel in ["bgm", "env_se", "se", "voice", "system"]:
+		var right_player := AudioStreamPlayer.new()
+		right_player.name = "%sRightPlayer" % channel.capitalize()
+		add_child(right_player)
+		audio_right_players[channel] = right_player
 
 
 func _object_has_property(target: Object, property_name: String) -> bool:
@@ -702,6 +708,7 @@ func _start_engine() -> void:
 	host.env_se_player = env_se_player
 	host.se_player = se_player
 	host.voice_player = voice_player
+	host.audio_right_players = audio_right_players
 	_restore_player_settings()
 	_apply_config_state()
 
