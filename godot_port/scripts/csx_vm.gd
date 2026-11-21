@@ -2153,6 +2153,8 @@ func _dispatch_window_method(win: CsxHostClass.HostWindow, method: String, args:
 			return 0
 		"GetDisplaySize":
 			return win.get_display_size()
+		"GetParameter":
+			return win.get_parameter(args[0] if args.size() > 0 else null)
 		"ShowCursor":
 			return win.show_cursor(_to_int(args[0]) if args.size() > 0 else 0)
 		"SetOptionalFuncFlag":

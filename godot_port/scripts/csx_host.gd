@@ -1950,6 +1950,18 @@ class HostWindow extends RefCounted:
 	func get_display_size() -> Vector2i:
 		return viewport_size
 
+	func get_parameter(param: Variant) -> int:
+		if param != null and param.has_method("set_field"):
+			param.set_field("nImageWidth", viewport_size.x)
+			param.set_field("nImageHeight", viewport_size.y)
+			param.set_field("nTransparency", 0)
+			for point_name in ["ptDstPos", "ptRevCenter"]:
+				var point: Variant = param.get_field(point_name) if param.has_method("get_field") else null
+				if point != null and point.has_method("set_field"):
+					point.set_field("x", 0)
+					point.set_field("y", 0)
+		return 0
+
 	func show_cursor(_show_flag: int) -> int:
 		return 0
 
