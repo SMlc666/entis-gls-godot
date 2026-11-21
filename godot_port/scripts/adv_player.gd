@@ -1983,7 +1983,7 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 		elif native_mesh != null:
 			native_mesh.visible = false
 		var effect_type := str(sprite.fields.get("effect_type", ""))
-		var effect_mode: int = int({"TileImage": 1, "FilterWhite": 2, "FilterLight": 3, "FilterBlack": 4, "FilterDark": 5, "RasterScroll": 6, "WaveCircle": 7}.get(effect_type, 0))
+		var effect_mode: int = int({"TileImage": 1, "FilterWhite": 2, "FilterLight": 3, "FilterBlack": 4, "FilterDark": 5, "RasterScroll": 6, "WaveCircle": 7, "ShadingOff": 8, "ShadingLight": 9}.get(effect_type, 0))
 		if effect_mode > 0 and sprite.texture != null:
 			var effect_material: ShaderMaterial = native_texture.get_meta("native_effect_material") as ShaderMaterial if native_texture.has_meta("native_effect_material") else null
 			if effect_material == null:
@@ -1999,6 +1999,12 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 			uniform float raster_mesh_size = 1.0;
 			uniform float raster_frequency = 0.0;
 			uniform bool raster_transition = false;
+			uniform sampler2D shading_level_0;
+			uniform sampler2D shading_level_1;
+			uniform sampler2D shading_level_2;
+			uniform sampler2D shading_level_3;
+			uniform sampler2D shading_level_4;
+			uniform bool shading_levels_ready = false;
 			void fragment() {
 				vec2 uv = UV;
 				if (effect_mode == 1) uv = fract(UV * repeat_scale + scroll_uv);
@@ -2028,6 +2034,20 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 					}
 				}
 				vec4 sampled = texture(TEXTURE, uv);
+				if ((effect_mode == 8 || effect_mode == 9) && shading_levels_ready) {
+					int shade_degree = clamp(blend_degree, 0, 256);
+					int shade_index = min(shade_degree >> 6, 3);
+					float shade_mix = float(shade_degree & 63) / 63.0;
+					if (shade_degree >= 256) shade_mix = 1.0;
+					vec4 shade_a = texture(shading_level_0, UV);
+					vec4 shade_b = texture(shading_level_1, UV);
+					if (shade_index == 1) { shade_a = texture(shading_level_1, UV); shade_b = texture(shading_level_2, UV); }
+					else if (shade_index == 2) { shade_a = texture(shading_level_2, UV); shade_b = texture(shading_level_3, UV); }
+					else if (shade_index == 3) { shade_a = texture(shading_level_3, UV); shade_b = texture(shading_level_4, UV); }
+					sampled = mix(shade_a, shade_b, shade_mix);
+					if (effect_mode == 9) sampled.rgb = mix(sampled.rgb, vec3(1.0), pow(float(shade_degree) / 256.0, 2.0));
+					if (raster_transition) sampled.a *= 1.0 - pow(float(shade_degree) / 256.0, 2.0);
+				}
 				if ((effect_mode == 6 || effect_mode == 7) && raster_transition) {
 					float transition_alpha = clamp(float(raster_degree) / 256.0, 0.0, 1.0);
 					sampled.a *= 1.0 - transition_alpha * transition_alpha;
@@ -2061,6 +2081,35 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 			effect_material.set_shader_parameter("raster_mesh_size", float(sprite.fields.get("effect_mesh_size", 1)))
 			effect_material.set_shader_parameter("raster_frequency", float(sprite.fields.get("effect_frequency", 0)))
 			effect_material.set_shader_parameter("raster_transition", bool(sprite.fields.get("effect_transition", false)))
+			if effect_mode == 8 or effect_mode == 9:
+				var shade_cache_key := [sprite.texture.get_instance_id(), int(sprite.fields.get("effect_shading_revision", 0))]
+				var shade_textures: Array = native_texture.get_meta("native_shading_levels", [])
+				if native_texture.get_meta("native_shading_key", []) != shade_cache_key:
+					shade_textures.clear()
+					var codec: Object = ClassDB.instantiate("YzkCodec")
+					var source_image := sprite.texture.get_image()
+					if codec != null and codec.has_method("build_shading_levels") and source_image != null and not source_image.is_empty() and source_image.get_width() * source_image.get_height() <= 8388608:
+						source_image.convert(Image.FORMAT_RGBA8)
+						var level_data: Array = codec.call("build_shading_levels", source_image.get_data(), source_image.get_width(), source_image.get_height())
+						for bytes: PackedByteArray in level_data:
+							var level_image := Image.create_from_data(source_image.get_width(), source_image.get_height(), false, Image.FORMAT_RGBA8, bytes)
+							shade_textures.append(ImageTexture.create_from_image(level_image))
+					if shade_textures.size() == 5:
+						native_texture.set_meta("native_shading_levels", shade_textures)
+						native_texture.set_meta("native_shading_key", shade_cache_key)
+					else:
+						native_texture.set_meta("native_shading_key", shade_cache_key)
+						native_texture.set_meta("native_shading_levels", [])
+						push_warning("YzkCodec unavailable or invalid image for native Shading effect")
+				if shade_textures.size() == 5:
+					effect_material.set_shader_parameter("shading_levels_ready", true)
+					effect_material.set_shader_parameter("shading_level_0", shade_textures[0])
+					effect_material.set_shader_parameter("shading_level_1", shade_textures[1])
+					effect_material.set_shader_parameter("shading_level_2", shade_textures[2])
+					effect_material.set_shader_parameter("shading_level_3", shade_textures[3])
+					effect_material.set_shader_parameter("shading_level_4", shade_textures[4])
+				else:
+					effect_material.set_shader_parameter("shading_levels_ready", false)
 			native_texture.material = effect_material
 		else:
 			native_texture.material = null

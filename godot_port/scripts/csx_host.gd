@@ -1440,6 +1440,7 @@ class HostSprite extends RefCounted:
 			fields.erase("effect_interval_ms")
 			fields.erase("effect_degree_step")
 			fields.erase("effect_transition")
+			fields.erase("effect_shading_revision")
 			if host != null:
 				host.active_effect_sprites.erase(get_instance_id())
 			return 0
@@ -1448,7 +1449,7 @@ class HostSprite extends RefCounted:
 			if host != null:
 				host.report_unsupported("HostSprite.SetEffectParameter %s" % effect_type)
 			return -1
-		if effect_type not in ["TileImage", "FilterWhite", "FilterLight", "FilterBlack", "FilterDark", "RasterScroll", "WaveCircle"]:
+		if effect_type not in ["TileImage", "FilterWhite", "FilterLight", "FilterBlack", "FilterDark", "RasterScroll", "WaveCircle", "ShadingOff", "ShadingLight"]:
 			if host != null:
 				host.report_unsupported("HostSprite.SetEffectParameter %s renderer" % effect_type)
 			return -1
@@ -1486,6 +1487,9 @@ class HostSprite extends RefCounted:
 			fields["effect_degree_step"] = _effect_integer(effect, "nDegreeStep")
 			fields["effect_transition"] = (_effect_integer(effect, "nFlags") & 1) != 0
 			fields["effect_elapsed_ms"] = 0.0
+		elif effect_type in ["ShadingOff", "ShadingLight"]:
+			fields["effect_transition"] = (_effect_integer(effect, "nFlags") & 1) != 0
+			fields["effect_shading_revision"] = int(fields.get("effect_shading_revision", 0)) + 1
 		else:
 			fields.erase("effect_size")
 			fields.erase("effect_scroll_speed")

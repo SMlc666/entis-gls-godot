@@ -24,6 +24,7 @@
 #include <godot_cpp/core/defs.hpp>
 #include <godot_cpp/godot.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
+#include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
 
 #include <cstdlib>
@@ -323,12 +324,67 @@ public:
     Dictionary decode_erisan(const PackedByteArray &input, int64_t expected_size) const;
     Dictionary decode_eri(const PackedByteArray &input) const;
     Dictionary decode_mio(const PackedByteArray &input) const;
+    Array build_shading_levels(const PackedByteArray &rgba, int64_t width, int64_t height) const;
 };
 
 void YzkCodec::_bind_methods() {
     ClassDB::bind_method(D_METHOD("decode_erisan", "input", "expected_size"), &YzkCodec::decode_erisan);
     ClassDB::bind_method(D_METHOD("decode_eri", "input"), &YzkCodec::decode_eri);
     ClassDB::bind_method(D_METHOD("decode_mio", "input"), &YzkCodec::decode_mio);
+    ClassDB::bind_method(D_METHOD("build_shading_levels", "rgba", "width", "height"), &YzkCodec::build_shading_levels);
+}
+
+Array YzkCodec::build_shading_levels(const PackedByteArray &rgba, int64_t width, int64_t height) const {
+    Array result;
+    if (width <= 0 || height <= 0 || width > 8192 || height > 8192
+        || width * height > 33554432 || rgba.size() != width * height * 4) return result;
+
+    const size_t w = static_cast<size_t>(width);
+    const size_t h = static_cast<size_t>(height);
+    std::vector<uint8_t> current(static_cast<size_t>(rgba.size()));
+    std::memcpy(current.data(), rgba.ptr(), current.size());
+    PackedByteArray original;
+    original.resize(rgba.size());
+    std::memcpy(original.ptrw(), rgba.ptr(), current.size());
+    result.push_back(original);
+
+    // The Entis 4:2:1 primitive averages the centre with the floor-average
+    // of its two neighbours. Keep edge pixels intact, as the native routine does.
+    auto average = [](uint8_t a, uint8_t b) -> uint8_t {
+        return static_cast<uint8_t>((static_cast<unsigned>(a) + static_cast<unsigned>(b)) >> 1);
+    };
+    for (int level = 0; level < 4; ++level) {
+        for (int pass = 0; pass < 16; ++pass) {
+            std::vector<uint8_t> horizontal(current.size());
+            std::memcpy(horizontal.data(), current.data(), current.size());
+            if (w > 2) {
+                for (size_t y = 0; y < h; ++y) {
+                    for (size_t x = 1; x + 1 < w; ++x) {
+                        const size_t p = (y * w + x) * 4;
+                        for (size_t c = 0; c < 4; ++c)
+                            horizontal[p + c] = average(current[p + c], average(current[p - 4 + c], current[p + 4 + c]));
+                    }
+                }
+            }
+            std::vector<uint8_t> vertical(horizontal.size());
+            std::memcpy(vertical.data(), horizontal.data(), horizontal.size());
+            if (h > 2) {
+                for (size_t y = 1; y + 1 < h; ++y) {
+                    for (size_t x = 0; x < w; ++x) {
+                        const size_t p = (y * w + x) * 4;
+                        for (size_t c = 0; c < 4; ++c)
+                            vertical[p + c] = average(horizontal[p + c], average(horizontal[p - w * 4 + c], horizontal[p + w * 4 + c]));
+                    }
+                }
+            }
+            current.swap(vertical);
+        }
+        PackedByteArray image;
+        image.resize(static_cast<int64_t>(current.size()));
+        std::memcpy(image.ptrw(), current.data(), current.size());
+        result.push_back(image);
+    }
+    return result;
 }
 
 Dictionary YzkCodec::decode_erisan(const PackedByteArray &input, int64_t expected_size) const {
