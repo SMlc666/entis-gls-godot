@@ -87,6 +87,9 @@ func _initialize() -> void:
 	if second_pixels.size() != 800 * 600 * 4:
 		_fail("second I-frame RGBA output has wrong size: %d" % second_pixels.size())
 		return
+	if int(second_i.get("min_luma", 0)) >= int(second_i.get("max_luma", 0)):
+		_fail("second I-frame reconstruction produced a uniform image")
+		return
 	var b_frame: Variant = codec.call("decode_mei_i_frame", original, 1)
 	if not b_frame is Dictionary or b_frame.get("ok", true):
 		_fail("random access must not decode a differential B-frame without references")
