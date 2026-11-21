@@ -220,8 +220,8 @@ class HostResource extends RefCounted:
 				var py := y + row
 				if px >= 0 and py >= 0 and px < image.get_width() and py < image.get_height():
 					image.set_pixel(px, py, _native_pixel_to_color(int(pixel_value)))
-			if texture != null:
-				texture.update(image)
+		if texture != null:
+			texture.update(image)
 		return 1
 
 	func _color_to_native_pixel(color: Color) -> int:
