@@ -271,6 +271,7 @@ var tone_material: ShaderMaterial
 var video_player: VideoStreamPlayer
 var mei_video_backdrop: ColorRect
 var mei_video_rect: TextureRect
+var mei_movie_texture: ImageTexture
 var mei_audio_player: AudioStreamPlayer
 var mei_movie_codec: Object
 var mei_movie_bytes := PackedByteArray()
@@ -278,6 +279,7 @@ var mei_movie_frames: Array = []
 var mei_movie_queue: Array[Dictionary] = []
 var mei_movie_anchor_rgba := PackedByteArray()
 var mei_movie_anchor_index := -1
+var mei_movie_displayed_index := -1
 var mei_movie_frame_duration := 1.0 / 30.0
 var mei_movie_elapsed := 0.0
 var mei_movie_active := false
@@ -815,6 +817,8 @@ func _process(delta: float) -> void:
 		return
 	if host != null:
 		host.advance_audio_envelopes(delta)
+	if mei_movie_active:
+		return
 	if is_title_mode:
 		if not is_running or is_appreciation_open or is_config_open or is_save_load_open or confirm_panel.visible:
 			return
@@ -1168,7 +1172,7 @@ func _start_native_mei_movie(path: String) -> bool:
 	var duration_ms := int(decoded.get("duration_ms", 0))
 	mei_movie_frame_duration = float(duration_ms) / 1000.0 / maxf(1.0, float(frame_count)) if duration_ms > 0 else 1.0 / 30.0
 	mei_movie_frame_duration = clampf(mei_movie_frame_duration, 1.0 / 120.0, 1.0)
-	_show_mei_frame(first_rgba, int(decoded.get("width", 0)), int(decoded.get("height", 0)))
+	_show_mei_frame(first_rgba, int(decoded.get("width", 0)), int(decoded.get("height", 0)), 0)
 	var bits := int(decoded.get("bits_per_sample", 0))
 	var channels := int(decoded.get("channels", 0))
 	var audio_data: Variant = decoded.get("audio_data", PackedByteArray())
@@ -1201,7 +1205,7 @@ func _process_mei_movie(delta: float) -> void:
 		_finish_mei_movie()
 		return
 	var frame: Dictionary = mei_movie_queue.pop_front()
-	_show_mei_frame(frame["rgba"], int(frame["width"]), int(frame["height"]))
+	_show_mei_frame(frame["rgba"], int(frame["width"]), int(frame["height"]), int(frame["index"]))
 
 
 func _prepare_next_mei_group() -> bool:
@@ -1236,18 +1240,23 @@ func _prepare_next_mei_group() -> bool:
 		if not b_result is Dictionary or not b_result.get("ok", false):
 			push_error("MEI B-frame %d failed: %s" % [b_index, b_result.get("error", "invalid result") if b_result is Dictionary else "invalid result"])
 			return false
-		mei_movie_queue.append({"rgba": b_result["rgba"], "width": width, "height": height})
-	mei_movie_queue.append({"rgba": next_rgba, "width": width, "height": height})
+		mei_movie_queue.append({"rgba": b_result["rgba"], "width": width, "height": height, "index": b_index})
+	mei_movie_queue.append({"rgba": next_rgba, "width": width, "height": height, "index": next_anchor_index})
 	mei_movie_anchor_index = next_anchor_index
 	mei_movie_anchor_rgba = next_rgba
 	return true
 
 
-func _show_mei_frame(rgba: PackedByteArray, width: int, height: int) -> void:
+func _show_mei_frame(rgba: PackedByteArray, width: int, height: int, frame_index: int) -> void:
 	if width <= 0 or height <= 0 or rgba.size() != width * height * 4:
 		return
 	var image := Image.create_from_data(width, height, false, Image.FORMAT_RGBA8, rgba)
-	mei_video_rect.texture = ImageTexture.create_from_image(image)
+	if mei_movie_texture == null or mei_movie_texture.get_width() != width or mei_movie_texture.get_height() != height:
+		mei_movie_texture = ImageTexture.create_from_image(image)
+		mei_video_rect.texture = mei_movie_texture
+	else:
+		mei_movie_texture.update(image)
+	mei_movie_displayed_index = frame_index
 
 
 func _finish_mei_movie() -> void:
@@ -1258,6 +1267,7 @@ func _finish_mei_movie() -> void:
 	mei_movie_queue.clear()
 	mei_movie_anchor_rgba = PackedByteArray()
 	mei_movie_anchor_index = -1
+	mei_movie_displayed_index = -1
 	if mei_audio_player != null:
 		mei_audio_player.stop()
 	if mei_video_rect != null:

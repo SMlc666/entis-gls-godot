@@ -351,20 +351,41 @@ bool reconstruct_mei_frame_pixels(size_t width, size_t height,
                     ? reference_origin(0) : std::pair<int, int>(0, 0);
                 const auto next_origin = reference_mode == -1 || reference_mode == 2
                     ? reference_origin(2) : std::pair<int, int>(0, 0);
+                auto predicted_reference_pixel = [&](const std::vector<uint8_t> *image,
+                    const std::pair<int, int> &origin, size_t component,
+                    size_t local_x, size_t local_y, size_t channel) {
+                    if (!image) return 0;
+                    const int horizontal_half = cumulative_vectors[vector_index + component] & 1;
+                    const int vertical_half = cumulative_vectors[vector_index + component + 1] & 1;
+                    const auto sample = [&](size_t x, size_t y) {
+                        const size_t source_x = std::min<size_t>(
+                            static_cast<size_t>(origin.first) + x, width - 1);
+                        const size_t source_y = std::min<size_t>(
+                            static_cast<size_t>(origin.second) + y, height - 1);
+                        return static_cast<int>((*image)[(source_y * width + source_x) * 4 + channel]);
+                    };
+                    const int top_left = sample(local_x, local_y);
+                    if (!horizontal_half && !vertical_half) return top_left;
+                    const int top_right = horizontal_half ? sample(local_x + 1, local_y) : top_left;
+                    const int top = horizontal_half ? (top_left + top_right + 1) >> 1 : top_left;
+                    if (!vertical_half) return top;
+                    const int bottom_left = sample(local_x, local_y + 1);
+                    const int bottom_right = horizontal_half
+                        ? sample(local_x + 1, local_y + 1) : bottom_left;
+                    const int bottom = horizontal_half
+                        ? (bottom_left + bottom_right + 1) >> 1 : bottom_left;
+                    return (top + bottom + 1) >> 1;
+                };
                 for (size_t local_y = 0; local_y < 16 && dst_y + local_y < height; ++local_y) {
                     for (size_t local_x = 0; local_x < 16 && dst_x + local_x < width; ++local_x) {
                         const size_t dst_pixel = ((dst_y + local_y) * width + dst_x + local_x) * 4;
-                        const size_t prev_pixel = (static_cast<size_t>(previous_origin.second) + local_y) * width
-                            + static_cast<size_t>(previous_origin.first) + local_x;
-                        const size_t next_pixel = (static_cast<size_t>(next_origin.second) + local_y) * width
-                            + static_cast<size_t>(next_origin.first) + local_x;
                         for (size_t channel = 0; channel < 4; ++channel) {
-                            const int previous_value = reference && (reference_mode == 1 || reference_mode == 2)
-                                ? (*reference)[prev_pixel * 4 + channel] : 0;
-                            const int next_value = next_reference && (reference_mode == -1 || reference_mode == 2)
-                                ? (*next_reference)[next_pixel * 4 + channel] : 0;
+                            const int previous_value = (reference_mode == 1 || reference_mode == 2)
+                                ? predicted_reference_pixel(reference, previous_origin, 0, local_x, local_y, channel) : 0;
+                            const int next_value = (reference_mode == -1 || reference_mode == 2)
+                                ? predicted_reference_pixel(next_reference, next_origin, 2, local_x, local_y, channel) : 0;
                             if (reference_mode == 2)
-                                rgba[dst_pixel + channel] = static_cast<uint8_t>((previous_value + next_value) >> 1);
+                                rgba[dst_pixel + channel] = static_cast<uint8_t>((previous_value + next_value + 1) >> 1);
                             else if (reference_mode == 1)
                                 rgba[dst_pixel + channel] = static_cast<uint8_t>(previous_value);
                             else if (reference_mode == -1)

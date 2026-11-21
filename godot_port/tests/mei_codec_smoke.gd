@@ -164,6 +164,14 @@ func _initialize() -> void:
 	if second_b_pixels.size() != 800 * 600 * 4:
 		_fail("second B-frame RGBA output has wrong size: %d" % second_b_pixels.size())
 		return
+	var third_b: Variant = codec.call("decode_mei_b_frame", original, 4, p_pixels, second_p_pixels)
+	if not third_b is Dictionary or not third_b.get("ok", false):
+		_fail("B-frame after the next P anchor failed: %s" % (third_b.get("error", "invalid result") if third_b is Dictionary else "invalid result"))
+		return
+	var fourth_b: Variant = codec.call("decode_mei_b_frame", original, 5, p_pixels, second_p_pixels)
+	if not fourth_b is Dictionary or not fourth_b.get("ok", false):
+		_fail("second B-frame after the next P anchor failed: %s" % (fourth_b.get("error", "invalid result") if fourth_b is Dictionary else "invalid result"))
+		return
 	var b_as_p: Variant = codec.call("decode_mei_p_frame", original, 1, first_frame)
 	if not b_as_p is Dictionary or b_as_p.get("ok", true):
 		_fail("P-frame decoder must reject a bidirectional B-frame")

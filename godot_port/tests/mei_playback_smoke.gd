@@ -32,14 +32,29 @@ func _run() -> void:
 	if player.get("mei_video_rect").stretch_mode != TextureRect.STRETCH_KEEP_ASPECT_CENTERED:
 		_fail("native MEI player does not preserve the source aspect ratio")
 		return
+	if not player.call("_prepare_next_mei_group") or not player.call("_prepare_next_mei_group"):
+		_fail("native MEI player could not prepare the first two reference groups")
+		return
+	var expected_group_indices := [1, 2, 3, 4, 5, 6]
+	var prepared: Array = player.get("mei_movie_queue")
+	if prepared.size() < expected_group_indices.size():
+		_fail("native MEI player prepared too few reordered frames")
+		return
+	for index: int in expected_group_indices.size():
+		if int(prepared[index].get("index", -1)) != expected_group_indices[index]:
+			_fail("native MEI playback reordered frame %d incorrectly" % index)
+			return
 	for _frame: int in range(8):
 		await process_frame
-	print("MEI first GOP decode and display: %d ms" % ((Time.get_ticks_usec() - playback_start_usec) / 1000))
+	print("MEI first two GOPs and 8 display ticks: %d ms" % ((Time.get_ticks_usec() - playback_start_usec) / 1000))
 	if player.get("mei_movie_anchor_index") <= 0:
 		_fail("native MEI playback did not advance to a reference frame")
 		return
-	if player.get("mei_video_rect").texture == first_texture:
+	if player.get("mei_movie_displayed_index") <= 0:
 		_fail("native MEI playback did not present a subsequent reordered frame")
+		return
+	if player.get("mei_video_rect").texture != first_texture:
+		_fail("native MEI playback recreated its texture instead of updating the frame surface")
 		return
 	player.call("_on_movie_stop_requested")
 	if player.get("mei_movie_active") or player.get("mei_video_rect").visible:
