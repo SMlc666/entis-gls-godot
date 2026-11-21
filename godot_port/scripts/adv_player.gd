@@ -102,6 +102,10 @@ var settings_state = PlayerSettingsState.new()
 var bg_rect: TextureRect
 var bustup_container: Control
 var bustup_rects: Array[TextureRect] = []
+var adv_temp_layer: Control
+var adv_temp_canvas: Control
+var adv_temp_controls: Dictionary[int, TextureRect] = {}
+var adv_temp_materials: Dictionary[int, ShaderMaterial] = {}
 var dialogue_box: Control
 var speaker_label: Label
 var message_label: RichTextLabel
@@ -387,6 +391,20 @@ func _build_ui() -> void:
 	bg_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	bg_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
 	add_child(bg_rect)
+
+	# Temporary native sprites are used by original AdvScreen transitions. Keep
+	# them in the original 800x600 coordinate space between the background and
+	# the bustup/dialogue layers.
+	adv_temp_layer = Control.new()
+	adv_temp_layer.name = "AdvTemporarySpriteLayer"
+	adv_temp_layer.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	adv_temp_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(adv_temp_layer)
+	adv_temp_canvas = Control.new()
+	adv_temp_canvas.name = "AdvTemporarySpriteCanvas"
+	adv_temp_canvas.size = Vector2(800, 600)
+	adv_temp_canvas.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	adv_temp_layer.add_child(adv_temp_canvas)
 
 	# 2. Bustup container
 	bustup_container = Control.new()
@@ -827,6 +845,8 @@ func _process(delta: float) -> void:
 	_process_mei_movie(delta)
 	if not is_initialized:
 		return
+	if adv_temp_layer != null:
+		adv_temp_layer.visible = not is_title_mode
 	if host != null:
 		host.advance_audio_envelopes(delta)
 	if mei_movie_active:
@@ -1022,6 +1042,7 @@ func _update_bustups() -> void:
 	var adv = vm.globals_by_name.get("adv", null)
 	if not (adv is CsxVMReader.CsxInstance):
 		return
+	_sync_adv_temp_sprites(adv)
 	var base_sprite: Variant = adv.get_field("sprAdvBase")
 	var active_tone_filter: CsxHostClass.HostToneFilter = base_sprite.tone_filter if base_sprite is CsxHostClass.HostSprite else null
 	if tone_material != null and active_tone_filter != null:
@@ -1050,6 +1071,67 @@ func _update_bustups() -> void:
 			b_rect.modulate.a = 1.0 - (float(spr.transparency) / 256.0)
 		else:
 			b_rect.visible = false
+
+
+func _sync_adv_temp_sprites(adv: CsxVMReader.CsxInstance) -> void:
+	if adv_temp_canvas == null:
+		return
+	adv_temp_layer.visible = not is_title_mode
+	var viewport_size := get_viewport_rect().size
+	var scale_factor := minf(viewport_size.x / 800.0, viewport_size.y / 600.0)
+	adv_temp_canvas.scale = Vector2.ONE * scale_factor
+	adv_temp_canvas.position = (viewport_size - Vector2(800, 600) * scale_factor) * 0.5
+	var temp_value: Variant = adv.get_field("sprTemp")
+	var seen: Dictionary = {}
+	if temp_value is Dictionary:
+		var sprites: Array[CsxHostClass.HostSprite] = []
+		for value: Variant in temp_value.values():
+			if value is CsxHostClass.HostSprite:
+				sprites.append(value)
+		sprites.sort_custom(func(a: CsxHostClass.HostSprite, b: CsxHostClass.HostSprite): return a.z_order < b.z_order)
+		for sprite: CsxHostClass.HostSprite in sprites:
+			var id := sprite.get_instance_id()
+			seen[id] = true
+			var node: TextureRect = adv_temp_controls.get(id, null)
+			if node == null or not is_instance_valid(node):
+				node = TextureRect.new()
+				node.name = "NativeTransitionSprite_%d" % id
+				node.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+				node.stretch_mode = TextureRect.STRETCH_SCALE
+				node.mouse_filter = Control.MOUSE_FILTER_IGNORE
+				adv_temp_canvas.add_child(node)
+				adv_temp_controls[id] = node
+			node.texture = sprite.texture
+			node.visible = sprite.is_visible and sprite.texture != null
+			var render_size := sprite.get_render_size()
+			node.size = Vector2(render_size) if render_size.x > 0 and render_size.y > 0 else Vector2(sprite.size)
+			node.position = Vector2(sprite.position - sprite.rev_center)
+			node.pivot_offset = Vector2(sprite.rev_center)
+			node.scale = sprite.magnification
+			node.modulate.a = 1.0 - clampf(float(sprite.transparency) / 256.0, 0.0, 1.0)
+			node.z_index = clampi(sprite.z_order, RenderingServer.CANVAS_ITEM_Z_MIN, RenderingServer.CANVAS_ITEM_Z_MAX)
+			var material: ShaderMaterial = adv_temp_materials.get(id, null)
+			if material == null:
+				material = ShaderMaterial.new()
+				material.shader = tone_material.shader if tone_material != null else null
+				adv_temp_materials[id] = material
+			node.material = material
+			if tone_material != null:
+				for parameter: String in ["filter_mode", "intensity", "use_tone_lut", "tone_lut", "tone_flags"]:
+					material.set_shader_parameter(parameter, tone_material.get_shader_parameter(parameter))
+			var active_mask := sprite.alpha_texture != null and sprite.alpha_range > 0 and sprite.alpha_range < 256
+			material.set_shader_parameter("alpha_mask_ready", active_mask)
+			material.set_shader_parameter("alpha_mask_range", float(sprite.alpha_range))
+			material.set_shader_parameter("alpha_mask_blend", float(sprite.blending))
+			if active_mask:
+				material.set_shader_parameter("alpha_mask_texture", sprite.alpha_texture)
+	for id: int in adv_temp_controls.keys():
+		if not seen.has(id):
+			var node: TextureRect = adv_temp_controls[id]
+			if is_instance_valid(node):
+				node.queue_free()
+			adv_temp_controls.erase(id)
+			adv_temp_materials.erase(id)
 
 
 func _on_choices_updated(choices: Array) -> void:
@@ -1670,6 +1752,10 @@ uniform float intensity : hint_range(0.0, 1.0) = 1.0;
 uniform bool use_tone_lut = false;
 uniform sampler2D tone_lut : filter_nearest;
 uniform int tone_flags = 0;
+uniform sampler2D alpha_mask_texture;
+uniform bool alpha_mask_ready = false;
+uniform float alpha_mask_range = 256.0;
+uniform float alpha_mask_blend = 0.0;
 
 float tone_coord(float value) {
 	return (floor(clamp(value, 0.0, 1.0) * 255.0 + 0.5) + 0.5) / 256.0;
@@ -1712,6 +1798,12 @@ void fragment() {
 	} else if (filter_mode == 3) { // NEGATIVE
 		vec3 neg = vec3(1.0) - c.rgb;
 		c.rgb = mix(c.rgb, neg, intensity);
+	}
+	if (alpha_mask_ready && alpha_mask_range > 0.0 && alpha_mask_range < 256.0) {
+		float mask_value = texture(alpha_mask_texture, UV).r * 255.0;
+		float alpha_base = 256.0 - (alpha_mask_range * 256.0 + 256.0) * clamp(alpha_mask_blend, 0.0, 256.0) / 256.0;
+		float mask_factor = clamp(floor(mask_value * alpha_mask_range + 0.5) + alpha_base, 0.0, 255.0) / 255.0;
+		c.a *= mask_factor;
 	}
 	COLOR = c;
 }

@@ -76,6 +76,7 @@ func _run() -> void:
 	var masked_sprite := CsxHostClass.HostSprite.new(9002, player.host)
 	masked_sprite.position = Vector2i(160, 80)
 	masked_sprite.size = Vector2i(2, 1)
+	masked_sprite.is_visible = true
 	masked_sprite.image = Image.create(2, 1, false, Image.FORMAT_RGBA8)
 	masked_sprite.image.fill(Color.WHITE)
 	masked_sprite.texture = ImageTexture.create_from_image(masked_sprite.image)
@@ -90,6 +91,18 @@ func _run() -> void:
 	var masked_material := masked_texture.material as ShaderMaterial if masked_texture != null else null
 	if not _require(masked_material != null and masked_material.get_shader_parameter("alpha_mask_ready") == true, "Alpha mask must activate shader compositing without another sprite effect"): return
 	if not _require(masked_material.get_shader_parameter("alpha_mask_texture") == masked_sprite.alpha_texture and masked_material.get_shader_parameter("alpha_mask_range") == 128.0 and masked_material.get_shader_parameter("alpha_mask_blend") == 96.0, "Alpha mask image, range and SetBlendDegree must reach native shader uniforms"): return
+	var adv_instance: Variant = player.vm.globals_by_name.get("adv", null)
+	if not _require(adv_instance is CsxVMClass.CsxInstance, "Original AdvScreen instance must be available to the story renderer"): return
+	player.is_title_mode = false
+	adv_instance.set_field("sprTemp", {"transition": masked_sprite})
+	player._sync_adv_temp_sprites(adv_instance)
+	var transition_node: TextureRect = player.adv_temp_controls.get(masked_sprite.get_instance_id(), null)
+	var transition_material := transition_node.material as ShaderMaterial if transition_node != null else null
+	if not _require(transition_node != null and transition_node.is_visible_in_tree(), "AdvScreen temporary sprites must render in the story transition layer"): return
+	if not _require(transition_material != null and transition_material.get_shader_parameter("alpha_mask_ready") == true and transition_material.get_shader_parameter("alpha_mask_texture") == masked_sprite.alpha_texture, "AdvScreen temporary sprites must apply the native alpha mask texture"): return
+	adv_instance.set_field("sprTemp", {})
+	player._sync_adv_temp_sprites(adv_instance)
+	player.is_title_mode = true
 	var mesh_values: Array = [
 		0.0, 0.0, 64.0, 0.0, 0.0, 64.0, 64.0, 64.0,
 		0.0, 0.0, 64.0, 10.0, 10.0, 64.0, 64.0, 64.0,
