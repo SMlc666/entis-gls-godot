@@ -54,7 +54,13 @@ func _initialize() -> void:
 	var i_count := 0
 	var p_count := 0
 	var b_count := 0
+	var operation_flag_counts := {}
 	for frame_variant: Variant in frames:
+		var operation_flags := int(frame_variant.get("operation_flags", -1))
+		operation_flag_counts[operation_flags] = int(operation_flag_counts.get(operation_flags, 0)) + 1
+		if (operation_flags & 0x0c) != 0:
+			_fail("opening.mei unexpectedly requests an ERI loop filter: %s" % frame_variant)
+			return
 		match str(frame_variant.get("picture_type", "")):
 			"I": i_count += 1
 			"P": p_count += 1
@@ -64,6 +70,9 @@ func _initialize() -> void:
 				return
 	if i_count != 582 or p_count != 259 or b_count != 1679:
 		_fail("unexpected I/P/B frame counts: %d/%d/%d" % [i_count, p_count, b_count])
+		return
+	if operation_flag_counts != {0: 582, 1: 259, 3: 1679}:
+		_fail("unexpected ERI operation flag distribution: %s" % operation_flag_counts)
 		return
 	if not codec.has_method("decode_mei_i_frame"):
 		_fail("YzkCodec must expose random access to independent MEI I-frames")
