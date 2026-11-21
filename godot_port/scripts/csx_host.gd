@@ -153,6 +153,24 @@ class HostResource extends RefCounted:
 		push_warning(host.last_error)
 		return 0
 
+	func attach_sound(source: Variant) -> int:
+		if not source is HostResource or source.audio_stream == null:
+			return 0
+		var sound := source as HostResource
+		cancel_volume_envelope()
+		name = sound.name
+		audio_stream = sound.audio_stream
+		audio_channel = sound.audio_channel
+		release_image_data()
+		return 1
+
+	func release_image_data() -> void:
+		image = null
+		texture = null
+		image_frames.clear()
+		image_frame_sequence.clear()
+		image_total_time_ms = 0
+
 	func load_image(filename: String) -> int:
 		name = filename
 		if host != null:

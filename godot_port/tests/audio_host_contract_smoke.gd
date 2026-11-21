@@ -134,6 +134,12 @@ func _run() -> void:
 	var playback_frame: int = se.get_playing_position()
 	expect(playback_frame >= 1102 and playback_frame <= 2205, "The mixer must wrap to the rewind frame, not the intro")
 	se.stop()
+	var attached_resource = CsxHostClass.HostResource.new("attached-se", "sound.noa", -1, 0, 0, host)
+	expect(vm._dispatch_resource_method(attached_resource, "AttachSound", [se]) == 1, "AttachSound must bind a loaded waveform resource")
+	var attached_stream: AudioStreamWAV = attached_resource.audio_stream
+	se.release()
+	expect(attached_resource.audio_stream == attached_stream and attached_resource.play() == 1, "Attached audio must remain playable after its source Resource is released")
+	expect(attached_resource.stop() == 1, "An attached sound Resource must stop its selected audio channel")
 
 	finish_success("PASS HostResource audio routing, PCM playback ranges, pause/resume, volume, and stop contract")
 

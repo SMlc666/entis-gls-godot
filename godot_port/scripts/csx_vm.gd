@@ -1809,6 +1809,8 @@ func _dispatch_resource_method(res: CsxHostClass.HostResource, method: String, a
 			if args.size() > 0:
 				return res.load_sound(str(args[0]), int(args[1]) if args.size() > 1 else -1)
 			return 0
+		"AttachSound":
+			return res.attach_sound(args[0] if args.size() > 0 else null)
 		"LoadImage":
 			if args.size() > 0:
 				return res.load_image(str(args[0]))
