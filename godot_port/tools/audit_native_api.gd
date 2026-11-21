@@ -10,6 +10,7 @@ const AUDITED_METHODS := [
 	"Stop", "Pause", "Restart", "Release", "SetVolume", "SetVolumeEnvelope",
 	"CancelVolumeEnvelope", "GetSoundInfo", "GetWaveData", "LoadMidi", "SaveImage",
 	"GetPixel", "GetPixelRect", "SetPixelRect", "GetInfo", "GetImageInfo",
+	"Enable", "IsEnabled", "SetFontBordering", "GetCursorPos", "MoveCursorPos", "Refresh",
 	"SetEffectParameter", "SetMeshWarpEffect", "OpenMovie", "PlayMovie",
 	"IsMoviePlaying", "StopMovie", "CloseMovie",
 ]

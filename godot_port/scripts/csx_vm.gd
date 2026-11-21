@@ -1501,6 +1501,13 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 			if args.size() > 0:
 				spr.set_visible(_to_int(args[0]))
 			return 0
+		"Enable":
+			var enabled := is_truthy(args[0]) if args.size() > 0 else true
+			var item_id := str(args[1]) if args.size() > 1 else ""
+			return spr.enable(enabled, item_id)
+		"IsEnabled":
+			var enabled_item := str(args[0]) if not args.is_empty() else ""
+			return -1 if spr.is_enabled_native(enabled_item) else 0
 		"SetTransparency":
 			if not args.is_empty():
 				var item := spr.find_form_item(str(args[1])) if args.size() > 1 else spr
@@ -1703,8 +1710,15 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 			return rect
 		"GetCursorPos":
 			var point: Variant = args[0] if not args.is_empty() else null
-			_write_cursor_point(point, host.get_cursor_position() if host != null else Vector2i.ZERO)
+			var cursor := spr.get_message_cursor_pos() if spr.is_message_sprite or not spr.message_style.is_empty() else (host.get_cursor_position() if host != null else Vector2i.ZERO)
+			_write_cursor_point(point, cursor)
 			return point if point is CsxInstance else 0
+		"MoveCursorPos":
+			var cursor_x := _to_int(args[0]) if args.size() > 0 else 0
+			var cursor_y := _to_int(args[1]) if args.size() > 1 else 0
+			return spr.move_message_cursor_pos(cursor_x, cursor_y)
+		"SetFontBordering":
+			return spr.set_font_bordering(is_truthy(args[0]) if not args.is_empty() else false)
 		"AttachMessageStyle":
 			var res_mgr = args[0] if args.size() > 0 else null
 			var style_id: String = str(args[1]) if args.size() > 1 else ""
@@ -1721,6 +1735,8 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 			var msg: String = str(args[0]) if args.size() > 0 else ""
 			return spr.output_message(msg)
 		_:
+			if spr.host != null:
+				spr.host.report_unsupported("HostSprite.%s" % method)
 			return 0
 
 
@@ -1784,6 +1800,8 @@ func _dispatch_input_filter_method(flt: CsxHostClass.HostInputFilter, method: St
 			var timeout := int(args[1]) if args.size() > 1 else 0
 			return flt.get_input_event(ev_ref, timeout)
 		_:
+			if flt.host != null:
+				flt.host.report_unsupported("HostInputFilter.%s" % method)
 			return 0
 
 
@@ -1814,6 +1832,8 @@ func _dispatch_tone_filter_method(tf: CsxHostClass.HostToneFilter, method: Strin
 		"DeleteToneFilter":
 			return tf.delete_tone_filter()
 		_:
+			if tf.host != null:
+				tf.host.report_unsupported("HostToneFilter.%s" % method)
 			return 0
 
 
@@ -2115,6 +2135,8 @@ func _dispatch_window_method(win: CsxHostClass.HostWindow, method: String, args:
 			return win.unlock()
 		"UpdateWindow":
 			return 0
+		"Refresh":
+			return 0
 		"CreateDisplay":
 			var m = _to_int(args[0]) if args.size() > 0 else 0
 			var d = _to_int(args[1]) if args.size() > 1 else 0
@@ -2145,6 +2167,8 @@ func _dispatch_window_method(win: CsxHostClass.HostWindow, method: String, args:
 			_write_cursor_point(point, win.host.get_cursor_position() if win.host != null else Vector2i.ZERO)
 			return point if point is CsxInstance else 0
 		_:
+			if win.host != null:
+				win.host.report_unsupported("HostWindow.%s" % method)
 			return 0
 
 

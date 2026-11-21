@@ -1475,9 +1475,10 @@ func _on_message_output(sprite: CsxHostClass.HostSprite) -> void:
 		return
 	if sprite.message_style.get("id") == "ID_FONT_NAME":
 		speaker_label.position = Vector2(sprite.position - sprite.rev_center)
-		if speaker_label.get_meta("message_style", {}) != sprite.message_style:
-			_apply_native_text_style(speaker_label, sprite.message_style)
-			speaker_label.set_meta("message_style", sprite.message_style)
+		var speaker_style_state := {"style": sprite.message_style, "border": sprite.font_bordering}
+		if speaker_label.get_meta("message_style_state", {}) != speaker_style_state:
+			_apply_native_text_style(speaker_label, sprite.message_style, sprite.font_bordering)
+			speaker_label.set_meta("message_style_state", speaker_style_state)
 		speaker_label.text = sprite.display_text()
 		return
 	if sprite.message_style.get("id") != "ID_FONT_MESSAGE":
@@ -1485,9 +1486,10 @@ func _on_message_output(sprite: CsxHostClass.HostSprite) -> void:
 	message_label.position = Vector2(sprite.position - sprite.rev_center)
 	if sprite.size.x > 0 and sprite.size.y > 0:
 		message_label.size = Vector2(sprite.size)
-	if message_label.get_meta("message_style", {}) != sprite.message_style:
-		_apply_native_text_style(message_label, sprite.message_style)
-		message_label.set_meta("message_style", sprite.message_style)
+	var message_style_state := {"style": sprite.message_style, "border": sprite.font_bordering}
+	if message_label.get_meta("message_style_state", {}) != message_style_state:
+		_apply_native_text_style(message_label, sprite.message_style, sprite.font_bordering)
+		message_label.set_meta("message_style_state", message_style_state)
 	message_label.text = _format_native_message(sprite)
 	message_label.visible_characters = sprite.message_visible_count
 	if not sprite.message_pending:
@@ -2328,7 +2330,7 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 		native_button.texture_hover = sprite.btn_focus_tex
 		native_button.texture_pressed = sprite.btn_pushed_tex if sprite.btn_pushed_tex != null else sprite.btn_focus_tex
 		native_button.texture_disabled = sprite.btn_disabled_tex
-		native_button.disabled = sprite.btn_state == "disabled"
+		native_button.disabled = not sprite.is_enabled or sprite.btn_state == "disabled"
 		native_button.mouse_filter = Control.MOUSE_FILTER_IGNORE if sprite.transparency >= 256 or native_button.disabled else Control.MOUSE_FILTER_STOP
 		native_button.focus_mode = Control.FOCUS_NONE if sprite.transparency >= 256 or native_button.disabled else Control.FOCUS_ALL
 	var native_texture: TextureRect = wrapper.get_node_or_null("NativeTexture")
@@ -2576,7 +2578,7 @@ func _on_native_scroll_changed(value: float, sprite: CsxHostClass.HostSprite) ->
 	sprite.fields["scroll_%s_pos" % axis] = int(round(value))
 
 
-func _apply_native_text_style(label: Control, style: Dictionary) -> void:
+func _apply_native_text_style(label: Control, style: Dictionary, font_bordering: bool = false) -> void:
 	var font: Dictionary = style.get("font", {})
 	var arrange: Dictionary = style.get("arrange", {})
 	var text: Dictionary = style.get("text", {})
@@ -2599,6 +2601,8 @@ func _apply_native_text_style(label: Control, style: Dictionary) -> void:
 	label.add_theme_color_override("font_shadow_color", _native_text_color(shadow) if not shadow.is_empty() else Color.TRANSPARENT)
 	label.add_theme_constant_override("shadow_offset_x", int(shadow.get("x", 0)))
 	label.add_theme_constant_override("shadow_offset_y", int(shadow.get("y", 0)))
+	label.add_theme_constant_override("outline_size", 2 if font_bordering else 0)
+	label.add_theme_color_override("font_outline_color", _native_text_color(shadow) if font_bordering and not shadow.is_empty() else Color.TRANSPARENT)
 	label.vertical_alignment = VERTICAL_ALIGNMENT_TOP
 	match arrange.get("align", "left"):
 		"center": label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -2617,6 +2621,8 @@ func _native_text_color(attributes: Dictionary) -> Color:
 
 
 func _on_native_title_button_pressed(sprite: CsxHostClass.HostSprite) -> void:
+	if not sprite.is_enabled:
+		return
 	if is_config_open or is_save_load_open or is_appreciation_open or confirm_panel.visible:
 		return
 	if native_appreciation_mode and sprite.btn_id == "ID_CLOSE":

@@ -61,6 +61,7 @@ var voice_char_mutes: Dictionary = {
 }
 
 var last_error := ""
+var unsupported_capabilities_reported: Dictionary = {}
 var log_messages: Array[String] = []
 var text_history: Array[Dictionary] = [] # { "speaker": ..., "text": ..., "voice": ..., "bg": ... }
 var current_speaker: String = ""
@@ -1093,6 +1094,7 @@ class HostSprite extends RefCounted:
 	var sprite_id: int = 0
 	var host: CsxHost = null
 	var is_visible: bool = false
+	var is_enabled: bool = true
 	var transparency: int = 0 # 0 = opaque, 256 = transparent
 	var blending: int = 0
 	var position: Vector2i = Vector2i.ZERO
@@ -1132,6 +1134,9 @@ class HostSprite extends RefCounted:
 	var message_elapsed_ms: float = 0.0
 	var message_visible_count: int = -1
 	var message_pending: bool = false
+	var is_message_sprite: bool = false
+	var font_bordering: bool = false
+	var message_cursor_position: Vector2i = Vector2i.ZERO
 	var btn_id: String = ""
 	var full_btn_id: String = ""
 	var is_button: bool = false
@@ -1170,7 +1175,29 @@ class HostSprite extends RefCounted:
 					texture = btn_normal_tex
 					if btn_normal_img != null: image = btn_normal_img
 
+	func enable(enabled: bool, item_id: String = "") -> int:
+		if item_id.is_empty():
+			is_enabled = enabled
+			return 0
+		var enabled_items: Dictionary = fields.get("item_enabled_status", {})
+		enabled_items[item_id] = enabled
+		fields["item_enabled_status"] = enabled_items
+		var target := find_form_item(item_id)
+		if target != null:
+			target.is_enabled = enabled
+		return 0
+
+	func is_enabled_native(item_id: String = "") -> bool:
+		if item_id.is_empty():
+			return is_enabled
+		var target := find_form_item(item_id)
+		if target != null:
+			return target.is_enabled
+		var enabled_items: Dictionary = fields.get("item_enabled_status", {})
+		return bool(enabled_items.get(item_id, false))
+
 	func attach_message_style(res_mgr: Variant, style_id: String) -> int:
+		is_message_sprite = true
 		if not (res_mgr is HostResourceManager):
 			return 0
 		var style: Dictionary = res_mgr.skin_styles.get(style_id, {})
@@ -1205,6 +1232,19 @@ class HostSprite extends RefCounted:
 				host.active_messages[get_instance_id()] = weakref(self)
 			host.message_output.emit(self)
 		return text.length()
+
+	func set_font_bordering(enabled: bool) -> int:
+		font_bordering = enabled
+		if host != null and not text_content.is_empty():
+			host.message_output.emit(self)
+		return 0
+
+	func get_message_cursor_pos() -> Vector2i:
+		return message_cursor_position
+
+	func move_message_cursor_pos(x: int, y: int) -> int:
+		message_cursor_position = Vector2i(x, y)
+		return 0
 
 	func advance_message(delta_ms: float) -> void:
 		message_elapsed_ms += delta_ms
@@ -1335,6 +1375,7 @@ class HostSprite extends RefCounted:
 	func create_message(width: int, height: int) -> int:
 		if width <= 0 or height <= 0:
 			return 0
+		is_message_sprite = true
 		size = Vector2i(width, height)
 		text_content = ""
 		message_visible_count = 0
@@ -1614,7 +1655,7 @@ class HostSprite extends RefCounted:
 		return set_scroll_position(get_scroll_position(item_id, axis), item_id, axis)
 
 	func is_hit_at(x: int, y: int) -> bool:
-		if not is_visible or transparency >= 256:
+		if not is_visible or not is_enabled or transparency >= 256:
 			return false
 		return get_sprite_rect().has_point(Vector2(x, y))
 
@@ -1632,6 +1673,10 @@ class HostSprite extends RefCounted:
 	func add_sprite(z: int, child: Variant) -> void:
 		if child is HostSprite:
 			child.z_order = z
+			var item_id: String = child.btn_id if not child.btn_id.is_empty() else str(child.fields.get("form_item_id", ""))
+			var enabled_items: Dictionary = fields.get("item_enabled_status", {})
+			if not item_id.is_empty() and enabled_items.has(item_id):
+				child.is_enabled = bool(enabled_items[item_id])
 			if not children.has(child):
 				children.append(child)
 			child.refresh_command_ids()
@@ -2839,7 +2884,9 @@ func get_audio_channel_volume(channel: String) -> float:
 
 func report_unsupported(capability: String) -> void:
 	last_error = "当前未实现宿主能力: %s" % capability
-	push_warning(last_error)
+	if not unsupported_capabilities_reported.has(capability):
+		unsupported_capabilities_reported[capability] = true
+		push_warning(last_error)
 
 
 func call_host_function(func_name: String, args: Array, vm: RefCounted) -> Dictionary:
