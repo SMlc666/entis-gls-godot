@@ -13,7 +13,7 @@ signal message_output(sprite: HostSprite)
 signal message_progress(sprite: HostSprite)
 signal bg_updated(bg_name: String, texture: Texture2D)
 signal bgm_updated(bgm_name: String)
-signal movie_requested(movie_file: String)
+signal movie_requested(movie_file: String, play_mode: int)
 signal movie_stop_requested
 signal choices_updated(choices: Array)
 signal tone_filter_updated(filter_type: String)
@@ -1751,10 +1751,10 @@ class HostSprite extends RefCounted:
 		filename = p_filename
 		return 1 if not filename.is_empty() else 0
 
-	func play_movie(_mode: int = 0) -> int:
+	func play_movie(mode: int = 0) -> int:
 		if host == null or filename.is_empty():
 			return 0
-		host.emit_signal("movie_requested", filename)
+		host.emit_signal("movie_requested", filename, mode)
 		return 1
 
 	func is_movie_playing() -> int:

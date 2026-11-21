@@ -18,7 +18,7 @@ func _run() -> void:
 	root.add_child(player)
 	await process_frame
 	var playback_start_usec := Time.get_ticks_usec()
-	if not player.call("_start_native_mei_movie", GAME_DIR.path_join("opening.mei")):
+	if not player.call("_start_native_mei_movie", GAME_DIR.path_join("opening.mei"), 0):
 		_fail("native MEI player refused opening.mei")
 		return
 	print("MEI startup including audio decode: %d ms" % ((Time.get_ticks_usec() - playback_start_usec) / 1000))
@@ -60,7 +60,16 @@ func _run() -> void:
 	if player.get("mei_movie_active") or player.get("mei_video_rect").visible:
 		_fail("native MEI stop did not clear playback state")
 		return
-	print("PASS native MEI playback displays frames, advances references, and stops")
+	if not player.call("_start_native_mei_movie", GAME_DIR.path_join("opening.mei"), 0x02):
+		_fail("native MEI player refused looping playback mode")
+		return
+	player.set("mei_movie_anchor_index", player.get("mei_movie_frames").size() - 1)
+	player.call("_process_mei_movie", float(player.get("mei_movie_frame_duration")) + 0.01)
+	if not player.get("mei_movie_active") or player.get("mei_movie_anchor_index") != 0 or player.get("mei_movie_displayed_index") != 0:
+		_fail("original PlayMovie loop flag did not restart at the first MEI frame")
+		return
+	player.call("_on_movie_stop_requested")
+	print("PASS native MEI playback displays/reorders frames, honors loop mode, and stops")
 	player.queue_free()
 	await process_frame
 	quit(0)

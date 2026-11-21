@@ -129,20 +129,26 @@ func _run() -> void:
 	# Movie host lifecycle: OpenMovie selects the source; PlayMovie starts it.
 	var movie_sprite := CsxHostClass.HostSprite.new(9801, host)
 	var movie_requests: Array[String] = []
+	var movie_modes: Array[int] = []
 	var stop_requests := [0]
-	host.movie_requested.connect(func(filename: String): movie_requests.append(filename))
+	host.movie_requested.connect(func(filename: String, mode: int):
+		movie_requests.append(filename)
+		movie_modes.append(mode)
+	)
 	host.movie_stop_requested.connect(func(): stop_requests[0] += 1)
 	expect(movie_sprite.open_movie("opening.mei") == 1, "OpenMovie must retain the original MEI path")
 	expect(movie_requests.is_empty(), "OpenMovie must not start playback before PlayMovie")
-	expect(movie_sprite.play_movie() == 1 and movie_requests == ["opening.mei"], "PlayMovie must dispatch the selected original movie to the host")
+	expect(movie_sprite.play_movie(0x403) == 1 and movie_requests == ["opening.mei"] and movie_modes == [0x403], "PlayMovie must dispatch the selected original movie and native mode flags to the host")
 	movie_sprite.stop_movie()
 	expect(stop_requests[0] == 1 and not host.is_movie_playing, "StopMovie must stop host playback and clear its state")
 	movie_sprite.close_movie()
 	expect(movie_sprite.filename.is_empty() and stop_requests[0] == 2, "CloseMovie must stop playback and release the selected path")
-	# Unsupported MEI decoding must still finish safely without hanging.
-	player._on_movie_requested("opening.mei")
-	expect(not host.is_movie_playing, "Proprietary MEI movie should safely fallback/skip without hanging")
-	print("  Movie fallback handled gracefully!")
+	# The host now routes original MEI through the in-process decoder.
+	player._on_movie_requested("opening.mei", 0)
+	expect(host.is_movie_playing and player.mei_movie_active, "native MEI playback must start for the original movie")
+	player._on_movie_stop_requested()
+	expect(not host.is_movie_playing and not player.mei_movie_active, "native MEI playback must stop cleanly")
+	print("  Native MEI movie lifecycle passed!")
 
 	print("[5/5] Verifying original game files are 100% pristine and unmodified ...")
 	var csx_hash_after := FileAccess.get_sha256(csx_path)
