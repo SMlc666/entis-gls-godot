@@ -1020,6 +1020,7 @@ func step() -> bool:
 						eval_stack.append(rres)
 						return true
 					elif inst.type_name == "ToneFilter":
+						host.report_unsupported("ToneFilter.%s" % func_name)
 						eval_stack.append(0)
 						return true
 					elif inst.type_name == "File":
@@ -1089,7 +1090,10 @@ func step() -> bool:
 					return true
 				elif receiver is CsxHostClass.HostResourceManager:
 					var hrm := receiver as CsxHostClass.HostResourceManager
-					if func_name == "LoadResource":
+					if func_name == "DeleteContents":
+						eval_stack.append(hrm.delete_contents())
+						return true
+					elif func_name == "LoadResource":
 						var archive_name: String = str(method_args[0]) if method_args.size() > 0 else ""
 						var res_code := hrm.load_resource(archive_name)
 						eval_stack.append(res_code)
@@ -1103,6 +1107,7 @@ func step() -> bool:
 						eval_stack.append(form_code)
 						return true
 					else:
+						host.report_unsupported("HostResourceManager.%s" % func_name)
 						eval_stack.append(0)
 						return true
 				elif receiver is CsxHostClass.HostFile:
@@ -2106,7 +2111,8 @@ func _dispatch_file_method(file: CsxHostClass.HostFile, method: String, args: Ar
 			var text := str(args[1]) if args.size() > 1 else ""
 			return file.output_log_text(path, text)
 		_:
-			print("[CSX VM] Unhandled File method: ", method)
+			if file.host != null:
+				file.host.report_unsupported("HostFile.%s" % method)
 			return 0
 
 

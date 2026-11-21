@@ -785,6 +785,17 @@ class HostResourceManager extends RefCounted:
 				break
 		return 1
 
+	func delete_contents() -> int:
+		# Entis ECSResourceManager::DeleteContents clears the manager's
+		# ECSGlobal entries, form resources/styles/pages and source filename.
+		# CSX runtime globals are a different storage scope and remain intact.
+		resource_cache.clear()
+		skin_resources.clear()
+		skin_styles.clear()
+		skin_pages.clear()
+		loaded_archive_name = ""
+		return 0
+
 	func _parse_skin_xml(raw_bytes: PackedByteArray) -> bool:
 		skin_resources.clear()
 		skin_styles.clear()

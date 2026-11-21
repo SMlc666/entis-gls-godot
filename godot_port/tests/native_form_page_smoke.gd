@@ -146,6 +146,10 @@ func _run() -> void:
 	expect(vm.is_halted, "Title() must halt/return after ID_START")
 	expect(vm.last_return_value == 1, "Title() return value must be 1 for ID_START (New Game)")
 	print("  Title() returned 1 (New Game) after processing ID_START event.")
+	var delete_result := res_mgr.delete_contents()
+	expect(delete_result == 0, "DeleteContents must return the Entis SDK default integer result")
+	expect(res_mgr.loaded_archive_name.is_empty() and res_mgr.resource_cache.is_empty(), "DeleteContents must release the loaded resource map")
+	expect(res_mgr.skin_resources.is_empty() and res_mgr.skin_styles.is_empty() and res_mgr.skin_pages.is_empty(), "DeleteContents must clear form skin resources, styles, and pages")
 
 	print("[5/5] Verifying final archive pristine status ...")
 	for rel_path in EXPECTED_HASHES.keys():
