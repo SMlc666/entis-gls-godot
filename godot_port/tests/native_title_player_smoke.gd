@@ -72,7 +72,7 @@ func _run() -> void:
 	var effect_texture: TextureRect = effect_wrapper.get_node_or_null("NativeTexture") if effect_wrapper != null else null
 	var effect_material := effect_texture.material as ShaderMaterial if effect_texture != null else null
 	if not _require(effect_material != null and effect_material.get_shader_parameter("effect_mode") == 7, "WaveCircle must reach the native TextureRect shader renderer"): return
-	if not _require(effect_material.shader.code.contains("wave_front") and effect_material.get_shader_parameter("raster_transition") == true, "WaveCircle shader must apply the native radial curve and transition flag"): return
+	if not _require(effect_material.shader.code.contains("wave_front") and effect_material.shader.code.contains("1.0 - transition_alpha * transition_alpha") and effect_material.get_shader_parameter("raster_transition") == true, "WaveCircle shader must apply the native radial curve and SDK transparency transition"): return
 	var mesh_values: Array = [
 		0.0, 0.0, 64.0, 0.0, 0.0, 64.0, 64.0, 64.0,
 		0.0, 0.0, 64.0, 10.0, 10.0, 64.0, 64.0, 64.0,
