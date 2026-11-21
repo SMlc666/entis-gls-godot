@@ -274,6 +274,8 @@ var mei_video_rect: TextureRect
 var mei_movie_texture: ImageTexture
 var mei_audio_player: AudioStreamPlayer
 var mei_movie_codec: Object
+var mei_movie_open_path := ""
+var mei_movie_decoded: Dictionary = {}
 var mei_movie_bytes := PackedByteArray()
 var mei_movie_frames: Array = []
 var mei_movie_queue: Array[Dictionary] = []
@@ -754,7 +756,10 @@ func _start_engine() -> void:
 	host.bg_updated.connect(_on_bg_updated)
 	host.choices_updated.connect(_on_choices_updated)
 	host.movie_requested.connect(_on_movie_requested)
+	host.movie_open_requested.connect(_on_movie_open_requested)
 	host.movie_stop_requested.connect(_on_movie_stop_requested)
+	host.movie_close_requested.connect(_on_movie_close_requested)
+	host.movie_seek_requested.connect(_on_movie_seek_requested)
 	host.tone_filter_updated.connect(_on_tone_filter_updated)
 	_apply_dialogue_skin()
 	_apply_config_skin()
@@ -1103,8 +1108,6 @@ func _on_choice_clicked(index: int) -> void:
 
 func _on_movie_requested(movie_file: String, play_mode: int = 0) -> void:
 	print("[AdvPlayer] Movie playback requested: %s" % movie_file)
-	if mei_movie_active:
-		_finish_mei_movie()
 	var base_name := movie_file.get_file().get_basename()
 	var mei_candidates: Array[String] = [
 		game_dir.path_join(movie_file),
@@ -1127,19 +1130,46 @@ func _on_movie_requested(movie_file: String, play_mode: int = 0) -> void:
 			break
 
 	if not found_path.is_empty():
+		_close_native_mei_movie()
 		print("[AdvPlayer] Playing video fallback from: ", found_path)
 		var stream := VideoStreamTheora.new()
 		stream.file = found_path
 		video_player.stream = stream
 		video_player.visible = true
 		video_player.play()
-		host.is_movie_playing = true
+		if host != null:
+			host.is_movie_playing = true
+			host.movie_total_frames = 0
+			host.movie_total_time_ms = 0
+			host.movie_current_frame = -1
 	else:
 		print("[AdvPlayer] Proprietary MEI video '%s' requested, no OGV fallback found. Skipping movie safely." % movie_file)
 		host.is_movie_playing = false
 
 
-func _start_native_mei_movie(path: String, play_mode: int = 0) -> bool:
+func _on_movie_open_requested(movie_file: String) -> void:
+	if host != null:
+		host.movie_opened = false
+	if not mei_movie_open_path.is_empty():
+		_close_native_mei_movie()
+	var base_name := movie_file.get_file().get_basename()
+	var candidates: Array[String] = [
+		game_dir.path_join(movie_file),
+		game_dir.path_join(base_name + ".mei"),
+		game_dir.path_join("movie").path_join(base_name + ".mei")
+	]
+	for path: String in candidates:
+		if FileAccess.file_exists(path) and _open_native_mei_movie(path):
+			if host != null:
+				host.movie_opened = true
+			return
+
+
+func _open_native_mei_movie(path: String) -> bool:
+	if mei_movie_open_path == path and mei_movie_decoded.get("ok", false):
+		return true
+	if not mei_movie_open_path.is_empty():
+		_close_native_mei_movie()
 	if not ClassDB.class_exists("YzkCodec"):
 		push_warning("MEI playback requires the native YzkCodec extension")
 		return false
@@ -1159,31 +1189,26 @@ func _start_native_mei_movie(path: String, play_mode: int = 0) -> bool:
 	if str(frames[0].get("picture_type", "")) != "I":
 		push_warning("MEI playback currently requires an I-frame at the start")
 		return false
-	if video_player != null:
-		video_player.stop()
-		video_player.visible = false
-	if mei_audio_player != null:
-		mei_audio_player.stop()
+	mei_movie_open_path = path
+	mei_movie_decoded = decoded
 	mei_movie_codec = codec
 	mei_movie_bytes = bytes
 	mei_movie_frames = frames
 	mei_movie_width = int(decoded.get("width", 0))
 	mei_movie_height = int(decoded.get("height", 0))
-	mei_movie_queue.clear()
-	mei_movie_anchor_rgba = first_rgba
 	mei_movie_first_rgba = first_rgba
+	mei_movie_anchor_rgba = first_rgba
 	mei_movie_anchor_index = 0
-	mei_movie_elapsed = 0.0
-	mei_movie_active = true
-	mei_movie_loop = (play_mode & 0x02) != 0
+	mei_movie_queue.clear()
 	var frame_count := int(decoded.get("frame_count", frames.size()))
 	var duration_ms := int(decoded.get("duration_ms", 0))
 	mei_movie_frame_duration = float(duration_ms) / 1000.0 / maxf(1.0, float(frame_count)) if duration_ms > 0 else 1.0 / 30.0
 	mei_movie_frame_duration = clampf(mei_movie_frame_duration, 1.0 / 120.0, 1.0)
-	_show_mei_frame(first_rgba, int(decoded.get("width", 0)), int(decoded.get("height", 0)), 0)
 	var bits := int(decoded.get("bits_per_sample", 0))
 	var channels := int(decoded.get("channels", 0))
 	var audio_data: Variant = decoded.get("audio_data", PackedByteArray())
+	mei_audio_player.stop()
+	mei_audio_player.stream = null
 	if audio_data is PackedByteArray and not audio_data.is_empty() and bits in [8, 16] and channels in [1, 2]:
 		var audio := AudioStreamWAV.new()
 		audio.format = AudioStreamWAV.FORMAT_8_BITS if bits == 8 else AudioStreamWAV.FORMAT_16_BITS
@@ -1191,13 +1216,44 @@ func _start_native_mei_movie(path: String, play_mode: int = 0) -> bool:
 		audio.stereo = channels == 2
 		audio.data = audio_data
 		mei_audio_player.stream = audio
-		mei_audio_player.play()
+	if host != null:
+		host.movie_total_frames = frame_count
+		host.movie_total_time_ms = duration_ms
+		host.movie_current_frame = 0
+	_show_mei_frame(first_rgba, mei_movie_width, mei_movie_height, 0)
+	mei_video_rect.visible = false
+	mei_video_backdrop.visible = false
+	return true
+
+
+func _start_native_mei_movie(path: String, play_mode: int = 0) -> bool:
+	if not _open_native_mei_movie(path):
+		return false
+	var decoded: Dictionary = mei_movie_decoded
+	var first_rgba: PackedByteArray = decoded.get("first_frame_rgba", mei_movie_first_rgba)
+	var frame_count := int(decoded.get("frame_count", mei_movie_frames.size()))
+	var duration_ms := int(decoded.get("duration_ms", 0))
+	if video_player != null:
+		video_player.stop()
+		video_player.visible = false
+	mei_movie_anchor_rgba = first_rgba
+	mei_movie_anchor_index = 0
+	mei_movie_queue.clear()
+	mei_movie_elapsed = 0.0
+	mei_movie_active = true
+	mei_movie_loop = (play_mode & 0x02) != 0
+	mei_audio_player.play()
+	_show_mei_frame(first_rgba, mei_movie_width, mei_movie_height, 0)
 	mei_video_backdrop.visible = true
 	mei_video_rect.visible = true
 	mei_video_backdrop.move_to_front()
 	mei_video_rect.move_to_front()
 	if host != null:
 		host.is_movie_playing = true
+		host.movie_opened = true
+		host.movie_total_frames = frame_count
+		host.movie_total_time_ms = duration_ms
+		host.movie_current_frame = 0
 	print("[AdvPlayer] Native MEI playback started: %s (%d frames at %.3f ms/frame)" % [path, frame_count, mei_movie_frame_duration * 1000.0])
 	return true
 
@@ -1222,6 +1278,53 @@ func _process_mei_movie(delta: float) -> void:
 			return
 		var frame: Dictionary = mei_movie_queue.pop_front()
 		_show_mei_frame(frame["rgba"], int(frame["width"]), int(frame["height"]), int(frame["index"]))
+
+
+func _on_movie_seek_requested(frame_index: int) -> void:
+	if mei_movie_open_path.is_empty() or frame_index < 0 or mei_movie_frames.is_empty():
+		return
+	var was_playing := mei_movie_active
+	# FileHdr.dwFrameCount can be one larger than the number of stored frame
+	# records; the SDK reports the header count, while its decoder clamps the
+	# terminal seek to the final available image record.
+	var target_index := mini(frame_index, mei_movie_frames.size() - 1)
+	var preceding_i := -1
+	for index: int in range(target_index, -1, -1):
+		if str(mei_movie_frames[index].get("picture_type", "")) == "I":
+			preceding_i = index
+			break
+	if preceding_i < 0:
+		return
+	var result: Variant = mei_movie_codec.call("decode_mei_i_frame", mei_movie_bytes, preceding_i)
+	if not result is Dictionary or not result.get("ok", false):
+		push_error("MEI seek I-frame %d failed: %s" % [preceding_i, result.get("error", "invalid result") if result is Dictionary else "invalid result"])
+		return
+	mei_movie_queue.clear()
+	mei_movie_anchor_index = preceding_i
+	mei_movie_anchor_rgba = result.get("rgba", PackedByteArray())
+	mei_movie_elapsed = 0.0
+	if target_index == preceding_i:
+		_show_mei_frame(mei_movie_anchor_rgba, mei_movie_width, mei_movie_height, target_index)
+	else:
+		while mei_movie_anchor_index < target_index:
+			if not _prepare_next_mei_group():
+				push_error("MEI seek could not decode display frame %d" % target_index)
+				return
+			var target_queue_index := -1
+			for queue_index: int in mei_movie_queue.size():
+				if int(mei_movie_queue[queue_index].get("index", -1)) == target_index:
+					target_queue_index = queue_index
+					break
+			if target_queue_index >= 0:
+				for _discard: int in target_queue_index:
+					mei_movie_queue.pop_front()
+				var selected: Dictionary = mei_movie_queue.pop_front()
+				_show_mei_frame(selected["rgba"], int(selected["width"]), int(selected["height"]), target_index)
+				break
+			mei_movie_queue.clear()
+	if was_playing and mei_audio_player != null and mei_audio_player.stream != null:
+		mei_audio_player.stop()
+		mei_audio_player.play(float(mei_movie_frame_duration * frame_index))
 
 
 func _prepare_next_mei_group() -> bool:
@@ -1273,10 +1376,29 @@ func _show_mei_frame(rgba: PackedByteArray, width: int, height: int, frame_index
 	else:
 		mei_movie_texture.update(image)
 	mei_movie_displayed_index = frame_index
+	if host != null:
+		host.movie_current_frame = frame_index
 
 
-func _finish_mei_movie() -> void:
+func _stop_mei_movie() -> void:
 	mei_movie_active = false
+	mei_movie_queue.clear()
+	mei_movie_loop = false
+	if mei_audio_player != null:
+		mei_audio_player.stop()
+	if mei_video_rect != null:
+		mei_video_rect.visible = false
+	if mei_video_backdrop != null:
+		mei_video_backdrop.visible = false
+	if host != null:
+		host.is_movie_playing = false
+	print("[AdvPlayer] Native MEI playback stopped; decoder remains open.")
+
+
+func _close_native_mei_movie() -> void:
+	_stop_mei_movie()
+	mei_movie_open_path = ""
+	mei_movie_decoded.clear()
 	mei_movie_codec = null
 	mei_movie_bytes = PackedByteArray()
 	mei_movie_frames.clear()
@@ -1287,16 +1409,16 @@ func _finish_mei_movie() -> void:
 	mei_movie_displayed_index = -1
 	mei_movie_width = 0
 	mei_movie_height = 0
-	mei_movie_loop = false
-	if mei_audio_player != null:
-		mei_audio_player.stop()
-	if mei_video_rect != null:
-		mei_video_rect.visible = false
-	if mei_video_backdrop != null:
-		mei_video_backdrop.visible = false
 	if host != null:
-		host.is_movie_playing = false
-	print("[AdvPlayer] Native MEI playback finished.")
+		host.movie_opened = false
+		host.movie_current_frame = -1
+		host.movie_total_frames = 0
+		host.movie_total_time_ms = 0
+
+
+func _finish_mei_movie() -> void:
+	_stop_mei_movie()
+	print("[AdvPlayer] Native MEI playback finished; decoder remains open.")
 
 
 func _restart_mei_movie() -> void:
@@ -1319,13 +1441,16 @@ func _on_video_finished() -> void:
 
 
 func _on_movie_stop_requested() -> void:
-	if mei_movie_active:
-		_finish_mei_movie()
+	_stop_mei_movie()
 	if video_player != null:
 		video_player.stop()
 		video_player.visible = false
 	if host != null:
 		host.is_movie_playing = false
+
+
+func _on_movie_close_requested() -> void:
+	_close_native_mei_movie()
 
 
 func _on_dialogue_updated(entry: Dictionary) -> void:

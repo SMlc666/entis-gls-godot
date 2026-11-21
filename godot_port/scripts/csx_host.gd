@@ -14,7 +14,10 @@ signal message_progress(sprite: HostSprite)
 signal bg_updated(bg_name: String, texture: Texture2D)
 signal bgm_updated(bgm_name: String)
 signal movie_requested(movie_file: String, play_mode: int)
+signal movie_open_requested(movie_file: String)
 signal movie_stop_requested
+signal movie_close_requested
+signal movie_seek_requested(frame_index: int)
 signal choices_updated(choices: Array)
 signal tone_filter_updated(filter_type: String)
 
@@ -76,6 +79,10 @@ var advance_query_count: int = 0
 var is_waiting_input: bool = false
 var yield_for_sprite_activation: bool = false
 var is_movie_playing: bool = false
+var movie_current_frame: int = -1
+var movie_total_frames: int = 0
+var movie_total_time_ms: int = 0
+var movie_opened: bool = false
 var current_choices: Array[String] = []
 var is_waiting_choice: bool = false
 var selected_choice: int = -1
@@ -1749,7 +1756,11 @@ class HostSprite extends RefCounted:
 
 	func open_movie(p_filename: String) -> int:
 		filename = p_filename
-		return 1 if not filename.is_empty() else 0
+		if host != null and not filename.is_empty():
+			host.movie_opened = false
+			host.emit_signal("movie_open_requested", filename)
+			return 1 if host.movie_opened else 0
+		return 0
 
 	func play_movie(mode: int = 0) -> int:
 		if host == null or filename.is_empty():
@@ -1762,6 +1773,21 @@ class HostSprite extends RefCounted:
 			return 1
 		return 0
 
+	func seek_frame(frame_index: int) -> int:
+		if host == null or host.movie_total_frames <= 0 or frame_index < 0 or frame_index >= host.movie_total_frames:
+			return 0
+		host.emit_signal("movie_seek_requested", frame_index)
+		return 1
+
+	func get_current_frame() -> int:
+		return host.movie_current_frame if host != null else -1
+
+	func get_total_frame() -> int:
+		return host.movie_total_frames if host != null else 0
+
+	func get_total_time() -> int:
+		return host.movie_total_time_ms if host != null else 0
+
 	func stop_movie() -> int:
 		if host != null:
 			host.is_movie_playing = false
@@ -1770,6 +1796,9 @@ class HostSprite extends RefCounted:
 
 	func close_movie() -> int:
 		stop_movie()
+		if host != null:
+			host.emit_signal("movie_close_requested")
+			host.movie_opened = false
 		filename = ""
 		return 0
 
