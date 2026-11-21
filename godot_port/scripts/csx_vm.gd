@@ -104,6 +104,7 @@ class CsxInstance extends RefCounted:
 	var type_name: String
 	var fields: Dictionary = {}
 	var field_names: Array[String] = []
+	var native_tone_filter: Variant = null
 
 	func _init(p_type_name: String) -> void:
 		type_name = p_type_name
@@ -1020,8 +1021,9 @@ func step() -> bool:
 						eval_stack.append(rres)
 						return true
 					elif inst.type_name == "ToneFilter":
-						host.report_unsupported("ToneFilter.%s" % func_name)
-						eval_stack.append(0)
+						var tone_filter := _tone_filter_for_value(inst)
+						var tone_result = _dispatch_tone_filter_method(tone_filter, func_name, method_args)
+						eval_stack.append(tone_result)
 						return true
 					elif inst.type_name == "File":
 						var f_dummy := CsxHostClass.HostFile.new(host)
@@ -1831,8 +1833,11 @@ func _dispatch_tone_filter_method(tf: CsxHostClass.HostToneFilter, method: Strin
 				)
 			return -1
 		"MorphingFilter":
-			if args.size() >= 3 and args[0] is CsxHostClass.HostToneFilter and args[1] is CsxHostClass.HostToneFilter:
-				return tf.morphing_filter(args[0] as CsxHostClass.HostToneFilter, args[1] as CsxHostClass.HostToneFilter, _to_int(args[2]))
+			if args.size() >= 3:
+				var filter1 := _tone_filter_for_value(args[0])
+				var filter2 := _tone_filter_for_value(args[1])
+				if filter1 != null and filter2 != null:
+					return tf.morphing_filter(filter1, filter2, _to_int(args[2]))
 			return -1
 		"LoadFilterFile":
 			return tf.load_filter_file(str(args[0])) if args.size() > 0 else -1
@@ -1846,6 +1851,17 @@ func _dispatch_tone_filter_method(tf: CsxHostClass.HostToneFilter, method: Strin
 			if tf.host != null:
 				tf.host.report_unsupported("HostToneFilter.%s" % method)
 			return 0
+
+
+func _tone_filter_for_value(value: Variant) -> CsxHostClass.HostToneFilter:
+	if value is CsxHostClass.HostToneFilter:
+		return value as CsxHostClass.HostToneFilter
+	if value is CsxInstance and (value as CsxInstance).type_name == "ToneFilter":
+		var instance := value as CsxInstance
+		if instance.native_tone_filter == null:
+			instance.native_tone_filter = CsxHostClass.HostToneFilter.new(host)
+		return instance.native_tone_filter as CsxHostClass.HostToneFilter
+	return null
 
 
 func _dispatch_resource_method(res: CsxHostClass.HostResource, method: String, args: Array) -> Variant:
