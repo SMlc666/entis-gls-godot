@@ -1097,7 +1097,7 @@ func step() -> bool:
 						return true
 					elif func_name == "LoadResource":
 						var archive_name: String = str(method_args[0]) if method_args.size() > 0 else ""
-						var res_code := hrm.load_resource(archive_name)
+						var res_code := _resource_error_code(hrm.load_resource(archive_name))
 						eval_stack.append(res_code)
 						return true
 					elif func_name == "CreateFormPage":
@@ -1105,7 +1105,9 @@ func step() -> bool:
 						var page_id: String = str(method_args[1]) if method_args.size() > 1 else ""
 						var form_code := 0
 						if parent_spr is CsxHostClass.HostSprite:
-							form_code = hrm.create_form_page(parent_spr, page_id)
+							form_code = _resource_error_code(hrm.create_form_page(parent_spr, page_id))
+						else:
+							form_code = 1
 						eval_stack.append(form_code)
 						return true
 					else:
@@ -1868,53 +1870,54 @@ func _dispatch_resource_method(res: CsxHostClass.HostResource, method: String, a
 	match method:
 		"LoadSound":
 			if args.size() > 0:
-				return res.load_sound(str(args[0]), int(args[1]) if args.size() > 1 else -1)
-			return 0
+				return _resource_error_code(res.load_sound(str(args[0]), int(args[1]) if args.size() > 1 else -1))
+			return 1
 		"AttachSound":
-			return res.attach_sound(args[0] if args.size() > 0 else null)
+			return _resource_error_code(res.attach_sound(args[0] if args.size() > 0 else null))
 		"LoadImage":
 			if args.size() > 0:
-				return res.load_image(str(args[0]))
-			return 0
+				return _resource_error_code(res.load_image(str(args[0])))
+			return 1
 		"Play":
 			var intro := int(args[0]) if args.size() > 0 else -1
 			var flag := int(args[1]) if args.size() > 1 else 0
-			return res.play(intro, flag)
+			return _resource_error_code(res.play(intro, flag))
 		"PlayFrom":
 			var s_pos := int(args[0]) if args.size() > 0 else 0
 			var e_pos := int(args[1]) if args.size() > 1 else -1
 			var rep := bool(args[2]) if args.size() > 2 else false
 			var r_pos := int(args[3]) if args.size() > 3 else -1
 			var flag := int(args[4]) if args.size() > 4 else 0
-			return res.play_from(s_pos, e_pos, rep, r_pos, flag)
+			return _resource_error_code(res.play_from(s_pos, e_pos, rep, r_pos, flag))
 		"SetRewindingPortion":
 			var rewind := _to_int(args[0]) if args.size() > 0 else -1
 			var end := _to_int(args[1]) if args.size() > 1 else -1
 			var repeat := _to_int(args[2]) != 0 if args.size() > 2 else false
-			return res.set_rewinding_portion(rewind, end, repeat)
+			return _resource_error_code(res.set_rewinding_portion(rewind, end, repeat))
 		"Stop":
-			return res.stop()
+			return _resource_error_code(res.stop())
 		"Pause":
-			return res.pause()
+			return _resource_error_code(res.pause())
 		"Restart":
-			return res.restart()
+			return _resource_error_code(res.restart())
 		"Release":
 			return res.release()
 		"SetVolume":
 			var vl := float(args[0]) if args.size() > 0 else 1.0
 			var vr := float(args[1]) if args.size() > 1 else 1.0
-			return res.set_volume(vl, vr)
+			return _resource_error_code(res.set_volume(vl, vr))
 		"SetTotalVolume":
 			var flag := int(args[0]) if args.size() > 0 else 0
 			var vol := float(args[1]) if args.size() > 1 else 1.0
-			return res.set_total_volume(flag, vol)
+			return _resource_error_code(res.set_total_volume(flag, vol))
 		"GetTotalVolume":
 			var flag := int(args[0]) if args.size() > 0 else 0
 			return res.get_total_volume(flag)
 		"GetVolume":
-			return res.get_volume(args[0] if args.size() > 0 else null, args[1] if args.size() > 1 else null)
+			res.get_volume(args[0] if args.size() > 0 else null, args[1] if args.size() > 1 else null)
+			return 0
 		"SetVolumeEnvelope":
-			return res.set_volume_envelope(args[0] if args.size() > 0 else null, int(args[1]) if args.size() > 1 else 0)
+			return _resource_error_code(res.set_volume_envelope(args[0] if args.size() > 0 else null, int(args[1]) if args.size() > 1 else 0))
 		"CancelVolumeEnvelope":
 			return res.cancel_volume_envelope()
 		"IsPendingEnvelope":
@@ -1931,14 +1934,14 @@ func _dispatch_resource_method(res: CsxHostClass.HostResource, method: String, a
 				if res.host != null:
 					res.host.report_unsupported("HostResource.GetPixelRect Pointer buffer")
 				return -1
-			return res.get_pixel_rect(get_pixels, _to_int(args[1]) if args.size() > 1 else 0, _to_int(args[2]) if args.size() > 2 else 0, _to_int(args[3]) if args.size() > 3 else 0, _to_int(args[4]) if args.size() > 4 else 0)
+			return _resource_error_code(res.get_pixel_rect(get_pixels, _to_int(args[1]) if args.size() > 1 else 0, _to_int(args[2]) if args.size() > 2 else 0, _to_int(args[3]) if args.size() > 3 else 0, _to_int(args[4]) if args.size() > 4 else 0))
 		"SetPixelRect":
 			var set_pixels: Variant = args[0] if args.size() > 0 else null
 			if not set_pixels is Array:
 				if res.host != null:
 					res.host.report_unsupported("HostResource.SetPixelRect Pointer buffer")
 				return -1
-			return res.set_pixel_rect(set_pixels, _to_int(args[1]) if args.size() > 1 else 0, _to_int(args[2]) if args.size() > 2 else 0, _to_int(args[3]) if args.size() > 3 else 0, _to_int(args[4]) if args.size() > 4 else 0)
+			return _resource_error_code(res.set_pixel_rect(set_pixels, _to_int(args[1]) if args.size() > 1 else 0, _to_int(args[2]) if args.size() > 2 else 0, _to_int(args[3]) if args.size() > 3 else 0, _to_int(args[4]) if args.size() > 4 else 0))
 		"GetSoundInfo":
 			if res.audio_stream == null:
 				return null
@@ -1974,6 +1977,14 @@ func _dispatch_resource_method(res: CsxHostClass.HostResource, method: String, a
 			if res.host != null:
 				res.host.report_unsupported("HostResource.%s" % method)
 			return 0
+
+
+func _resource_error_code(host_status: int) -> int:
+	# HostResource methods use 1/0 as success/failure internally. Entis SDK
+	# Error values use 0 for success and 1 for a general failure.
+	if host_status < 0:
+		return host_status
+	return 0 if host_status > 0 else 1
 
 
 func _make_sound_info(res: CsxHostClass.HostResource) -> CsxInstance:
