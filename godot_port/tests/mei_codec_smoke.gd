@@ -41,6 +41,30 @@ func _initialize() -> void:
 	if decoded_audio.size() != 22226400:
 		_fail("expected audio output of 22226400 bytes, got %d" % decoded_audio.size())
 		return
+	var frames: Array = result.get("video_frame_info", [])
+	if frames.size() != 2520:
+		_fail("expected 2520 video frame records, got %d" % frames.size())
+		return
+	var expected_pictures := ["I", "B", "B", "P", "B", "B", "P", "B"]
+	for index: int in expected_pictures.size():
+		var frame: Dictionary = frames[index]
+		if int(frame.get("index", -1)) != index or str(frame.get("picture_type", "")) != expected_pictures[index]:
+			_fail("unexpected frame metadata at index %d: %s" % [index, frame])
+			return
+	var i_count := 0
+	var p_count := 0
+	var b_count := 0
+	for frame_variant: Variant in frames:
+		match str(frame_variant.get("picture_type", "")):
+			"I": i_count += 1
+			"P": p_count += 1
+			"B": b_count += 1
+			_:
+				_fail("unknown MEI frame type: %s" % frame_variant)
+				return
+	if i_count != 582 or p_count != 259 or b_count != 1679:
+		_fail("unexpected I/P/B frame counts: %d/%d/%d" % [i_count, p_count, b_count])
+		return
 	if result.get("video_frames_decoded", true):
 		_fail("decoder must not claim that ERI Layer-3 frames are decoded")
 		return

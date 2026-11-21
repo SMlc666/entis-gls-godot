@@ -49,6 +49,16 @@ struct SectionRange {
     size_t size = 0;
 };
 
+struct MeiFrameRecord {
+    std::string record_type;
+    size_t payload_size = 0;
+    uint8_t eri_version = 0;
+    uint8_t operation_flags = 0;
+    uint8_t encode_type = 0;
+    uint8_t bit_count = 0;
+    char picture_type = 'P';
+};
+
 uint32_t read_u32_le(const uint8_t *data) {
     return static_cast<uint32_t>(data[0])
         | (static_cast<uint32_t>(data[1]) << 8)
@@ -212,7 +222,7 @@ bool validate_mei_size(
     std::string &error,
     size_t &width,
     size_t &height,
-    size_t &frame_records,
+    std::vector<MeiFrameRecord> &frame_records,
     uint32_t &declared_frames,
     uint32_t &duration_ms,
     uint32_t &declared_samples,
@@ -269,10 +279,30 @@ bool validate_mei_size(
         error = "MEI frame and audio stream is malformed.";
         return false;
     }
-    frame_records = 0;
-    for (const SectionRange &section : stream_sections)
-        if (section.name == "ImageFrm" || section.name == "DiffeFrm") ++frame_records;
-    if (frame_records == 0 || frame_records > 100000 || declared_frames == 0
+    frame_records.clear();
+    for (const SectionRange &section : stream_sections) {
+        if (section.name != "ImageFrm" && section.name != "DiffeFrm") continue;
+        if (section.size < 4) {
+            error = "MEI image frame header is truncated.";
+            return false;
+        }
+        const uint8_t *frame = data + section.offset;
+        if (frame[0] != 0x28 || frame[3] != 8) {
+            error = "MEI frame uses an unsupported ERI frame header.";
+            return false;
+        }
+        MeiFrameRecord record;
+        record.record_type = section.name;
+        record.payload_size = section.size;
+        record.eri_version = frame[0];
+        record.operation_flags = frame[1];
+        record.encode_type = frame[2];
+        record.bit_count = frame[3];
+        record.picture_type = section.name == "ImageFrm"
+            ? 'I' : ((frame[1] & 0x02) != 0 ? 'B' : 'P');
+        frame_records.push_back(std::move(record));
+    }
+    if (frame_records.empty() || frame_records.size() > 100000 || declared_frames == 0
         || declared_frames > 100000 || declared_samples == 0 || channels == 0
         || (bits_per_sample != 8 && bits_per_sample != 16 && bits_per_sample != 24 && bits_per_sample != 32)
         || declared_samples > kMaxCodecOutputBytes / channels / (bits_per_sample / 8)) {
@@ -568,7 +598,8 @@ Dictionary YzkCodec::decode_mei(const PackedByteArray &input) const {
     if (input.size() < 64 || static_cast<size_t>(input.size()) > kMaxCodecInputBytes)
         return codec_failure("MEI input size is outside the supported bounds.");
     std::string validation_error;
-    size_t width = 0, height = 0, frame_records = 0;
+    size_t width = 0, height = 0;
+    std::vector<MeiFrameRecord> frame_records;
     uint32_t declared_frames = 0, duration_ms = 0, declared_samples = 0;
     uint32_t channels = 0, sample_rate = 0, bits_per_sample = 0;
     if (!validate_mei_size(input.ptr(), static_cast<size_t>(input.size()), validation_error,
@@ -603,7 +634,23 @@ Dictionary YzkCodec::decode_mei(const PackedByteArray &input) const {
         result["width"] = static_cast<int64_t>(width);
         result["height"] = static_cast<int64_t>(height);
         result["frame_count"] = static_cast<int64_t>(declared_frames);
-        result["frame_record_count"] = static_cast<int64_t>(frame_records);
+        result["frame_record_count"] = static_cast<int64_t>(frame_records.size());
+        Array frame_info;
+        frame_info.resize(static_cast<int64_t>(frame_records.size()));
+        for (size_t index = 0; index < frame_records.size(); ++index) {
+            const MeiFrameRecord &frame = frame_records[index];
+            Dictionary item;
+            item["index"] = static_cast<int64_t>(index);
+            item["record_type"] = frame.record_type.c_str();
+            item["picture_type"] = String::utf8(&frame.picture_type, 1);
+            item["payload_size"] = static_cast<int64_t>(frame.payload_size);
+            item["eri_version"] = frame.eri_version;
+            item["operation_flags"] = frame.operation_flags;
+            item["encode_type"] = frame.encode_type;
+            item["bit_count"] = frame.bit_count;
+            frame_info[static_cast<int64_t>(index)] = item;
+        }
+        result["video_frame_info"] = frame_info;
         result["duration_ms"] = static_cast<int64_t>(duration_ms);
         result["sample_count_per_channel"] = static_cast<int64_t>(declared_samples);
         result["channels"] = static_cast<int64_t>(channels);
