@@ -132,6 +132,7 @@ func _initialize() -> void:
 	expect(player.recollect_return_tag == 0, "recollect_return_tag must be 0")
 	expect(player.is_appreciation_open == false, "Appreciation modal must be closed during playback")
 	expect(player.is_title_mode == false, "Title mode must be false during playback")
+	expect(not player.native_title_layer.visible, "Title sprites must not cover recollection playback")
 	expect(player.is_running == true, "Engine must be running recollection scenario")
 
 	# Step VM a few cycles to confirm dialogue progression

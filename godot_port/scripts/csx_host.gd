@@ -1448,7 +1448,7 @@ class HostSprite extends RefCounted:
 			if host != null:
 				host.report_unsupported("HostSprite.SetEffectParameter %s" % effect_type)
 			return -1
-		if effect_type not in ["TileImage", "FilterWhite", "FilterLight", "FilterBlack", "FilterDark", "RasterScroll"]:
+		if effect_type not in ["TileImage", "FilterWhite", "FilterLight", "FilterBlack", "FilterDark", "RasterScroll", "WaveCircle"]:
 			if host != null:
 				host.report_unsupported("HostSprite.SetEffectParameter %s renderer" % effect_type)
 			return -1
@@ -1473,6 +1473,14 @@ class HostSprite extends RefCounted:
 		elif effect_type == "RasterScroll":
 			fields["effect_shaking_width"] = maxi(0, mini(4096, _effect_integer(effect, "nShakingWidth")))
 			fields["effect_mesh_size"] = maxi(1, mini(8192, _effect_integer(effect, "nMeshSize", 1)))
+			fields["effect_frequency"] = _effect_integer(effect, "nFrequency")
+			fields["effect_interval_ms"] = maxi(0, _effect_integer(effect, "nInterval"))
+			fields["effect_degree_step"] = _effect_integer(effect, "nDegreeStep")
+			fields["effect_transition"] = (_effect_integer(effect, "nFlags") & 1) != 0
+			fields["effect_elapsed_ms"] = 0.0
+		elif effect_type == "WaveCircle":
+			fields["effect_shaking_width"] = maxi(0, mini(4096, _effect_integer(effect, "nShakingWidth")))
+			fields["effect_mesh_size"] = maxi(1, mini(8192, _effect_integer(effect, "nMeshSize", 16)))
 			fields["effect_frequency"] = _effect_integer(effect, "nFrequency")
 			fields["effect_interval_ms"] = maxi(0, _effect_integer(effect, "nInterval"))
 			fields["effect_degree_step"] = _effect_integer(effect, "nDegreeStep")
@@ -1918,7 +1926,7 @@ func advance_sprite_animations(delta: float) -> void:
 			active_effect_sprites.erase(sprite_id)
 			continue
 		var effect_type := str(sprite.fields.get("effect_type", ""))
-		if effect_type not in ["TileImage", "RasterScroll"]:
+		if effect_type not in ["TileImage", "RasterScroll", "WaveCircle"]:
 			continue
 		var interval := int(sprite.fields.get("effect_interval_ms", 0))
 		if interval <= 0:

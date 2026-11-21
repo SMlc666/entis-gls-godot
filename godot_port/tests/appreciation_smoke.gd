@@ -34,15 +34,12 @@ func _run() -> void:
 
 	expect(player.is_title_mode, "AdvPlayer should be in title mode")
 	expect(player.title_panel != null and player.title_panel.visible, "Title panel should be visible")
-	var title_gallery_btn: Button = player.title_panel.find_child("TitleGalleryBtn", true, false)
-	expect(title_gallery_btn != null, "Title screen must have TitleGalleryBtn")
-	print("  Title Screen initialized successfully with Gallery button.")
-
-	print("[2/6] Opening Appreciation & Gallery modal ...")
+	print("[2/6] Opening the compatibility Gallery modal ...")
 	player._open_appreciation_modal()
 	await process_frame
 	expect(player.is_appreciation_open, "is_appreciation_open must be true")
 	expect(player.appreciation_panel.visible, "appreciation_panel must be visible")
+	expect(not player.native_title_layer.visible, "Title sprites must not overlap the gallery")
 	expect(player.cg_catalog.size() == 6, "cg_catalog must have 6 categories")
 
 	var total_scenes := 0
@@ -130,10 +127,18 @@ func _run() -> void:
 	player._stop_jukebox_bgm()
 	expect(not player.bgm_player.playing, "BGM player should be stopped")
 
-	# Close modal
-	player._close_appreciation_modal()
+	# Close the gallery while a jukebox track is playing.
+	player._play_jukebox_bgm(1)
+	player.app_close_btn.emit_signal("pressed")
 	expect(not player.is_appreciation_open, "is_appreciation_open should be false")
 	expect(player.is_title_mode, "Should remain in title mode")
+	expect(player.native_title_layer.visible, "Closing gallery must restore the native title")
+	for frame in range(120):
+		if player.host.current_bgm.to_lower() == "bgm07.mio":
+			break
+		await process_frame
+	expect(player.host.current_bgm.to_lower() == "bgm07.mio", "Closing gallery must restore the title theme")
+	expect(player.current_bgm_track_index == -1, "Title theme must not appear as a selected jukebox track")
 	print("  BGM Jukebox passed successfully.")
 
 	print("[6/6] Verifying Android candidate VFS path resolution & pristine game files ...")

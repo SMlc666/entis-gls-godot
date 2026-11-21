@@ -11,7 +11,8 @@ static func decode(data: PackedByteArray) -> Dictionary:
 		return metadata
 	if metadata["has_reference"]:
 		return {"ok": false, "error": "图片引用了底图，暂不支持合成预览。"}
-	if int(metadata["width"]) > 32768 or int(metadata["height"]) > 32768 or int(metadata["width"]) * int(metadata["height"]) > MAX_IMAGE_PIXELS:
+	var frame_count := int(metadata.get("frame_count", 1))
+	if int(metadata["width"]) > 32768 or int(metadata["height"]) > 32768 or int(metadata["width"]) * int(metadata["height"]) * frame_count > MAX_IMAGE_PIXELS:
 		return {"ok": false, "error": "ERI 图片尺寸超出预览上限。"}
 	var native_error := ""
 	if ClassDB.class_exists("YzkCodec"):
@@ -22,15 +23,16 @@ static func decode(data: PackedByteArray) -> Dictionary:
 				var width := int(native_result.get("width", 0))
 				var height := int(native_result.get("height", 0))
 				var pixels: Variant = native_result.get("data", PackedByteArray())
-				if width != int(metadata["width"]) or height != int(metadata["height"]):
-					return {"ok": false, "error": "原生 ERI 解码器返回的图片尺寸与头部不一致。"}
-				var expected_bytes := int(metadata["width"]) * int(metadata["height"]) * 4
+				var stacked_height := int(metadata["height"]) * frame_count
+				if width != int(metadata["width"]) or height != stacked_height:
+					return {"ok": false, "error": "原生 ERI 解码器返回的帧图集尺寸与头部不一致。"}
+				var expected_bytes := int(metadata["width"]) * stacked_height * 4
 				if not pixels is PackedByteArray or pixels.size() != expected_bytes:
 					return {"ok": false, "error": "原生 ERI 解码器返回了长度错误的 RGBA 数据。"}
 				var image := Image.create_from_data(width, height, false, Image.FORMAT_RGBA8, pixels)
 				if image == null or image.is_empty():
 					return {"ok": false, "error": "无法从原生解码结果创建 ERI 图片。"}
-				return {"ok": true, "image": image}
+				return _split_frames(image, metadata)
 			if native_result is Dictionary:
 				native_error = str(native_result.get("error", "原生 ERI 解码失败。"))
 	if OS.get_name() != "Linux":
@@ -45,4 +47,24 @@ static func decode(data: PackedByteArray) -> Dictionary:
 	var load_error := image.load_png_from_buffer(result["data"])
 	if load_error != OK or image.is_empty():
 		return {"ok": false, "error": "无法读取解码后的图片：%s" % error_string(load_error)}
-	return {"ok": true, "image": image}
+	return _split_frames(image, metadata)
+
+
+static func _split_frames(stacked_image: Image, metadata: Dictionary) -> Dictionary:
+	var width := int(metadata["width"])
+	var frame_height := int(metadata["height"])
+	var frame_count := int(metadata.get("frame_count", 1))
+	if stacked_image.get_width() != width or stacked_image.get_height() != frame_height * frame_count:
+		return {"ok": false, "error": "ERI 解码帧图集尺寸与帧索引不匹配。"}
+	var frames: Array[Image] = []
+	for frame_index in frame_count:
+		frames.append(stacked_image.get_region(Rect2i(0, frame_index * frame_height, width, frame_height)))
+	if frames.is_empty():
+		return {"ok": false, "error": "ERI 解码结果没有可用帧。"}
+	return {
+		"ok": true,
+		"image": frames[0],
+		"frames": frames,
+		"frame_sequence": metadata.get("frame_sequence", []),
+		"total_time_ms": int(metadata.get("total_time_ms", 0)),
+	}

@@ -4,6 +4,7 @@ const CsxVMReader = preload("res://scripts/csx_vm.gd")
 const CsxHostClass = preload("res://scripts/csx_host.gd")
 const PlayerSettingsState = preload("res://scripts/player_settings_state.gd")
 const CgThumbnailCache = preload("res://scripts/cg_thumbnail_cache.gd")
+const NativeMessageFadeEffect = preload("res://scripts/native_message_fade_effect.gd")
 
 const CG_CATEGORIES: Array[Dictionary] = [
 	{"id": "EA", "name": "春日野 穹", "sub": "Kasugano Sora"},
@@ -424,6 +425,7 @@ func _build_ui() -> void:
 	message_label.name = "MessageLabel"
 	message_label.text = "正在启动剧情引擎，请稍候..."
 	message_label.bbcode_enabled = true
+	message_label.install_effect(NativeMessageFadeEffect.new())
 	message_label.scroll_active = false
 	message_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	message_label.position = Vector2(39, 38)
@@ -691,6 +693,7 @@ func _start_engine() -> void:
 	print("[AdvPlayer] Using game resources from: %s" % game_dir)
 
 	host = CsxHostClass.new(game_dir)
+	host.cursor_position_provider = Callable(self, "_get_native_cursor_position")
 	if not save_dir_override.is_empty():
 		host.save_dir = save_dir_override
 	host.bgm_player = bgm_player
@@ -704,6 +707,7 @@ func _start_engine() -> void:
 
 	host.dialogue_updated.connect(_on_dialogue_updated)
 	host.message_output.connect(_on_message_output)
+	host.message_progress.connect(_on_message_progress)
 	host.bg_updated.connect(_on_bg_updated)
 	host.choices_updated.connect(_on_choices_updated)
 	host.movie_requested.connect(_on_movie_requested)
@@ -742,6 +746,9 @@ func _start_engine() -> void:
 		message_label.text = "[color=#e06c75]SetupAdvScreen() 失败: %s[/color]" % setup_res.get("error", "")
 		return
 
+	# Native Initialize() may set Entis category master volumes. Restore the
+	# user's persisted settings after it has finished, before script playback.
+	_apply_config_state()
 	is_initialized = true
 
 	if start_in_title:
@@ -767,6 +774,8 @@ func _start_engine() -> void:
 func _process(delta: float) -> void:
 	if not is_initialized:
 		return
+	if host != null:
+		host.advance_audio_envelopes(delta)
 	if is_title_mode:
 		if not is_running or is_appreciation_open or is_config_open or is_save_load_open or confirm_panel.visible:
 			return
@@ -958,6 +967,14 @@ func _update_bustups() -> void:
 	var adv = vm.globals_by_name.get("adv", null)
 	if not (adv is CsxVMReader.CsxInstance):
 		return
+	var base_sprite: Variant = adv.get_field("sprAdvBase")
+	var active_tone_filter: CsxHostClass.HostToneFilter = base_sprite.tone_filter if base_sprite is CsxHostClass.HostSprite else null
+	if tone_material != null and active_tone_filter != null:
+		tone_material.set_shader_parameter("tone_lut", active_tone_filter.get_tone_texture())
+		tone_material.set_shader_parameter("tone_flags", active_tone_filter.tone_flags)
+		tone_material.set_shader_parameter("use_tone_lut", true)
+	elif tone_material != null:
+		tone_material.set_shader_parameter("use_tone_lut", false)
 	var bm = adv.get_field("bustupMan")
 	if not (bm is CsxVMReader.CsxInstance):
 		return
@@ -1101,7 +1118,34 @@ func _on_message_output(sprite: CsxHostClass.HostSprite) -> void:
 	if message_label.get_meta("message_style", {}) != sprite.message_style:
 		_apply_native_text_style(message_label, sprite.message_style)
 		message_label.set_meta("message_style", sprite.message_style)
-	message_label.text = sprite.display_text()
+	message_label.text = _format_native_message(sprite)
+	message_label.visible_characters = sprite.message_visible_count
+	if not sprite.message_pending:
+		_clear_native_message_fade_effect()
+
+
+func _on_message_progress(sprite: CsxHostClass.HostSprite) -> void:
+	if sprite.message_style.get("id") == "ID_FONT_MESSAGE":
+		if not sprite.message_pending:
+			message_label.text = _format_native_message(sprite)
+		message_label.visible_characters = sprite.message_visible_count
+		if not sprite.message_pending:
+			_clear_native_message_fade_effect()
+
+
+func _format_native_message(sprite: CsxHostClass.HostSprite) -> String:
+	var text := sprite.display_text().replace("[", "[lb]").replace("]", "[rb]")
+	if not sprite.message_pending or sprite.message_fade_ms <= 0:
+		return text
+	if message_label.custom_effects.is_empty():
+		message_label.install_effect(NativeMessageFadeEffect.new())
+	return "[native_fade interval_ms=%d fade_ms=%d]%s[/native_fade]" % [sprite.message_char_speed_ms, sprite.message_fade_ms, text]
+
+
+func _clear_native_message_fade_effect() -> void:
+	if not message_label.custom_effects.is_empty():
+		message_label.custom_effects = []
+		message_label.reload_effects()
 
 
 func _on_bg_updated(bg_name: String, texture: Texture2D) -> void:
@@ -1233,12 +1277,44 @@ func _on_quick_load() -> void:
 const TONE_SHADER_CODE = """
 shader_type canvas_item;
 
-uniform int filter_mode = 0; // 0: NORMAL, 1: SEPIA, 2: MONO, 3: NEGATIVE
+uniform int filter_mode = 0; // fallback filter presets
 uniform float intensity : hint_range(0.0, 1.0) = 1.0;
+uniform bool use_tone_lut = false;
+uniform sampler2D tone_lut : filter_nearest;
+uniform int tone_flags = 0;
+
+float tone_coord(float value) {
+	return (floor(clamp(value, 0.0, 1.0) * 255.0 + 0.5) + 0.5) / 256.0;
+}
 
 void fragment() {
 	vec4 c = texture(TEXTURE, UV);
-	if (filter_mode == 1) { // SEPIA
+	if (use_tone_lut) {
+		if ((tone_flags & 8) != 0) {
+			float gray = dot(c.rgb, vec3(0.299, 0.587, 0.114));
+			c.rgb = vec3(gray);
+		} else if ((tone_flags & 4) != 0) {
+				// Match EntisGLS eglRGBtoYUV/eglYUVtoRGB byte coefficients.
+				float y = (c.r * 75.0 + c.g * 149.0 + c.b * 32.0) / 256.0;
+				float u = (c.r * -43.0 + c.g * -85.0 + c.b * 128.0) / 256.0 + 0.5;
+				float v = (c.r * 121.0 + c.g * -100.0 + c.b * -21.0) / 256.0 + 0.5;
+				// eglApplyToneTable receives blue, green, red tables. In YUV storage,
+				// byte 0 is Y, byte 1 is U and byte 2 is V.
+				y = texture(tone_lut, vec2(tone_coord(y), 0.5)).b;
+				u = texture(tone_lut, vec2(tone_coord(u), 0.5)).g - 0.5;
+				v = texture(tone_lut, vec2(tone_coord(v), 0.5)).r - 0.5;
+				c.rgb = clamp(vec3(
+					y + 1.5 * v,
+					y - 0.375 * u - 0.75 * v,
+					y + 1.75 * u), 0.0, 1.0);
+		} else {
+			c.r = texture(tone_lut, vec2(tone_coord(c.r), 0.5)).r;
+			c.g = texture(tone_lut, vec2(tone_coord(c.g), 0.5)).g;
+			c.b = texture(tone_lut, vec2(tone_coord(c.b), 0.5)).b;
+		}
+		c.a = texture(tone_lut, vec2(tone_coord(c.a), 0.5)).a;
+		if ((tone_flags & 2) != 0) c.rgb *= c.a;
+	} else if (filter_mode == 1) { // SEPIA
 		float gray = dot(c.rgb, vec3(0.299, 0.587, 0.114));
 		vec3 sepia = vec3(gray * 1.2, gray * 0.95, gray * 0.7);
 		c.rgb = mix(c.rgb, clamp(sepia, 0.0, 1.0), intensity);
@@ -1277,6 +1353,7 @@ func _on_tone_filter_updated(filter_type: String) -> void:
 	else:
 		mode = 0
 	if tone_material != null:
+		tone_material.set_shader_parameter("use_tone_lut", false)
 		tone_material.set_shader_parameter("filter_mode", mode)
 	print("[AdvPlayer] Tone filter set to: %s (mode %d)" % [filter_type, mode])
 
@@ -1526,6 +1603,7 @@ func _build_title_screen_ui() -> void:
 	native_title_canvas.position = Vector2.ZERO
 	native_title_canvas.size = Vector2(800, 600)
 	native_title_canvas.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	native_title_canvas.clip_contents = true
 	native_title_layer.add_child(native_title_canvas)
 
 
@@ -1652,8 +1730,6 @@ func _start_native_title_script() -> bool:
 	vm.last_return_value = null
 	vm.last_error = ""
 	native_title_result_handled = false
-	if host.current_bgm.to_lower() != "bgm07.mio" or not bgm_player.playing:
-		host.play_bgm("BGM07.mio")
 	is_title_mode = true
 	is_running = true
 	return true
@@ -1708,7 +1784,10 @@ func _process_native_title() -> void:
 		if not vm.step():
 			is_running = false
 			message_label.text = "[color=#e06c75]标题脚本执行中断: %s[/color]" % vm.last_error
-			push_error("[AdvPlayer] Native Title() stopped: %s" % vm.last_error)
+			var frames: Array[String] = []
+			for frame: Variant in vm.call_stack:
+				frames.append(str(frame.name))
+			push_error("[AdvPlayer] Native screen stopped at 0x%X (%s): %s" % [vm.ip, " > ".join(frames), vm.last_error])
 			return
 		executed += 1
 	_sync_native_title_canvas()
@@ -1729,7 +1808,7 @@ func _handle_native_title_return() -> void:
 			_on_title_start_game()
 		3:
 			if not _start_native_appreciation_script():
-				_open_appreciation_modal()
+				_start_native_title_script()
 		_:
 			# A zero result is used by native sub-flows such as cancel/back.
 			# Re-enter Title() to return to its original command loop.
@@ -1750,12 +1829,8 @@ func _sync_native_title_canvas() -> void:
 	if not (window is CsxHostClass.HostWindow):
 		return
 	var filter_title_depth := is_title_mode and not native_appreciation_mode
-	var z_bounds := _native_title_z_bounds(window.root_sprites, filter_title_depth)
-	var z_scale := 4096.0 / maxf(1.0, float(z_bounds.y - z_bounds.x))
 	var seen: Dictionary = {}
-	for root_sprite in window.root_sprites:
-		if root_sprite is CsxHostClass.HostSprite:
-			_sync_native_title_sprite(root_sprite, native_title_canvas, seen, z_bounds.y, z_scale, filter_title_depth)
+	_sync_native_sprite_children(window.root_sprites, native_title_canvas, seen, filter_title_depth)
 	for instance_id in native_title_controls.keys():
 		if not seen.has(instance_id):
 			var stale_node: Node = native_title_controls[instance_id]
@@ -1764,20 +1839,34 @@ func _sync_native_title_canvas() -> void:
 			native_title_controls.erase(instance_id)
 
 
-func _native_title_z_bounds(sprites: Array, filter_title_depth: bool) -> Vector2i:
-	var bounds := Vector2i(2147483647, -2147483647)
-	for sprite in sprites:
-		if sprite is CsxHostClass.HostSprite:
-			if filter_title_depth and sprite.z_order < 52000:
-				continue
-			bounds.x = mini(bounds.x, sprite.z_order)
-			bounds.y = maxi(bounds.y, sprite.z_order)
-	if bounds.x > bounds.y:
+func _get_native_cursor_position() -> Vector2i:
+	var viewport_size := get_viewport_rect().size
+	var scale_factor := minf(viewport_size.x / 800.0, viewport_size.y / 600.0)
+	if scale_factor <= 0.0:
 		return Vector2i.ZERO
-	return bounds
+	var canvas_origin := (viewport_size - Vector2(800.0, 600.0) * scale_factor) * 0.5
+	var logical_position := (get_global_mouse_position() - canvas_origin) / scale_factor
+	return Vector2i(roundi(logical_position.x), roundi(logical_position.y))
 
 
-func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control, seen: Dictionary, z_max: int, z_scale: float, filter_title_depth: bool) -> void:
+func _sync_native_sprite_children(sprites: Array, parent: Control, seen: Dictionary, filter_title_depth: bool) -> void:
+	# Keep painting and mouse hit order consistent with the source depth.
+	var ordered := sprites.duplicate()
+	ordered.sort_custom(func(a: CsxHostClass.HostSprite, b: CsxHostClass.HostSprite): return a.z_order > b.z_order)
+	var next_index := parent.get_child_count()
+	for child in parent.get_children():
+		if child.has_meta("native_sprite_id"):
+			next_index = child.get_index()
+			break
+	for sprite: CsxHostClass.HostSprite in ordered:
+		_sync_native_title_sprite(sprite, parent, seen, filter_title_depth)
+		var wrapper: Control = native_title_controls[sprite.get_instance_id()]
+		if wrapper.get_index() != next_index:
+			parent.move_child(wrapper, next_index)
+		next_index += 1
+
+
+func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control, seen: Dictionary, filter_title_depth: bool) -> void:
 	var instance_id := sprite.get_instance_id()
 	seen[instance_id] = true
 	var wrapper: Control = native_title_controls.get(instance_id, null)
@@ -1798,6 +1887,15 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 			button.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 			button.pressed.connect(_on_native_title_button_pressed.bind(sprite))
 			wrapper.add_child(button)
+		elif sprite.fields.get("control_type", "") == "scroll_bar":
+			var scroll_control: Range = VSlider.new() if str(sprite.fields.get("scroll_axis", "horz")) == "vert" else HSlider.new()
+			scroll_control.name = "NativeScroll"
+			scroll_control.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+			scroll_control.step = 1.0
+			scroll_control.focus_mode = Control.FOCUS_ALL
+			scroll_control.mouse_filter = Control.MOUSE_FILTER_STOP
+			scroll_control.value_changed.connect(_on_native_scroll_changed.bind(sprite))
+			wrapper.add_child(scroll_control)
 		else:
 			var texture_rect := TextureRect.new()
 			texture_rect.name = "NativeTexture"
@@ -1815,25 +1913,38 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 		label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		wrapper.add_child(label)
 		parent.add_child(wrapper)
+		if filter_title_depth and sprite.fields.get("form_page_id") == "ID_PAGE_MENU":
+			var gallery := Button.new()
+			gallery.name = "NativeTitleGalleryEntry"
+			gallery.text = "鉴赏与回想"
+			gallery.position = Vector2(25, 126)
+			gallery.size = Vector2(127, 24)
+			gallery.pressed.connect(_start_native_appreciation_script)
+			wrapper.add_child(gallery)
 	elif wrapper.get_parent() != parent:
 		wrapper.reparent(parent)
-	wrapper.position = Vector2(sprite.position)
+	wrapper.position = Vector2(sprite.position - sprite.rev_center)
 	wrapper.pivot_offset = Vector2(sprite.rev_center)
 	wrapper.scale = sprite.magnification
 	var display_text := sprite.display_text()
 	var fallback_size := Vector2(72, 22) if not display_text.is_empty() else Vector2.ZERO
 	if sprite.is_button:
 		fallback_size = Vector2(127, 24)
-	wrapper.size = Vector2(sprite.size) if sprite.size.x > 0 and sprite.size.y > 0 else fallback_size
-	if parent == native_title_canvas:
-		# EntisGLS uses camera depth where smaller z_order is closer to camera (front)
-		# and larger z_order is further back (background=52030, logo=52020, menu=52010).
-		# In Godot 2D, larger z_index is in front. We invert so background is at z_index=0
-		# and logo/menu/buttons are rendered on top.
-		wrapper.z_index = clampi(int(round(float(z_max - sprite.z_order) * z_scale)), 0, 4096)
-	else:
-		wrapper.z_index = sprite.z_order
-	if parent == native_title_canvas and filter_title_depth and sprite.z_order < 52000:
+	elif sprite.fields.get("control_type", "") == "scroll_bar":
+		var axis := str(sprite.fields.get("scroll_axis", "horz"))
+		fallback_size = Vector2(160, 18) if axis == "horz" else Vector2(18, 160)
+	var render_size := sprite.get_render_size()
+	wrapper.size = Vector2(render_size) if render_size.x > 0 and render_size.y > 0 else fallback_size
+	var current_effect_type := str(sprite.fields.get("effect_type", ""))
+	var raster_width := int(sprite.fields.get("effect_shaking_width", 0)) if current_effect_type == "RasterScroll" else 0
+	if raster_width > 0:
+		wrapper.position.x -= raster_width
+		wrapper.size.x += raster_width * 2
+	if sprite.fields.get("control_type", "") == "scroll_bar" and sprite.size.x > 0:
+		if sprite.size.y <= 0:
+			wrapper.size.y = 18
+	if parent == native_title_canvas and ((filter_title_depth and sprite.z_order < 52000)
+			or (native_appreciation_mode and sprite.z_order >= 52000)):
 		wrapper.visible = false
 	else:
 		wrapper.visible = sprite.is_visible
@@ -1848,10 +1959,119 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 		native_button.texture_pressed = sprite.btn_pushed_tex if sprite.btn_pushed_tex != null else sprite.btn_focus_tex
 		native_button.texture_disabled = sprite.btn_disabled_tex
 		native_button.disabled = sprite.btn_state == "disabled"
+		native_button.mouse_filter = Control.MOUSE_FILTER_IGNORE if sprite.transparency >= 256 or native_button.disabled else Control.MOUSE_FILTER_STOP
+		native_button.focus_mode = Control.FOCUS_NONE if sprite.transparency >= 256 or native_button.disabled else Control.FOCUS_ALL
 	var native_texture: TextureRect = wrapper.get_node_or_null("NativeTexture")
 	if native_texture != null:
 		native_texture.texture = sprite.texture
 		native_texture.visible = sprite.texture != null
+		var effect_type := str(sprite.fields.get("effect_type", ""))
+		var effect_mode: int = int({"TileImage": 1, "FilterWhite": 2, "FilterLight": 3, "FilterBlack": 4, "FilterDark": 5, "RasterScroll": 6, "WaveCircle": 7}.get(effect_type, 0))
+		if effect_mode > 0 and sprite.texture != null:
+			var effect_material: ShaderMaterial = native_texture.get_meta("native_effect_material") as ShaderMaterial if native_texture.has_meta("native_effect_material") else null
+			if effect_material == null:
+				var effect_shader := Shader.new()
+				effect_shader.code = """
+				shader_type canvas_item;
+			uniform vec2 repeat_scale = vec2(1.0, 1.0);
+			uniform vec2 scroll_uv = vec2(0.0, 0.0);
+			uniform int effect_mode = 0;
+			uniform int blend_degree = 0;
+			uniform int raster_degree = 0;
+			uniform float raster_shaking_width = 0.0;
+			uniform float raster_mesh_size = 1.0;
+			uniform float raster_frequency = 0.0;
+			uniform bool raster_transition = false;
+			void fragment() {
+				vec2 uv = UV;
+				if (effect_mode == 1) uv = fract(UV * repeat_scale + scroll_uv);
+				if (effect_mode == 6) {
+					float degree = float(raster_degree);
+					float amplitude = raster_shaking_width;
+					if (degree < 256.0) amplitude *= degree / 256.0;
+					float source_y = UV.y / TEXTURE_PIXEL_SIZE.y;
+					float phase = 3.14159265 * raster_frequency * degree / 256.0;
+					float wavelength = 3.14159265 / max(1.0, raster_mesh_size);
+					float shift = round(amplitude * sin(source_y * wavelength + phase));
+					float source_width = 1.0 / TEXTURE_PIXEL_SIZE.x;
+					uv.x = UV.x * (1.0 + 2.0 * raster_shaking_width / source_width)
+						- raster_shaking_width / source_width - shift / source_width;
+				}
+				if (effect_mode == 7) {
+					vec2 source_size = 1.0 / TEXTURE_PIXEL_SIZE;
+					vec2 grid_count = ceil(source_size / max(vec2(raster_mesh_size), vec2(1.0)));
+					vec2 grid_pos = UV * grid_count;
+					vec2 radial = grid_pos - grid_count * 0.5;
+					float distance_to_center = length(radial);
+					float wave_front = float(raster_degree) / 256.0 * raster_frequency;
+					if (distance_to_center > 0.0 && distance_to_center <= wave_front) {
+						float displacement = sin((wave_front - distance_to_center) * 0.78539816339) * raster_shaking_width;
+						if (displacement < 0.0 && (UV.x <= 0.0 || UV.y <= 0.0 || UV.x >= 1.0 || UV.y >= 1.0)) displacement = 0.0;
+						uv -= normalize(radial) * displacement / max(grid_count, vec2(1.0));
+					}
+				}
+				vec4 sampled = texture(TEXTURE, uv);
+				if ((effect_mode == 6 || effect_mode == 7) && raster_transition) {
+					float transition_alpha = clamp(float(raster_degree) / 256.0, 0.0, 1.0);
+					sampled.a *= transition_alpha * transition_alpha;
+				}
+				vec3 channels = floor(sampled.rgb * 255.0 + vec3(0.5));
+				int degree = clamp(blend_degree, 0, 256);
+				if (effect_mode == 2 && degree > 0) {
+					channels = vec3(float(degree - 1)) + floor(channels * float(256 - degree) / 256.0);
+				} else if (effect_mode == 3) {
+					channels = min(channels + vec3(float(degree)), vec3(255.0));
+				} else if (effect_mode == 4) {
+					channels = floor(channels * float(256 - degree) / 256.0);
+				} else if (effect_mode == 5) {
+					channels = max(channels - vec3(float(degree)), vec3(0.0));
+				}
+				COLOR = vec4(clamp(channels / 255.0, vec3(0.0), vec3(1.0)), sampled.a) * COLOR;
+			}
+				"""
+				effect_material = ShaderMaterial.new()
+				effect_material.shader = effect_shader
+				native_texture.set_meta("native_effect_material", effect_material)
+			var source_size := Vector2(sprite.texture.get_size())
+			var effect_size := Vector2(sprite.get_render_size())
+			var tile_scroll: Vector2i = sprite.fields.get("effect_scroll", Vector2i.ZERO)
+			effect_material.set_shader_parameter("repeat_scale", effect_size / source_size if effect_mode == 1 else Vector2.ONE)
+			effect_material.set_shader_parameter("scroll_uv", Vector2(tile_scroll) / source_size if effect_mode == 1 else Vector2.ZERO)
+			effect_material.set_shader_parameter("effect_mode", effect_mode)
+			effect_material.set_shader_parameter("blend_degree", clampi(sprite.blending, 0, 256))
+			effect_material.set_shader_parameter("raster_degree", sprite.blending)
+			effect_material.set_shader_parameter("raster_shaking_width", float(sprite.fields.get("effect_shaking_width", 0)))
+			effect_material.set_shader_parameter("raster_mesh_size", float(sprite.fields.get("effect_mesh_size", 1)))
+			effect_material.set_shader_parameter("raster_frequency", float(sprite.fields.get("effect_frequency", 0)))
+			effect_material.set_shader_parameter("raster_transition", bool(sprite.fields.get("effect_transition", false)))
+			native_texture.material = effect_material
+		else:
+			native_texture.material = null
+	var native_scroll: Range = wrapper.get_node_or_null("NativeScroll")
+	if native_scroll != null:
+		var axis := str(sprite.fields.get("scroll_axis", "horz"))
+		var item_id := str(sprite.fields.get("form_item_id", ""))
+		var range_key := "scroll_%s_range" % axis
+		var pos_key := "scroll_%s_pos" % axis
+		native_scroll.min_value = 0.0
+		native_scroll.max_value = float(maxi(0, int(sprite.fields.get(range_key, 256))))
+		native_scroll.value = float(clampi(int(sprite.fields.get(pos_key, 0)), 0, int(native_scroll.max_value)))
+		native_scroll.editable = sprite.is_visible and sprite.transparency < 256
+		for state_name in ["normal", "focus", "tracking", "disabled"]:
+			var bar_texture := sprite.fields.get("scroll_%s_bar" % state_name) as Texture2D
+			if bar_texture != null:
+				var icon_name := "grabber" if state_name == "normal" else "grabber_highlight" if state_name == "focus" else "grabber_pressed" if state_name == "tracking" else "grabber_disabled"
+				native_scroll.add_theme_icon_override(icon_name, bar_texture)
+		var column_texture := sprite.fields.get("scroll_normal_column") as Texture2D
+		if column_texture != null and (not native_scroll.has_meta("native_scroll_track") or native_scroll.get_meta("native_scroll_track") != column_texture):
+			var track := StyleBoxTexture.new()
+			track.texture = column_texture
+			track.texture_margin_left = 2.0
+			track.texture_margin_right = 2.0
+			track.texture_margin_top = 2.0
+			track.texture_margin_bottom = 2.0
+			native_scroll.add_theme_stylebox_override("slider", track)
+			native_scroll.set_meta("native_scroll_track", column_texture)
 	var native_label: Label = wrapper.get_node_or_null("NativeText")
 	if native_label != null:
 		native_label.text = display_text
@@ -1859,9 +2079,13 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 		if not sprite.message_style.is_empty() and native_label.get_meta("message_style", {}) != sprite.message_style:
 			_apply_native_text_style(native_label, sprite.message_style)
 			native_label.set_meta("message_style", sprite.message_style)
-	for child_sprite in sprite.children:
-		if child_sprite is CsxHostClass.HostSprite:
-			_sync_native_title_sprite(child_sprite, wrapper, seen, z_max, z_scale, filter_title_depth)
+	if not sprite.children.is_empty():
+		_sync_native_sprite_children(sprite.children, wrapper, seen, filter_title_depth)
+
+
+func _on_native_scroll_changed(value: float, sprite: CsxHostClass.HostSprite) -> void:
+	var axis := str(sprite.fields.get("scroll_axis", "horz"))
+	sprite.fields["scroll_%s_pos" % axis] = int(round(value))
 
 
 func _apply_native_text_style(label: Control, style: Dictionary) -> void:
@@ -1905,7 +2129,7 @@ func _native_text_color(attributes: Dictionary) -> Color:
 
 
 func _on_native_title_button_pressed(sprite: CsxHostClass.HostSprite) -> void:
-	if is_config_open or is_save_load_open or confirm_panel.visible:
+	if is_config_open or is_save_load_open or is_appreciation_open or confirm_panel.visible:
 		return
 	if native_appreciation_mode and sprite.btn_id == "ID_CLOSE":
 		_close_native_appreciation()
@@ -1914,6 +2138,9 @@ func _on_native_title_button_pressed(sprite: CsxHostClass.HostSprite) -> void:
 		match sprite.btn_id:
 			"ID_CONFIG":
 				_open_config_modal()
+				return
+			"ID_APPRECIATION", "ID_APPLICIATION":
+				_start_native_appreciation_script()
 				return
 			"ID_CONTINUE":
 				_open_save_load_modal()
@@ -2287,11 +2514,10 @@ func _apply_audio_channel(channel: String, fallback_player: AudioStreamPlayer) -
 	var volume := settings_state.audio_volume(channel)
 	var muted := settings_state.is_muted(channel)
 	var handled_by_host := false
-	if host != null and host.has_method("set_audio_channel_volume"):
+	if host != null and host.has_method("set_audio_total_volume"):
 		var effective_volume := 0.0 if muted else volume
-		handled_by_host = bool(host.call("set_audio_channel_volume", channel.to_lower(), effective_volume))
-		if channel == "SE":
-			handled_by_host = bool(host.call("set_audio_channel_volume", "env_se", effective_volume)) and handled_by_host
+		var play_type := int({"BGM": CsxHostClass.AUDIO_PLAY_TYPE_MUSIC, "SE": CsxHostClass.AUDIO_PLAY_TYPE_SOUND, "VOICE": CsxHostClass.AUDIO_PLAY_TYPE_VOICE, "SYSTEM": CsxHostClass.AUDIO_PLAY_TYPE_SYSTEM}.get(channel.to_upper(), CsxHostClass.AUDIO_PLAY_TYPE_NONE))
+		handled_by_host = bool(host.call("set_audio_total_volume", play_type, effective_volume))
 	if handled_by_host:
 		return
 	var volume_db := -80.0 if (muted or volume <= 0.01) else linear_to_db(volume)
@@ -3648,8 +3874,11 @@ func _open_appreciation_modal() -> void:
 
 	is_appreciation_open = true
 	appreciation_panel.visible = true
+	if is_title_mode:
+		native_title_layer.hide()
 
-	# Style buttons for current mode
+	bgm_vol_slider.set_value_no_signal(settings_state.audio_volume("bgm") * 100.0)
+	bgm_vol_label.text = "%d%%" % roundi(bgm_vol_slider.value)
 	_switch_app_mode(app_mode)
 	print("[AdvPlayer] Opened Appreciation Modal (mode: %s)." % app_mode)
 
@@ -3657,13 +3886,19 @@ func _open_appreciation_modal() -> void:
 func _close_appreciation_modal() -> void:
 	is_appreciation_open = false
 	appreciation_panel.visible = false
+	_apply_audio_channel("BGM", bgm_player)
 
-	# If in title mode, ensure title theme is playing
 	if is_title_mode:
-		if host != null and (bgm_player == null or not bgm_player.playing):
+		var restore_music := host != null and (host.current_bgm.to_lower() != "bgm07.mio" or not bgm_player.playing or bgm_player.stream_paused)
+		if vm != null and vm.functions.has("Title"):
+			if vm.is_halted or restore_music:
+				_start_native_title_script()
+			else:
+				native_title_layer.show()
+		elif restore_music:
 			host.play_bgm("BGM07.mio")
-		if vm != null and vm.is_halted:
-			_start_native_title_script()
+	current_bgm_track_index = -1
+	bgm_play_btn.text = "▶ 播放"
 	print("[AdvPlayer] Closed Appreciation Modal.")
 
 
@@ -3820,10 +4055,8 @@ func _start_scene_recollection(scenario_name: String, heroine_idx: int) -> void:
 	is_recollect_mode = true
 	recollect_return_tag = heroine_idx
 
+	_exit_title_to_game()
 	_close_appreciation_modal()
-	is_title_mode = false
-	if title_panel != null:
-		title_panel.visible = false
 
 	if vm.functions.has("EnterRecollectMode"):
 		vm.call_function_sync("EnterRecollectMode", [], 1000)
@@ -4077,6 +4310,7 @@ func _stop_jukebox_bgm() -> void:
 		host.stop_bgm()
 	if bgm_player != null:
 		bgm_player.stop()
+	current_bgm_track_index = -1
 	bgm_play_btn.text = "▶ 播放"
 	_update_jukebox_ui()
 

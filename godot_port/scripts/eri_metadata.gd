@@ -41,6 +41,51 @@ static func inspect(data: PackedByteArray) -> Dictionary:
 			utf16_marker.append(byte)
 			utf16_marker.append(0)
 		has_reference = _contains_bytes(description_bytes, marker) or _contains_bytes(description_bytes, utf16_marker)
+	var frame_count := 0
+	var stream := EntisSections.find(data, HEADER_SIZE, data.size(), "Stream")
+	if stream.get("ok", false):
+		var frame_scan := int(stream.start)
+		while frame_scan + 16 <= int(stream.end):
+			var raw_name := data.slice(frame_scan, frame_scan + 8)
+			var name_length := 0
+			while name_length < raw_name.size() and raw_name[name_length] != 0 and raw_name[name_length] != 0x20:
+				name_length += 1
+			var section_name := raw_name.slice(0, name_length).get_string_from_ascii()
+			var section_size := data.decode_u64(frame_scan + 8)
+			if section_size < 0 or section_size > int(stream.end) - frame_scan - 16:
+				return {"ok": false, "error": "ERI Stream section 长度无效。"}
+			if section_name == "ImageFrm":
+				frame_count += 1
+				if frame_count > 4096:
+					return {"ok": false, "error": "ERI 帧数超过支持上限。"}
+			frame_scan += 16 + int(section_size)
+	if frame_count < 1:
+		return {"ok": false, "error": "ERI 图片缺少图像帧。"}
+	var total_time_ms := 0
+	var sequence: Array[int] = []
+	var file_header := EntisSections.find(data, header["start"], header["end"], "FileHdr")
+	if file_header.get("ok", false) and int(file_header.end) - int(file_header.start) >= 20:
+		total_time_ms = int(data.decode_u32(int(file_header.start) + 16))
+	var sequence_section := EntisSections.find(data, stream["start"], stream["end"], "Sequence")
+	if sequence_section.get("ok", false):
+		var sequence_bytes := int(sequence_section.end) - int(sequence_section.start)
+		if sequence_bytes % 8 != 0 or sequence_bytes > 8 * 100000:
+			return {"ok": false, "error": "ERI Sequence table 长度无效。"}
+		for sequence_offset in range(int(sequence_section.start), int(sequence_section.end), 8):
+			var frame_index := int(data.decode_u32(sequence_offset))
+			var duration := int(data.decode_u32(sequence_offset + 4))
+			if frame_index >= frame_count or duration > 100000:
+				return {"ok": false, "error": "ERI Sequence table 内容无效。"}
+			if sequence.size() + duration > 1000000:
+				return {"ok": false, "error": "ERI Sequence 展开长度超过支持上限。"}
+			for _step in duration:
+				sequence.append(frame_index)
+	else:
+		for frame_index in frame_count:
+			sequence.append(frame_index)
+	if sequence.is_empty():
+		for frame_index in frame_count:
+			sequence.append(frame_index)
 	return {
 		"ok": true,
 		"version": data.decode_u32(offset),
@@ -49,6 +94,9 @@ static func inspect(data: PackedByteArray) -> Dictionary:
 		"format": data.decode_u32(offset + 12),
 		"width": absi(width),
 		"height": absi(height),
+		"frame_count": frame_count,
+		"frame_sequence": sequence,
+		"total_time_ms": total_time_ms,
 		"bottom_up": height > 0,
 		"bit_depth": data.decode_u32(offset + 24),
 		"blocking_degree": data.decode_u32(offset + 52),

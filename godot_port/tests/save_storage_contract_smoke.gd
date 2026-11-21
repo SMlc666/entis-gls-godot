@@ -28,6 +28,10 @@ func _run() -> void:
 	source_sprite.fields = {"checked": true, "page": 3, "metadata": {"label": "fixture"}}
 	var source_resource = CsxHostClass.HostResource.new("fixture.eri", "fixture.noa", 2, 16, 128, host)
 	source_resource.is_playing = true
+	source_resource.current_position = 2400
+	source_resource.playback_end_frame = 8400
+	source_resource.playback_rewind_frame = 1200
+	source_resource.is_repeating = true
 	source_resource.fields = {"kind": "image", "custom_state": [1, "two", false]}
 	source.set_field("sprite", source_sprite)
 	source.set_field("sprite_alias", source_sprite)
@@ -71,6 +75,8 @@ func _run() -> void:
 	if restored_resource is CsxHostClass.HostResource:
 		expect(restored_resource.name == "fixture.eri", "HostResource name must round-trip")
 		expect(restored_resource.is_playing, "HostResource playback state must round-trip")
+		expect(restored_resource.current_position == 2400, "Saved playback position must retain its frame units")
+		expect(restored_resource.is_repeating and restored_resource.playback_end_frame == 8400 and restored_resource.playback_rewind_frame == 1200, "Custom playback loop must survive save and load")
 		expect(restored_resource.fields.get("custom_state") == [1, "two", false], "HostResource.fields values must round-trip with their original types")
 	var restored_cycle: Variant = restored.get_field("cyclic_fields")
 	expect(restored_cycle is Dictionary and is_same(restored_cycle, restored_cycle.get("self")), "Cyclic dictionaries must round-trip without recursion")

@@ -1,6 +1,7 @@
 extends SceneTree
 
 const CsxHostClass = preload("res://scripts/csx_host.gd")
+const CsxVMClass = preload("res://scripts/csx_vm.gd")
 const TestSupport = preload("res://tests/test_support.gd")
 
 func _initialize() -> void:
@@ -54,6 +55,25 @@ func _run() -> void:
 		if not _require(_find_button_sprite(native_window.root_sprites, command_id) != null, "Native Title() must expose its original %s command" % command_id): return
 	if not _require(player.is_title_mode and player.is_running, "Title() must run asynchronously in title mode"): return
 	if not _require(player.native_title_layer.visible, "Native HostWindow renderer must be visible"): return
+	var effect_sprite := CsxHostClass.HostSprite.new(9001, player.host)
+	effect_sprite.position = Vector2i(80, 80)
+	effect_sprite.size = Vector2i(64, 64)
+	effect_sprite.image = Image.create(64, 64, false, Image.FORMAT_RGBA8)
+	effect_sprite.texture = ImageTexture.create_from_image(effect_sprite.image)
+	var wave_effect := CsxVMClass.CsxInstance.new("EffectParam")
+	wave_effect.set_field("strType", "WaveCircle")
+	wave_effect.set_field("nShakingWidth", 5)
+	wave_effect.set_field("nMeshSize", 8)
+	wave_effect.set_field("nFrequency", 12)
+	wave_effect.set_field("nFlags", 1)
+	if not _require(effect_sprite.set_effect_parameter(wave_effect) == 0, "Native WaveCircle parameters must be accepted"): return
+	player._sync_native_title_sprite(effect_sprite, player.native_title_canvas, {}, false)
+	var effect_wrapper: Control = player.native_title_controls.get(effect_sprite.get_instance_id(), null)
+	var effect_texture: TextureRect = effect_wrapper.get_node_or_null("NativeTexture") if effect_wrapper != null else null
+	var effect_material := effect_texture.material as ShaderMaterial if effect_texture != null else null
+	if not _require(effect_material != null and effect_material.get_shader_parameter("effect_mode") == 7, "WaveCircle must reach the native TextureRect shader renderer"): return
+	if not _require(effect_material.shader.code.contains("wave_front") and effect_material.get_shader_parameter("raster_transition") == true, "WaveCircle shader must apply the native radial curve and transition flag"): return
+	await process_frame
 	var hand_made_menu = player.title_panel.find_child("TitleMenu", true, false)
 	if not _require(hand_made_menu != null and not hand_made_menu.visible, "Hand-authored title menu must be hidden"): return
 	var config_sprite = null
@@ -96,9 +116,9 @@ func _run() -> void:
 		_fail("Native Exit button did not quit the game")
 		return
 
-	# This release's original Title() menu has Start, Continue, Config and ExitGame.
-	# Appreciation() is a separate CSX screen, not a Title() command.
-	if not _require(player._start_native_appreciation_script(), "Player must be able to enter the original CSX Appreciation() screen"): return
+	var gallery_entry: Button = player.native_title_layer.find_child("NativeTitleGalleryEntry", true, false)
+	if not _require(gallery_entry != null and gallery_entry.is_visible_in_tree(), "Title must expose the original appreciation flow"): return
+	_click(gallery_entry)
 	frames = 0
 	var native_app_window = null
 	var rec_tab_sprite = null
@@ -122,6 +142,23 @@ func _run() -> void:
 	var native_cg_wrapper: Control = player.native_title_controls.get(cg_item_sprite.get_instance_id(), null)
 	var native_cg_button: TextureButton = native_cg_wrapper.get_node_or_null("NativeButton") if native_cg_wrapper != null else null
 	if not _require(native_cg_button != null and native_cg_button.texture_normal != null, "Native CG item must render its CSX button texture"): return
+	var thumb_page: Control = native_cg_wrapper.get_parent()
+	for frame in range(60):
+		if thumb_page.position.x >= 0 and thumb_page.position.y > 34:
+			break
+		await process_frame
+	if not _require(thumb_page.position.x >= 0 and thumb_page.position.y > 34, "Original CG form must use its scripted position and pivot"): return
+	if not _require(thumb_page.get_node("NativeTexture").texture != null, "Original CG form must load its background from the form resource"): return
+	var original_tags: Array[Control] = []
+	for root_sprite in native_app_window.root_sprites:
+		for child in root_sprite.children:
+			if str(child.fields.get("form_page_id", "")).begins_with("ID_PAGE_TAG"):
+				original_tags.append(player.native_title_controls[child.get_instance_id()])
+	if not _require(original_tags.size() == 6, "Appreciation must render all six original character rows"): return
+	var rows: Dictionary = {}
+	for tag in original_tags:
+		rows[tag.position.y] = true
+	if not _require(rows.size() == original_tags.size(), "Original character rows must not overlap at their animation destinations"): return
 	var rec_tab_wrapper: Control = player.native_title_controls.get(rec_tab_sprite.get_instance_id(), null)
 	var native_rec_tab_button: TextureButton = rec_tab_wrapper.get_node_or_null("NativeButton") if rec_tab_wrapper != null else null
 	if not _require(native_rec_tab_button != null, "Native recollection tab must render as a TextureButton"): return
@@ -134,7 +171,7 @@ func _run() -> void:
 			appreciation_view = app_frame.get_local("view")
 			break
 	if not _require(appreciation_view != null, "Appreciation() must retain its native AppreciationView instance"): return
-	native_rec_tab_button.emit_signal("pressed")
+	_click(native_rec_tab_button)
 	frames = 0
 	while frames < 60:
 		await process_frame
@@ -143,12 +180,21 @@ func _run() -> void:
 	var tag_sprites = appreciation_view.get_field("sprTag")
 	if not _require(tag_sprites is Array and player.vm._dispatch_array_method(tag_sprites, "IsButtonChecked", ["ID_REC"]) == -1, "CSX IsButtonChecked must find a selected button in the Appreciation sprite array"): return
 	if not _require(int(appreciation_view.get_field("selPage")) == 3, "Native ID_REC must switch the original AppreciationView to its recollection page"): return
+	var second_tag_sprite = _find_button_sprite(tag_sprites.slice(1, 2), "ID_TAG")
+	if not _require(second_tag_sprite != null, "Native Appreciation must expose the second character tag"): return
+	var second_tag: Control = player.native_title_controls[second_tag_sprite.get_instance_id()]
+	var second_tag_button: TextureButton = second_tag.get_node("NativeButton")
+	# The left edge belongs to the character tag, away from its page controls.
+	_click(second_tag_button, Vector2(25, 15))
+	for frame in range(30):
+		await process_frame
+	if not _require(not player.vm.is_halted and player.vm.last_error.is_empty(), "Native character tag must switch without a VM error"): return
 	var bgm21_sprite = _find_button_sprite(native_app_window.root_sprites, "ID_BGM21")
 	var bgm21_wrapper: Control = player.native_title_controls.get(bgm21_sprite.get_instance_id(), null) if bgm21_sprite != null else null
 	var bgm21_button: TextureButton = bgm21_wrapper.get_node_or_null("NativeButton") if bgm21_wrapper != null else null
 	if not _require(bgm21_button != null, "Native Appreciation must expose BGM21 control"): return
 	var bgm_before_select: String = player.host.current_bgm
-	bgm21_button.emit_signal("pressed")
+	_click(bgm21_button)
 	frames = 0
 	while frames < 60:
 		await process_frame
@@ -159,7 +205,7 @@ func _run() -> void:
 	var native_close_wrapper: Control = player.native_title_controls.get(native_close_sprite.get_instance_id(), null)
 	var native_close_button: TextureButton = native_close_wrapper.get_node_or_null("NativeButton") if native_close_wrapper != null else null
 	if not _require(native_close_button != null, "Native Appreciation close command must be interactive"): return
-	native_close_button.emit_signal("pressed")
+	root.push_input(escape_event, true)
 	if not _require(player.is_title_mode and not player.native_appreciation_mode and not player.vm.is_halted, "Closing native Appreciation() must return to Title()"): return
 
 	frames = 0
@@ -232,3 +278,12 @@ func _native_stack_has(stack: Array, function_name: String) -> bool:
 		if frame.name == function_name:
 			return true
 	return false
+
+
+func _click(control: Control, local_position := Vector2(-1, -1)) -> void:
+	for pressed in [true, false]:
+		var click := InputEventMouseButton.new()
+		click.position = control.get_global_rect().get_center() if local_position.x < 0 else control.get_global_transform() * local_position
+		click.button_index = MOUSE_BUTTON_LEFT
+		click.pressed = pressed
+		root.push_input(click, true)

@@ -62,7 +62,7 @@ func _run() -> void:
 			var label: RichTextLabel = player.message_label
 			native_outputs.append({
 				"raw": sprite.text_content,
-				"displayed": label.text,
+				"displayed": label.get_parsed_text(),
 				"position_matches": label.position == Vector2(sprite.position - sprite.rev_center),
 				"font_matches": label.get_theme_font_size("normal_font_size") == int(sprite.message_style["font"]["size"]),
 				"shadow_matches": label.get_theme_constant("shadow_offset_y") == int(sprite.message_style["shadow"]["y"]),
@@ -91,13 +91,32 @@ func _run() -> void:
 	var enter := InputEventKey.new()
 	enter.keycode = KEY_ENTER
 	enter.pressed = true
+	if player.message_label.visible_characters >= player.message_label.get_total_character_count():
+		printerr("FAIL Expected the first message to still be revealing")
+		quit(1)
+		return
+	if player.message_label.custom_effects.is_empty():
+		printerr("FAIL Expected the native per-character fade effect while the message is revealing")
+		quit(1)
+		return
+	player._unhandled_input(enter)
+	for frame in range(3):
+		await process_frame
+	if native_outputs.size() != first_message or player.message_label.visible_characters < player.message_label.get_total_character_count():
+		printerr("FAIL First Enter must reveal the rest of the current message")
+		quit(1)
+		return
+	if not player.message_label.custom_effects.is_empty():
+		printerr("FAIL Flushing the message must remove its completed fade effect")
+		quit(1)
+		return
 	player._unhandled_input(enter)
 	elapsed = 0.0
 	while native_outputs.size() == first_message and elapsed < 5.0:
 		await process_frame
 		elapsed += player.get_process_delta_time()
 	if native_outputs.size() == first_message:
-		printerr("FAIL One Enter press must advance to the next native message")
+		printerr("FAIL Enter after a completed message must advance")
 		quit(1)
 		return
 
@@ -152,8 +171,8 @@ func _run() -> void:
 
 	# Check UI text matches current dialogue
 	print("  Speaker label: '%s'" % player.speaker_label.text)
-	print("  Message label: '%s'" % player.message_label.text)
-	if player.message_label.text.is_empty():
+	print("  Message label: '%s'" % player.message_label.get_parsed_text())
+	if player.message_label.get_parsed_text().is_empty():
 		printerr("FAIL Message label is empty")
 		quit(1)
 		return

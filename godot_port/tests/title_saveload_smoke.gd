@@ -110,6 +110,12 @@ func _run() -> void:
 		quit(1)
 		return
 
+	var title_stream := player.bgm_player.stream as AudioStreamWAV
+	if title_stream == null or title_stream.loop_mode != AudioStreamWAV.LOOP_FORWARD or title_stream.loop_begin != 161922 or title_stream.loop_end != 4973038:
+		printerr("FAIL Original Title() must start the BGM07 PCM loop from the CSX parameters")
+		quit(1)
+		return
+
 	print("[2/6] Transitioning from Title to New Game ...")
 	player._on_title_start_game()
 	if player.is_title_mode or player.title_panel.visible:
