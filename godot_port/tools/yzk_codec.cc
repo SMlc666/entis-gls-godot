@@ -206,6 +206,83 @@ bool validate_mio_size(const uint8_t *data, size_t size, std::string &error) {
     return true;
 }
 
+bool validate_mei_size(
+    const uint8_t *data,
+    size_t size,
+    std::string &error,
+    size_t &width,
+    size_t &height,
+    size_t &frame_records,
+    uint32_t &declared_frames,
+    uint32_t &duration_ms,
+    uint32_t &declared_samples,
+    uint32_t &channels,
+    uint32_t &sample_rate,
+    uint32_t &bits_per_sample) {
+    static constexpr uint8_t prefix[] = {'E','n','t','i','s',0x1a,0,0};
+    static constexpr char title[] = "Moving Entis Image";
+    if (!data || size < 64 || std::memcmp(data, prefix, sizeof(prefix)) != 0
+        || std::memcmp(data + 16, title, sizeof(title) - 1) != 0) {
+        error = "Input is not an Entis MEI movie.";
+        return false;
+    }
+    std::vector<SectionRange> top_sections;
+    SectionRange header, stream;
+    if (!read_sections(data, 64, size, top_sections)
+        || !find_section(top_sections, "Header", header)
+        || !find_section(top_sections, "Stream", stream)) {
+        error = "MEI section table is malformed or incomplete.";
+        return false;
+    }
+    std::vector<SectionRange> header_sections;
+    SectionRange file_info, image_info, sound_info;
+    if (!read_sections(data, header.offset, header.offset + header.size, header_sections)
+        || !find_section(header_sections, "FileHdr", file_info)
+        || !find_section(header_sections, "ImageInf", image_info)
+        || !find_section(header_sections, "SoundInf", sound_info)
+        || file_info.size < 20 || image_info.size < 68 || sound_info.size < 40) {
+        error = "MEI FileHdr, ImageInf, or SoundInf metadata is missing or truncated.";
+        return false;
+    }
+    const int32_t width_signed = static_cast<int32_t>(read_u32_le(data + image_info.offset + 16));
+    const int32_t height_signed = static_cast<int32_t>(read_u32_le(data + image_info.offset + 20));
+    if (width_signed == 0 || height_signed == 0
+        || width_signed == std::numeric_limits<int32_t>::min()
+        || height_signed == std::numeric_limits<int32_t>::min()) {
+        error = "MEI image dimensions are invalid.";
+        return false;
+    }
+    width = static_cast<size_t>(width_signed < 0 ? -width_signed : width_signed);
+    height = static_cast<size_t>(height_signed < 0 ? -height_signed : height_signed);
+    if (width > 16384 || height > 16384 || width > kMaxCodecOutputBytes / 4 / height) {
+        error = "MEI image dimensions exceed supported bounds.";
+        return false;
+    }
+    duration_ms = read_u32_le(data + file_info.offset + 16);
+    declared_frames = read_u32_le(data + file_info.offset + 12);
+    channels = read_u32_le(data + sound_info.offset + 12);
+    sample_rate = read_u32_le(data + sound_info.offset + 16);
+    declared_samples = read_u32_le(data + sound_info.offset + 28);
+    bits_per_sample = read_u32_le(data + sound_info.offset + 36);
+    std::vector<SectionRange> stream_sections;
+    if (!read_sections(data, stream.offset, stream.offset + stream.size, stream_sections)) {
+        error = "MEI frame and audio stream is malformed.";
+        return false;
+    }
+    frame_records = 0;
+    for (const SectionRange &section : stream_sections)
+        if (section.name == "ImageFrm" || section.name == "DiffeFrm") ++frame_records;
+    if (frame_records == 0 || frame_records > 100000 || declared_frames == 0
+        || declared_frames > 100000 || declared_samples == 0 || channels == 0
+        || (bits_per_sample != 8 && bits_per_sample != 16 && bits_per_sample != 24 && bits_per_sample != 32)
+        || declared_samples > kMaxCodecOutputBytes / channels / (bits_per_sample / 8)) {
+        error = "MEI has no frames or an invalid declared frame count.";
+        return false;
+    }
+    if (!validate_mio_size(data, size, error)) return false;
+    return true;
+}
+
 godot::Dictionary codec_failure(const std::string &message) {
     godot::Dictionary result;
     result["ok"] = false;
@@ -324,6 +401,7 @@ public:
     Dictionary decode_erisan(const PackedByteArray &input, int64_t expected_size) const;
     Dictionary decode_eri(const PackedByteArray &input) const;
     Dictionary decode_mio(const PackedByteArray &input) const;
+    Dictionary decode_mei(const PackedByteArray &input) const;
     Array build_shading_levels(const PackedByteArray &rgba, int64_t width, int64_t height) const;
 };
 
@@ -331,6 +409,7 @@ void YzkCodec::_bind_methods() {
     ClassDB::bind_method(D_METHOD("decode_erisan", "input", "expected_size"), &YzkCodec::decode_erisan);
     ClassDB::bind_method(D_METHOD("decode_eri", "input"), &YzkCodec::decode_eri);
     ClassDB::bind_method(D_METHOD("decode_mio", "input"), &YzkCodec::decode_mio);
+    ClassDB::bind_method(D_METHOD("decode_mei", "input"), &YzkCodec::decode_mei);
     ClassDB::bind_method(D_METHOD("build_shading_levels", "rgba", "width", "height"), &YzkCodec::build_shading_levels);
 }
 
@@ -482,6 +561,62 @@ Dictionary YzkCodec::decode_mio(const PackedByteArray &input) const {
         return codec_failure(error.what());
     } catch (...) {
         return codec_failure("Unknown native MIO decoder error.");
+    }
+}
+
+Dictionary YzkCodec::decode_mei(const PackedByteArray &input) const {
+    if (input.size() < 64 || static_cast<size_t>(input.size()) > kMaxCodecInputBytes)
+        return codec_failure("MEI input size is outside the supported bounds.");
+    std::string validation_error;
+    size_t width = 0, height = 0, frame_records = 0;
+    uint32_t declared_frames = 0, duration_ms = 0, declared_samples = 0;
+    uint32_t channels = 0, sample_rate = 0, bits_per_sample = 0;
+    if (!validate_mei_size(input.ptr(), static_cast<size_t>(input.size()), validation_error,
+        width, height, frame_records, declared_frames, duration_ms, declared_samples,
+        channels, sample_rate, bits_per_sample))
+        return codec_failure(validation_error);
+    try {
+        // MEI and MIO share SoundInf/SoundStm coding. Adapt only the private
+        // container signature in this owned memory copy, then use the existing
+        // in-process MIO decoder without touching the original movie bytes.
+        au::bstr encoded = copy_input(input);
+        static constexpr char mio_title[] = "Music Interleaved and Orthogonal";
+        static_assert(sizeof(mio_title) - 1 == 32);
+        std::memcpy(encoded.get<char>() + 16, mio_title, sizeof(mio_title) - 1);
+        au::io::File file("input.mio", encoded);
+        au::dec::entis::MioAudioDecoder decoder;
+        au::Logger logger;
+        logger.mute();
+        const au::res::Audio audio = decoder.decode(logger, file);
+        const uint64_t expected_audio_bytes = static_cast<uint64_t>(declared_samples)
+            * channels * (bits_per_sample / 8);
+        if (audio.samples.empty() || audio.samples.size() < expected_audio_bytes
+            || expected_audio_bytes > kMaxCodecOutputBytes
+            || audio.channel_count != channels || audio.sample_rate != sample_rate
+            || audio.bits_per_sample != bits_per_sample)
+            return codec_failure("Decoded MEI audio is outside the supported bounds.");
+        PackedByteArray samples;
+        samples.resize(static_cast<int64_t>(expected_audio_bytes));
+        std::memcpy(samples.ptrw(), audio.samples.get<const uint8_t>(), static_cast<size_t>(expected_audio_bytes));
+        Dictionary result;
+        result["ok"] = true;
+        result["width"] = static_cast<int64_t>(width);
+        result["height"] = static_cast<int64_t>(height);
+        result["frame_count"] = static_cast<int64_t>(declared_frames);
+        result["frame_record_count"] = static_cast<int64_t>(frame_records);
+        result["duration_ms"] = static_cast<int64_t>(duration_ms);
+        result["sample_count_per_channel"] = static_cast<int64_t>(declared_samples);
+        result["channels"] = static_cast<int64_t>(channels);
+        result["sample_rate"] = static_cast<int64_t>(sample_rate);
+        result["bits_per_sample"] = static_cast<int64_t>(bits_per_sample);
+        result["audio_data"] = samples;
+        result["video_frames_decoded"] = false;
+        result["video_error"] = "MEI ERI Layer-3 frame decoding is not implemented yet.";
+        return result;
+    } catch (const std::exception &error) {
+        return codec_failure(error.what());
+    } catch (...) {
+        return codec_failure("Unknown native MEI decoder error.");
     }
 }
 

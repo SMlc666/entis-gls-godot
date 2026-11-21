@@ -16,7 +16,7 @@ func _initialize() -> void:
 		printerr("FAIL native codec must reject empty input before decoding")
 		quit(1)
 		return
-	for method_name: String in ["decode_eri", "decode_mio"]:
+	for method_name: String in ["decode_eri", "decode_mio", "decode_mei"]:
 		if not codec.has_method(method_name):
 			printerr("FAIL YzkCodec must expose %s to GDScript" % method_name)
 			quit(1)
