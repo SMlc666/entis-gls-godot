@@ -33,6 +33,34 @@ func _initialize() -> void:
 	if sprite.blending != 0:
 		_fail("WaveCircle degree must return to zero when animeEffect is disabled")
 		return
+	var tile_effect := CsxVMClass.CsxInstance.new("EffectParam")
+	var view_size := CsxVMClass.CsxInstance.new("ISize")
+	view_size.set_field("w", 800)
+	view_size.set_field("h", 600)
+	var tile_speed := CsxVMClass.CsxInstance.new("IPoint")
+	tile_speed.set_field("x", 1)
+	tile_speed.set_field("y", 0)
+	tile_effect.set_field("strType", "TileImage")
+	tile_effect.set_field("sizeView", view_size)
+	tile_effect.set_field("ptSpeed", tile_speed)
+	tile_effect.set_field("nInterval", 100)
+	tile_effect.set_field("nDegreeStep", 0)
+	sprite.size = Vector2i(800, 600)
+	if sprite.set_effect_parameter(tile_effect) != 0:
+		_fail("Original TileImage parameters must be accepted")
+		return
+	if sprite.fields.get("effect_size") != Vector2i(800, 600) or sprite.fields.get("effect_scroll_speed") != Vector2i(1, 0):
+		_fail("TileImage must preserve the original view size and pixel speed")
+		return
+	host.sprite_animation_flags |= 4
+	host.advance_sprite_animations(0.099)
+	if sprite.fields.get("effect_scroll") != Vector2i.ZERO:
+		_fail("TileImage must wait for nInterval before scrolling")
+		return
+	host.advance_sprite_animations(0.001)
+	if sprite.fields.get("effect_scroll") != Vector2i(-799, 0):
+		_fail("TileImage must advance one pixel and wrap at the 800-pixel view boundary")
+		return
 	var vm := CsxVMClass.new(host)
 	var mesh_values: Array = [
 		0.0, 0.0, 64.0, 0.0, 0.0, 64.0, 64.0, 64.0,
@@ -48,7 +76,7 @@ func _initialize() -> void:
 	if vm._dispatch_sprite_method(sprite, "SetMeshWarpEffect", [[], 0, 0, 0]) != -1:
 		_fail("SetMeshWarpEffect must reject invalid mesh dimensions")
 		return
-	print("PASS WaveCircle native parameters and animeEffect timing")
+	print("PASS WaveCircle and TileImage native parameters and animeEffect timing")
 	quit(0)
 
 

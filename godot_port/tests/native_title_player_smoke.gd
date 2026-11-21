@@ -105,6 +105,36 @@ func _run() -> void:
 	if not _require(effect_sprite.set_effect_parameter(shading_effect) == 0, "Native ShadingLight parameters must be accepted"): return
 	player._sync_native_title_sprite(effect_sprite, player.native_title_canvas, {}, false)
 	if not _require(effect_material.get_shader_parameter("effect_mode") == 9 and effect_material.get_shader_parameter("shading_levels_ready") == true and effect_texture.get_meta("native_shading_levels")[1] == cached_second_level, "ShadingLight must reuse the native filtered levels"): return
+	var tile_sprite := CsxHostClass.HostSprite.new(9002, player.host)
+	tile_sprite.size = Vector2i(800, 600)
+	var original_tile_texture: Texture2D = start_sprite.btn_normal_tex if start_sprite.btn_normal_tex != null else start_sprite.texture
+	if not _require(original_tile_texture != null, "TileImage validation must use a texture loaded from the original game resources"): return
+	tile_sprite.texture = original_tile_texture
+	tile_sprite.image = original_tile_texture.get_image()
+	var tile_effect := CsxVMClass.CsxInstance.new("EffectParam")
+	var tile_view := CsxVMClass.CsxInstance.new("ISize")
+	tile_view.set_field("w", 800)
+	tile_view.set_field("h", 600)
+	var tile_speed := CsxVMClass.CsxInstance.new("IPoint")
+	tile_speed.set_field("x", 1)
+	tile_speed.set_field("y", 0)
+	tile_effect.set_field("strType", "TileImage")
+	tile_effect.set_field("nInterval", 100)
+	tile_effect.set_field("nDegreeStep", 0)
+	tile_effect.set_field("sizeView", tile_view)
+	tile_effect.set_field("ptSpeed", tile_speed)
+	if not _require(tile_sprite.set_effect_parameter(tile_effect) == 0, "Original TileImage parameters must be accepted"): return
+	player._sync_native_title_sprite(tile_sprite, player.native_title_canvas, {}, false)
+	var tile_wrapper: Control = player.native_title_controls.get(tile_sprite.get_instance_id(), null)
+	var tile_texture: TextureRect = tile_wrapper.get_node_or_null("NativeTexture") if tile_wrapper != null else null
+	var tile_material := tile_texture.material as ShaderMaterial if tile_texture != null else null
+	var expected_repeat := Vector2(800.0, 600.0) / Vector2(original_tile_texture.get_size())
+	if not _require(tile_material != null and tile_material.get_shader_parameter("effect_mode") == 1 and tile_material.get_shader_parameter("repeat_scale").is_equal_approx(expected_repeat), "TileImage must render an 800x600 view by repeating the original source texture"): return
+	player.host.sprite_animation_flags |= 4
+	player.host.advance_sprite_animations(0.1)
+	player._sync_native_title_sprite(tile_sprite, player.native_title_canvas, {}, false)
+	var expected_scroll := Vector2(-799.0 / original_tile_texture.get_width(), 0.0)
+	if not _require(tile_material.get_shader_parameter("scroll_uv").is_equal_approx(expected_scroll), "TileImage speed must advance in source-pixel units at each 100 ms interval"): return
 	await process_frame
 	var hand_made_menu = player.title_panel.find_child("TitleMenu", true, false)
 	if not _require(hand_made_menu != null and not hand_made_menu.visible, "Hand-authored title menu must be hidden"): return
