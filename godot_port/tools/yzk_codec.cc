@@ -237,17 +237,8 @@ bool decode_mei_i_frame_coefficients(const uint8_t *frame, size_t frame_size,
     return true;
 }
 
-int mei_round(float value) {
-    return value >= 0.0f ? static_cast<int>(std::floor(value + 0.5f))
-        : static_cast<int>(std::ceil(value - 0.5f));
-}
-
 uint8_t mei_clamp_byte(int value) {
     return static_cast<uint8_t>(std::clamp(value, 0, 255));
-}
-
-int8_t mei_clamp_sbyte(float value) {
-    return static_cast<int8_t>(std::clamp(mei_round(value), -128, 127));
 }
 
 bool reconstruct_mei_frame_pixels(size_t width, size_t height,
@@ -280,19 +271,20 @@ bool reconstruct_mei_frame_pixels(size_t width, size_t height,
         return false;
     }
     constexpr size_t kBlockArea = 64;
-    float basis[8][8]{};
-    for (size_t sample = 0; sample < 8; ++sample) {
-        for (size_t frequency = 0; frequency < 8; ++frequency) {
-            const float normalization = frequency == 0
-                ? 0.3535533905932738f : 0.5f;
-            basis[sample][frequency] = normalization * std::cos(
-                static_cast<float>((2 * sample + 1) * frequency) * 3.14159265358979323846f / 16.0f);
-        }
-    }
+    static constexpr int16_t idct_matrix[8][8] = {
+        {16385,16069,15137,13623,11585,9103,6271,3197},
+        {16385,13623,6271,-3196,-11585,-16069,-15137,-9102},
+        {16385,9103,-6270,-16069,-11585,3197,15137,13623},
+        {16385,3197,-15137,-9102,11585,13623,-6270,-16069},
+        {16385,-3196,-15137,9103,11585,-13623,-6270,16069},
+        {16385,-9102,-6270,16069,-11585,-3196,15137,-13623},
+        {16385,-13623,6271,3197,-11585,16069,-15137,9103},
+        {16385,-16069,15137,-13623,11585,-9102,6271,-3196}
+    };
     rgba.assign(width * height * 4, differential ? 0 : 255);
     std::array<std::array<int8_t, kBlockArea>, 6> spatial{};
-    std::array<std::array<float, kBlockArea>, 6> spectrum{};
-    std::array<std::array<float, kBlockArea>, 6> horizontal{};
+    std::array<std::array<int16_t, kBlockArea>, 6> spectrum{};
+    std::array<std::array<int16_t, kBlockArea>, 6> horizontal{};
     minimum_luma = 255;
     maximum_luma = 0;
     std::vector<int32_t> cumulative_vectors;
@@ -399,12 +391,12 @@ bool reconstruct_mei_frame_pixels(size_t width, size_t height,
             for (size_t block = 0; block < 6; ++block) {
                 const size_t operation_index = macroblock * 2 + (block >= 4 ? 1 : 0);
                 const int operation = operations[operation_index];
-                const int exponent = operation / 2;
-                const float scale = (operation & 1 ? 1.5f : 1.0f)
-                    * std::pow(2.0f, static_cast<float>(exponent)) * 64.0f;
+                const int exponent = operation >> 1;
+                const int odd_scale = operation & 1;
+                const int right_shift = exponent < 0 ? -exponent + odd_scale : odd_scale;
+                const int exponent_scale = exponent > 0 ? exponent : 0;
                 const size_t quant_base = block < 4 ? 0 : 64;
-                const size_t stream_base = coefficient_base + block * kBlockArea;
-                spectrum[block].fill(0.0f);
+                spectrum[block].fill(0);
                 static constexpr int zigzag[64] = {
                     0,1,8,16,9,2,3,10,17,24,32,25,18,11,4,5,
                     12,19,26,33,40,48,41,34,27,20,13,6,7,14,21,28,
@@ -412,30 +404,46 @@ bool reconstruct_mei_frame_pixels(size_t width, size_t height,
                     58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63
                 };
                 for (size_t index = 0; index < kBlockArea; ++index) {
-                    int coefficient = static_cast<int>(coefficients[stream_base + index]);
-                    // The four Y blocks share only the first (DC) coefficient.
+                    // ERI's 4:1:1 stream interleaves the six blocks at each
+                    // coefficient position: Y0,Y1,Y2,Y3,U,V, then the next
+                    // zigzag position. The four Y blocks delta-code their DC
+                    // terms against Y0's DC.
+                    int coefficient = static_cast<int>(
+                        coefficients[coefficient_base + index * 6 + block]);
                     if (block > 0 && block < 4 && index == 0)
-                        coefficient += static_cast<int>(coefficients[coefficient_base + index]);
-                    spectrum[block][zigzag[index]] = static_cast<float>(coefficient)
-                        * scale * static_cast<float>(quantization[quant_base + index] + 1);
+                        coefficient = static_cast<int>(static_cast<int8_t>(
+                            coefficient + static_cast<int>(coefficients[coefficient_base])));
+                    int quantizer = static_cast<int>(quantization[quant_base + index]) + 1;
+                    if (exponent >= 0)
+                        quantizer *= odd_scale ? 3 : 1;
+                    quantizer <<= exponent_scale;
+                    const int dequantized = (coefficient * quantizer) >> right_shift;
+                    spectrum[block][zigzag[index]] = static_cast<int16_t>(
+                        std::clamp(dequantized, -32768, 32767));
                 }
-                // Apply the orthonormal 8x8 inverse DCT in two separable passes.
+                // Port the SDK's fixed 16.14 IDCT matrix. The additional
+                // half-scale per pass matches the ERI packed-frame pixels
+                // returned by Entis' native decoder.
                 for (size_t y = 0; y < 8; ++y) {
                     for (size_t x = 0; x < 8; ++x) {
-                        float sum = 0.0f;
+                        int32_t sum = 0;
                         for (size_t frequency = 0; frequency < 8; ++frequency)
-                            sum += spectrum[block][y * 8 + frequency] * basis[x][frequency];
-                        horizontal[block][y * 8 + x] = sum;
+                            sum += static_cast<int32_t>(spectrum[block][y * 8 + frequency])
+                                * idct_matrix[x][frequency];
+                        horizontal[block][y * 8 + x] = static_cast<int16_t>(
+                            std::clamp(sum >> 15, -32768, 32767));
                     }
                 }
                 for (size_t y = 0; y < 8; ++y) {
                     for (size_t x = 0; x < 8; ++x) {
-                        float sum = 0.0f;
+                        int32_t sum = 0;
                         for (size_t frequency = 0; frequency < 8; ++frequency)
-                            sum += horizontal[block][frequency * 8 + x] * basis[y][frequency];
+                            sum += static_cast<int32_t>(horizontal[block][frequency * 8 + x])
+                                * idct_matrix[y][frequency];
+                        const int value = std::clamp(sum >> 15, -32768, 32767);
                         spatial[block][y * 8 + x] = block < 4 && !differential
-                            ? static_cast<int8_t>(mei_clamp_byte(mei_round(sum)))
-                            : mei_clamp_sbyte(sum);
+                            ? static_cast<int8_t>(mei_clamp_byte(value))
+                            : static_cast<int8_t>(std::clamp(value, -128, 127));
                     }
                 }
             }
