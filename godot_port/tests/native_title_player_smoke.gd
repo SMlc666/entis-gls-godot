@@ -98,12 +98,13 @@ func _run() -> void:
 	if not _require(effect_material.get_shader_parameter("shading_levels_ready") == true, "ShadingOff must build and bind all five native filtered image levels"): return
 	var shading_levels: Array = effect_texture.get_meta("native_shading_levels", [])
 	if not _require(shading_levels.size() == 5, "ShadingOff must cache source and four native 4:2:1 filter levels"): return
+	var cached_second_level: Texture2D = shading_levels[1]
 	player._sync_native_title_sprite(effect_sprite, player.native_title_canvas, {}, false)
 	if not _require(effect_texture.get_meta("native_shading_levels", []).size() == 5 and effect_material.get_shader_parameter("shading_levels_ready") == true, "ShadingOff cache must persist across frame synchronization"): return
 	shading_effect.set_field("strType", "ShadingLight")
 	if not _require(effect_sprite.set_effect_parameter(shading_effect) == 0, "Native ShadingLight parameters must be accepted"): return
 	player._sync_native_title_sprite(effect_sprite, player.native_title_canvas, {}, false)
-	if not _require(effect_material.get_shader_parameter("effect_mode") == 9 and effect_material.get_shader_parameter("shading_levels_ready") == true, "ShadingLight must reuse the native filtered levels"): return
+	if not _require(effect_material.get_shader_parameter("effect_mode") == 9 and effect_material.get_shader_parameter("shading_levels_ready") == true and effect_texture.get_meta("native_shading_levels")[1] == cached_second_level, "ShadingLight must reuse the native filtered levels"): return
 	await process_frame
 	var hand_made_menu = player.title_panel.find_child("TitleMenu", true, false)
 	if not _require(hand_made_menu != null and not hand_made_menu.visible, "Hand-authored title menu must be hidden"): return

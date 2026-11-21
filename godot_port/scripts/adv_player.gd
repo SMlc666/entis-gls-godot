@@ -2082,7 +2082,7 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 			effect_material.set_shader_parameter("raster_frequency", float(sprite.fields.get("effect_frequency", 0)))
 			effect_material.set_shader_parameter("raster_transition", bool(sprite.fields.get("effect_transition", false)))
 			if effect_mode == 8 or effect_mode == 9:
-				var shade_cache_key := [sprite.texture.get_instance_id(), int(sprite.fields.get("effect_shading_revision", 0))]
+				var shade_cache_key := [sprite.texture.get_instance_id()]
 				var shade_textures: Array = native_texture.get_meta("native_shading_levels", [])
 				if native_texture.get_meta("native_shading_key", []) != shade_cache_key:
 					shade_textures.clear()
