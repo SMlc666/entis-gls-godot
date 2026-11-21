@@ -1,8 +1,16 @@
 extends RefCounted
 class_name CsxHost
 
+const AUDIO_PLAY_TYPE_DEVICE := -2147483648
+const AUDIO_PLAY_TYPE_NONE := -1
+const AUDIO_PLAY_TYPE_MUSIC := 0
+const AUDIO_PLAY_TYPE_SOUND := 1
+const AUDIO_PLAY_TYPE_VOICE := 2
+const AUDIO_PLAY_TYPE_SYSTEM := 3
+
 signal dialogue_updated(entry: Dictionary)
 signal message_output(sprite: HostSprite)
+signal message_progress(sprite: HostSprite)
 signal bg_updated(bg_name: String, texture: Texture2D)
 signal bgm_updated(bgm_name: String)
 signal movie_requested(movie_file: String)
@@ -29,6 +37,7 @@ var image_cache_budget_bytes := 256 * 1024 * 1024
 var sound_cache_budget_bytes := 64 * 1024 * 1024
 
 var audio_players: Dictionary = {}
+var audio_total_volumes: Dictionary = {0: 1.0, 1: 1.0, 2: 1.0, 3: 1.0}
 var bgm_player: AudioStreamPlayer = null
 var env_se_player: AudioStreamPlayer = null
 var se_player: AudioStreamPlayer = null
@@ -71,7 +80,15 @@ var selected_choice: int = -1
 var current_tone_filter: String = "NORMAL"
 var command_queue: Array = []
 var virtual_time_ms: int = 1000
+var cursor_position_provider: Callable = Callable()
+var active_input_filter_ref: WeakRef = null
 var active_sprites: Dictionary[int, WeakRef] = {}
+var active_messages: Dictionary[int, WeakRef] = {}
+var active_effect_sprites: Dictionary[int, WeakRef] = {}
+var active_animated_sprites: Dictionary[int, WeakRef] = {}
+# EntisGLS initializes AnimationFlag to animeFull (Normal | Action | Effect).
+var sprite_animation_flags: int = 7
+var active_volume_envelopes: Dictionary[int, WeakRef] = {}
 var save_dir: String = "user://saves"
 const SAVE_SCHEMA_VERSION := 2
 const MAX_SAVE_DOCUMENT_BYTES := 16 * 1024 * 1024
@@ -88,13 +105,26 @@ class HostResource extends RefCounted:
 	var is_playing: bool = false
 	var is_repeating: bool = false
 	var use_channel_default_loop: bool = false
-	var current_position: int = 0
+	var current_position: int = 0 # PCM frames
+	var playback_end_frame: int = -1
+	var playback_rewind_frame: int = -1
+	var rewinding_portion_configured: bool = false
+	var configured_rewind_frame: int = -1
+	var configured_end_frame: int = -1
+	var configured_repeat: bool = false
+	var volume_envelope: Array[Vector2] = []
+	var volume_envelope_duration_ms: float = 0.0
+	var volume_envelope_elapsed_ms: float = 0.0
 	var volume_left: float = 1.0
 	var volume_right: float = 1.0
 	var audio_stream: AudioStreamWAV = null
 	var audio_channel: String = ""
+	var play_type: int = AUDIO_PLAY_TYPE_NONE
 	var image: Image = null
 	var texture: ImageTexture = null
+	var image_frames: Array[Image] = []
+	var image_frame_sequence: Array[int] = []
+	var image_total_time_ms: int = 0
 	var fields: Dictionary = {}
 
 	func _init(p_name: String = "", p_archive: String = "", p_index: int = -1, p_size: int = 0, p_offset: int = 0, p_host: CsxHost = null) -> void:
@@ -128,49 +158,131 @@ class HostResource extends RefCounted:
 		if host != null:
 			var res := host.load_image(filename, archive_name)
 			if res.get("ok", false):
-				image = res["image"]
-				texture = res["texture"]
+				image = (res["image"] as Image).duplicate()
+				texture = ImageTexture.create_from_image(image)
+				image_frames.clear()
+				for frame in res.get("frames", [image]):
+					image_frames.append((frame as Image).duplicate())
+				image_frame_sequence = res.get("frame_sequence", [])
+				image_total_time_ms = int(res.get("total_time_ms", 0))
 				return 1
 		return 0
 
-	func play(_intro: int = -1, _flag: int = 0) -> int:
-		return _play_at(0, false, true)
+	func get_pixel(x: int, y: int) -> int:
+		if image == null or x < 0 or y < 0 or x >= image.get_width() or y >= image.get_height():
+			return 0
+		return _color_to_native_pixel(image.get_pixel(x, y))
+
+	func get_pixel_rect(pixels: Variant, x: int, y: int, width: int, height: int) -> int:
+		if image == null or not pixels is Array or width < 0 or height < 0 or width > 65536 or height > 65536 or (height > 0 and width > 65536 / height):
+			return 0
+		var target: Array = pixels
+		for row in range(height):
+			for column in range(width):
+				var pixel_index := row * width + column
+				while target.size() <= pixel_index:
+					target.append(null)
+				var px := x + column
+				var py := y + row
+				target[pixel_index] = get_pixel(px, py)
+		return 1
+
+	func set_pixel_rect(pixels: Variant, x: int, y: int, width: int, height: int) -> int:
+		if image == null or not pixels is Array or width < 0 or height < 0 or width > 65536 or height > 65536 or (height > 0 and width > 65536 / height):
+			return 0
+		var source: Array = pixels
+		if source.size() < width * height:
+			return 0
+		for row in range(height):
+			for column in range(width):
+				var pixel_value: Variant = source[row * width + column]
+				if not (pixel_value is int or pixel_value is float):
+					continue
+				var px := x + column
+				var py := y + row
+				if px >= 0 and py >= 0 and px < image.get_width() and py < image.get_height():
+					image.set_pixel(px, py, _native_pixel_to_color(int(pixel_value)))
+			if texture != null:
+				texture.update(image)
+		return 1
+
+	func _color_to_native_pixel(color: Color) -> int:
+		return (int(round(color.a * 255.0)) << 24) | (int(round(color.r * 255.0)) << 16) | (int(round(color.g * 255.0)) << 8) | int(round(color.b * 255.0))
+
+	func _native_pixel_to_color(pixel: int) -> Color:
+		return Color(float((pixel >> 16) & 0xff) / 255.0, float((pixel >> 8) & 0xff) / 255.0, float(pixel & 0xff) / 255.0, float((pixel >> 24) & 0xff) / 255.0)
+
+	func play(intro: int = -1, flag: int = 0) -> int:
+		if host == null or not host.is_valid_audio_play_type(flag):
+			if host != null:
+				host.report_unsupported("HostResource.Play %s (flag=%d)" % [name, flag])
+			return -1
+		# The original script uses -1/-2 as start-position sentinels; both start at frame zero.
+		var end_frame := configured_end_frame if rewinding_portion_configured else -1
+		var rewind_frame := configured_rewind_frame if rewinding_portion_configured else -1
+		var repeat := configured_repeat if rewinding_portion_configured else false
+		return _play_at(maxi(0, intro), repeat, not rewinding_portion_configured, end_frame, rewind_frame, flag)
 
 	func play_from(start_pos: int = 0, end_pos: int = -1, repeat: bool = false, rewind_pos: int = -1, flag: int = 0) -> int:
-		if end_pos != -1 or rewind_pos != -1 or flag != 0:
+		if host == null or not host.is_valid_audio_play_type(flag):
 			if host != null:
-				host.report_unsupported("HostResource.PlayFrom end_pos/rewind_pos/flag")
+				host.report_unsupported("HostResource.PlayFrom %s (flag=%d)" % [name, flag])
 			return -1
-		return _play_at(start_pos, repeat, false)
+		return _play_at(start_pos, repeat, false, end_pos, rewind_pos, flag)
 
-	func _play_at(start_pos: int, repeat: bool, channel_default_loop: bool = false) -> int:
-		if host == null:
+	func set_rewinding_portion(rewind_pos: int = -1, end_pos: int = -1, repeat: bool = false) -> int:
+		if audio_stream == null and host != null and load_sound(name) != 1:
 			return 0
-		if start_pos < 0:
-			host.last_error = "HostResource.PlayFrom 起始位置不能为负数。"
-			push_warning(host.last_error)
+		if audio_stream == null:
+			return 0
+		var frame_bytes := (2 if audio_stream.stereo else 1) * (2 if audio_stream.format == AudioStreamWAV.FORMAT_16_BITS else 1)
+		if audio_stream.format not in [AudioStreamWAV.FORMAT_8_BITS, AudioStreamWAV.FORMAT_16_BITS] or frame_bytes <= 0:
+			return 0
+		@warning_ignore("integer_division")
+		var frame_count := audio_stream.data.size() / frame_bytes
+		var resolved_end := frame_count if end_pos < 0 else end_pos
+		var resolved_rewind := current_position if rewind_pos < 0 and is_playing else (0 if rewind_pos < 0 else rewind_pos)
+		if resolved_rewind < 0 or resolved_rewind >= resolved_end or resolved_end > frame_count:
+			return 0
+		rewinding_portion_configured = true
+		configured_rewind_frame = resolved_rewind
+		configured_end_frame = resolved_end
+		configured_repeat = repeat
+		return 1
+
+	func _play_at(start_frame: int, repeat: bool, channel_default_loop: bool = false, end_frame: int = -1, rewind_frame: int = -1, next_play_type: int = AUDIO_PLAY_TYPE_MUSIC) -> int:
+		if host == null:
 			return 0
 		if audio_stream == null and load_sound(name) != 1:
 			return 0
-		var started := host.play_audio_stream(audio_stream, name, audio_channel, start_pos, repeat, channel_default_loop)
-		is_playing = started
-		current_position = start_pos if started else 0
-		is_repeating = repeat if started else false
-		use_channel_default_loop = channel_default_loop if started else false
-		return 1 if started else 0
+		play_type = next_play_type
+		if not host.play_audio_stream(audio_stream, name, audio_channel, start_frame, repeat, channel_default_loop, end_frame, rewind_frame, play_type, volume_left):
+			return 0
+		is_playing = true
+		current_position = start_frame
+		is_repeating = repeat
+		use_channel_default_loop = channel_default_loop
+		playback_end_frame = end_frame
+		# Preserve the original default rewind point when restarting from a paused frame.
+		playback_rewind_frame = start_frame if rewind_frame == -1 else rewind_frame
+		return 1
 
 	func stop() -> int:
 		var stopped := host.stop_audio(name, audio_channel) if host != null else false
+		cancel_volume_envelope()
 		is_playing = false
 		current_position = 0
+		play_type = AUDIO_PLAY_TYPE_NONE
 		return 1 if stopped else 0
 
 	func pause() -> int:
 		if host == null:
 			return 0
-		current_position = host.get_audio_position_msec(name, audio_channel)
+		var position := host.get_audio_position_frames(name, audio_channel)
 		var paused := host.pause_audio(name, audio_channel)
-		is_playing = false if paused else is_playing
+		if paused:
+			current_position = position
+			is_playing = false
 		return 1 if paused else 0
 
 	func restart() -> int:
@@ -178,14 +290,23 @@ class HostResource extends RefCounted:
 			return 0
 		var resumed := host.resume_audio(name, audio_channel)
 		if not resumed:
-			return _play_at(current_position, is_repeating, use_channel_default_loop)
+			return _play_at(current_position, is_repeating, use_channel_default_loop, playback_end_frame, playback_rewind_frame, play_type)
 		is_playing = true
 		return 1
 
 	func release() -> int:
+		cancel_volume_envelope()
 		is_playing = false
 		is_repeating = false
 		use_channel_default_loop = false
+		play_type = AUDIO_PLAY_TYPE_NONE
+		current_position = 0
+		playback_end_frame = -1
+		playback_rewind_frame = -1
+		rewinding_portion_configured = false
+		configured_rewind_frame = -1
+		configured_end_frame = -1
+		configured_repeat = false
 		audio_stream = null
 		image = null
 		texture = null
@@ -198,30 +319,105 @@ class HostResource extends RefCounted:
 			if host != null:
 				host.report_unsupported("HostResource.SetVolume asymmetric stereo values")
 			return -1
-		if host == null or not host.set_audio_channel_volume(audio_channel, normalized_left):
+		if host == null:
 			return 0
+		cancel_volume_envelope()
 		volume_left = normalized_left
 		volume_right = normalized_right
+		if play_type != AUDIO_PLAY_TYPE_NONE and not host.set_resource_audio_volume(audio_channel, volume_left, play_type):
+			return 0
 		return 1
 
-	func set_volume_envelope(_bezier: Variant, _duration: int) -> int:
-		if host != null:
-			host.report_unsupported("HostResource.SetVolumeEnvelope")
-		return -1
+	func set_volume_envelope(bezier: Variant, duration: int) -> int:
+		if host == null or not (bezier is Object and bezier.has_method("get_field")):
+			return 0
+		var source: Variant = bezier.get_field("parent")
+		if not source is Array or source.size() != 4:
+			return 0
+		var points: Array[Vector2] = []
+		for point in source:
+			if not (point is Object and point.has_method("get_field")):
+				return 0
+			var x: Variant = point.get_field("x")
+			var y: Variant = point.get_field("y")
+			if not (x is int or x is float) or not (y is int or y is float):
+				return 0
+			var p := Vector2(float(x), float(y))
+			if not is_finite(p.x) or not is_finite(p.y):
+				return 0
+			if not is_equal_approx(p.x, p.y):
+				host.report_unsupported("HostResource.SetVolumeEnvelope asymmetric stereo values")
+				return -1
+			points.append(p)
+		volume_envelope = points
+		volume_envelope_duration_ms = maxf(0.0, float(duration))
+		volume_envelope_elapsed_ms = 0.0
+		if volume_envelope_duration_ms <= 0.0:
+			advance_volume_envelope(0.0, true)
+		else:
+			host.active_volume_envelopes[get_instance_id()] = weakref(self)
+			_apply_volume_envelope(0.0)
+		return 1
 
 	func cancel_volume_envelope() -> int:
 		if host != null:
-			host.report_unsupported("HostResource.CancelVolumeEnvelope")
-		return -1
+			host.active_volume_envelopes.erase(get_instance_id())
+		volume_envelope.clear()
+		volume_envelope_duration_ms = 0.0
+		volume_envelope_elapsed_ms = 0.0
+		return 0
+
+	func is_volume_envelope_pending() -> int:
+		return -1 if not volume_envelope.is_empty() and volume_envelope_duration_ms > 0.0 else 0
+
+	func get_volume(left_out: Variant = null, right_out: Variant = null) -> int:
+		if left_out is Object and left_out.has_method("set_value"):
+			left_out.set_value(volume_left)
+		if right_out is Object and right_out.has_method("set_value"):
+			right_out.set_value(volume_right)
+		return 1
+
+	func advance_volume_envelope(delta_ms: float, force_end: bool = false) -> void:
+		if volume_envelope.is_empty():
+			return
+		volume_envelope_elapsed_ms = volume_envelope_duration_ms if force_end else volume_envelope_elapsed_ms + maxf(0.0, delta_ms)
+		var t := 1.0 if volume_envelope_duration_ms <= 0.0 else clampf(volume_envelope_elapsed_ms / volume_envelope_duration_ms, 0.0, 1.0)
+		_apply_volume_envelope(t)
+		if t >= 1.0:
+			volume_left = clampf(volume_envelope[3].x, 0.0, 1.0)
+			volume_right = clampf(volume_envelope[3].y, 0.0, 1.0)
+			volume_envelope.clear()
+			volume_envelope_duration_ms = 0.0
+			volume_envelope_elapsed_ms = 0.0
+			if host != null:
+				host.active_volume_envelopes.erase(get_instance_id())
+
+	func _apply_volume_envelope(t: float) -> void:
+		if host == null or volume_envelope.size() != 4:
+			return
+		var inverse := 1.0 - t
+		var value := volume_envelope[0] * inverse * inverse * inverse \
+			+ volume_envelope[1] * 3.0 * inverse * inverse * t \
+			+ volume_envelope[2] * 3.0 * inverse * t * t \
+			+ volume_envelope[3] * t * t * t
+		var left := clampf(value.x, 0.0, 1.0)
+		var right := clampf(value.y, 0.0, 1.0)
+		if host.set_resource_audio_volume(audio_channel, left, play_type):
+			volume_left = left
+			volume_right = right
 
 	func get_playing_position() -> int:
+		if host != null:
+			var position := host.get_audio_position_frames(name, audio_channel)
+			if position >= 0:
+				return position
 		return current_position
 
-	func set_total_volume(_flag: int, _vol: float) -> int:
-		return set_volume(_vol, _vol)
+	func set_total_volume(flag: int, vol: float) -> int:
+		return 1 if host != null and host.set_audio_total_volume(flag, vol) else 0
 
-	func get_total_volume(_flag: int) -> float:
-		return (volume_left + volume_right) * 0.5
+	func get_total_volume(flag: int) -> float:
+		return host.get_audio_total_volume(flag) if host != null else 1.0
 
 
 class HostInputFilter extends RefCounted:
@@ -231,17 +427,110 @@ class HostInputFilter extends RefCounted:
 	var window_ref: Variant = null
 	var input_queue: Array = []
 	var joy_buttons: Dictionary = {}
+	var input_assignments: Dictionary = {}
 	var fields: Dictionary = {}
 
 	func _init(p_host: CsxHost) -> void:
 		host = p_host
+		if host != null:
+			host.active_input_filter_ref = weakref(self)
 
 	func load_input_filter(filename: String) -> int:
 		filter_file = filename
+		input_assignments.clear()
+		if host == null:
+			return 0
+		var input_bytes := PackedByteArray()
+		var path := host.game_dir.path_join("system").path_join(filename)
+		if FileAccess.file_exists(path):
+			input_bytes = FileAccess.get_file_as_bytes(path)
+		else:
+			var entry := host.read_vfs_entry("system/".path_join(filename))
+			if not entry.get("ok", false):
+				entry = host.read_vfs_entry(filename)
+			if entry.get("ok", false):
+				input_bytes = entry.get("data", PackedByteArray())
+		if input_bytes.is_empty():
+			return 0
+		var parser := XMLParser.new()
+		if parser.open_buffer(input_bytes) != OK:
+			return 0
+		var current: Dictionary = {}
+		while parser.read() == OK:
+			if parser.get_node_type() != XMLParser.NODE_ELEMENT:
+				continue
+			match parser.get_node_name():
+				"key_assign":
+					current = {}
+				"input":
+					current["input_device"] = parser.get_named_attribute_value("device")
+					current["input_key"] = parser.get_named_attribute_value("key")
+				"output":
+					var output_device := parser.get_named_attribute_value("device")
+					var output_key := parser.get_named_attribute_value("key")
+					if output_device == "joystick" and output_key.begins_with("button:"):
+						var button_id := output_key.trim_prefix("button:").to_int()
+						var assignment := _decode_input_assignment(str(current.get("input_device", "")), str(current.get("input_key", "")))
+						if not assignment.is_empty():
+							var key_name := "button:%d" % button_id
+							var mappings: Array = input_assignments.get(key_name, [])
+							mappings.append(assignment)
+							input_assignments[key_name] = mappings
 		return 0
+
+	func _decode_input_assignment(device: String, key_name: String) -> Dictionary:
+		if device == "keyboard":
+			var key_code := 0
+			match key_name:
+				"up": key_code = KEY_UP
+				"down": key_code = KEY_DOWN
+				"left": key_code = KEY_LEFT
+				"right": key_code = KEY_RIGHT
+				_:
+					if key_name.begins_with("ascii:"):
+						var chars := key_name.trim_prefix("ascii:").to_upper()
+						if not chars.is_empty():
+							key_code = chars.unicode_at(0)
+					elif key_name.begins_with("code:"):
+						var code_text := key_name.trim_prefix("code:").trim_suffix("H")
+						var virtual_key := code_text.hex_to_int()
+						match virtual_key:
+							0x09: key_code = KEY_TAB
+							0x0D: key_code = KEY_ENTER
+							0x10: key_code = KEY_SHIFT
+							0x11: key_code = KEY_CTRL
+							0x1B: key_code = KEY_ESCAPE
+							_:
+								if virtual_key >= 0x70 and virtual_key <= 0x7B:
+									key_code = KEY_F1 + (virtual_key - 0x70)
+			if key_code > 0:
+				return {"device": "keyboard", "key": key_code}
+		elif device == "mouse" and key_name.begins_with("code:"):
+			var button_code := key_name.trim_prefix("code:").to_int()
+			if button_code > 0:
+				return {"device": "mouse", "key": button_code}
+		return {}
+
+	func _is_assignment_pressed(assignment: Dictionary) -> bool:
+		match str(assignment.get("device", "")):
+			"keyboard":
+				return Input.is_key_pressed(int(assignment.get("key", 0)))
+			"mouse":
+				return Input.is_mouse_button_pressed(int(assignment.get("key", 0)))
+		return false
+
+	func _is_button_pressed(key: int) -> bool:
+		if not is_open:
+			return false
+		var mappings: Array = input_assignments.get("button:%d" % key, [])
+		for assignment: Dictionary in mappings:
+			if _is_assignment_pressed(assignment):
+				return true
+		return false
 
 	func delete_input_filter() -> int:
 		filter_file = ""
+		input_assignments.clear()
 		return 0
 
 	func open_filter(_mode: int = 0, win: Variant = null) -> int:
@@ -266,22 +555,37 @@ class HostInputFilter extends RefCounted:
 	func get_stick_position(_vec_ref: Variant, _dev: int = 0) -> int:
 		return 0
 
-	func is_joy_button_pushing(_key: int, _dev: int = 0) -> int:
-		return 0
+	func is_joy_button_pushing(key: int, _dev: int = 0) -> int:
+		return -1 if _is_button_pressed(key) else 0
 
 	func get_joy_button_pushed(key: int, _dev: int = 0, during_activation: bool = false) -> int:
-		return host.poll_advance_button(key, during_activation) if host != null else 0
+		if host != null:
+			var host_result := host.poll_advance_button(key, during_activation)
+			if host_result != 0:
+				joy_buttons[key] = _is_button_pressed(key)
+				return host_result
+		var pressed := _is_button_pressed(key)
+		var was_pressed := bool(joy_buttons.get(key, false))
+		joy_buttons[key] = pressed
+		return -1 if pressed and not was_pressed else 0
 
 	func flush_joy_button_pushed(_dev: int = 0, _key: int = -1) -> int:
 		if host != null:
 			host.skip_input_pending = false
+		for key in input_assignments.keys():
+			var button_id := str(key).trim_prefix("button:").to_int()
+			joy_buttons[button_id] = _is_button_pressed(button_id)
 		return 0
 
 	func reset_joy_button_pushing(_dev: int = 0, _key: int = -1) -> int:
+		if _key >= 0:
+			joy_buttons.erase(_key)
+		else:
+			joy_buttons.clear()
 		return 0
 
 	func get_cursor_pos() -> Vector2i:
-		return Vector2i.ZERO
+		return host.get_cursor_position() if host != null else Vector2i.ZERO
 
 	func move_cursor_pos(_x: int, _y: int) -> int:
 		return 0
@@ -303,10 +607,20 @@ class HostToneFilter extends RefCounted:
 	var host: CsxHost
 	var filter_type: String = "NORMAL"
 	var tone: Color = Color.WHITE
+	var red_table: PackedByteArray = PackedByteArray()
+	var green_table: PackedByteArray = PackedByteArray()
+	var blue_table: PackedByteArray = PackedByteArray()
+	var alpha_table: PackedByteArray = PackedByteArray()
+	var tone_flags: int = 0
+	var tone_texture: ImageTexture = null
 	var fields: Dictionary = {}
 
 	func _init(p_host: CsxHost) -> void:
 		host = p_host
+		red_table = _tone_table(0, 0)
+		green_table = _tone_table(0, 0)
+		blue_table = _tone_table(0, 0)
+		alpha_table = _tone_table(0, 0)
 
 	func create_tone_filter() -> int:
 		return 0
@@ -319,13 +633,80 @@ class HostToneFilter extends RefCounted:
 
 	func set_tone(r: float, g: float, b: float) -> int:
 		tone = Color(r, g, b)
+		tone_texture = null
 		return 0
+
+	func set_general_tone(red_tone: int, red_flag: int, green_tone: int, green_flag: int, blue_tone: int, blue_flag: int, alpha_tone: int, alpha_flag: int, flags: int = 0) -> int:
+		var tables := [
+			_tone_table(red_tone, red_flag),
+			_tone_table(green_tone, green_flag),
+			_tone_table(blue_tone, blue_flag),
+			_tone_table(alpha_tone, alpha_flag),
+		]
+		if tables.any(func(table: PackedByteArray) -> bool: return table.is_empty()):
+			return -1
+		red_table = tables[0]
+		green_table = tables[1]
+		blue_table = tables[2]
+		alpha_table = tables[3]
+		tone_flags = flags & 0x0F
+		if (tone_flags & 0x01) != 0:
+			red_table[0] = 0
+			green_table[0] = 0
+			blue_table[0] = 0
+			alpha_table[0] = 0
+		tone_texture = null
+		return 0
+
+	func _tone_table(amount: int, mode: int) -> PackedByteArray:
+		var table := PackedByteArray()
+		table.resize(256)
+		if mode not in [0, 1, 2]:
+			return PackedByteArray()
+		var tone_value := clampi(amount, -256, 256)
+		for value in 256:
+			var mapped := value
+			match mode:
+				0:
+					if tone_value > 0:
+						mapped = (tone_value - 1) + (value * (256 - tone_value)) / 256
+					elif tone_value < 0:
+						mapped = (value * (256 + tone_value)) / 256
+				1:
+					var start := (tone_value >> 1) + 128
+					if tone_value >= 0:
+						start -= 1
+					mapped = ((start << 8) - value * tone_value) >> 8
+				2:
+					mapped = value + tone_value
+			table[value] = clampi(mapped, 0, 255)
+		if amount == 0 and mode == 1:
+			for value in 256:
+				table[value] = 127
+		return table
+
+	func get_tone_texture() -> ImageTexture:
+		if tone_texture != null:
+			return tone_texture
+		var pixels := PackedByteArray()
+		pixels.resize(256 * 4)
+		for value in 256:
+			var offset := value * 4
+			pixels[offset] = red_table[value]
+			pixels[offset + 1] = green_table[value]
+			pixels[offset + 2] = blue_table[value]
+			pixels[offset + 3] = alpha_table[value]
+		var image := Image.create_from_data(256, 1, false, Image.FORMAT_RGBA8, pixels)
+		tone_texture = ImageTexture.create_from_image(image)
+		return tone_texture
 
 	func get_tone() -> Array:
 		return [tone.r, tone.g, tone.b]
 
-	func attach_tone_filter(_target: Variant) -> int:
-		return 0
+	func attach_tone_filter(target: Variant) -> int:
+		if target is HostSprite:
+			return (target as HostSprite).attach_tone_filter(self)
+		return -1
 
 	func set_type(type_name: String) -> void:
 		filter_type = type_name.to_upper()
@@ -567,8 +948,23 @@ class HostResourceManager extends RefCounted:
 		var ph: int = page.get("height", 0)
 		parent_sprite.size = Vector2i(pw, ph)
 
+		parent_sprite.form_resources = self
+		var background := _resolve_skin_image(page.get("bg", "")) if not str(page.get("bg", "")).is_empty() else {}
+		if not background.is_empty():
+			parent_sprite.image = background["image"]
+			parent_sprite.texture = background["texture"]
+			parent_sprite.size = parent_sprite.image.get_size()
 		var buttons: Array = page.get("buttons", [])
-		for btn in buttons:
+		for item: Dictionary in page.get("images", []):
+			var item_sprite := HostSprite.new(0, host)
+			item_sprite.fields["form_item_id"] = item.get("id", "")
+			item_sprite.position = Vector2i(item.get("x", 0), item.get("y", 0))
+			item_sprite.is_visible = true
+			_set_form_texture(item_sprite, item.get("rsrc", ""))
+			parent_sprite.add_sprite(buttons.size(), item_sprite)
+
+		for button_index in range(buttons.size()):
+			var btn: Dictionary = buttons[button_index]
 			var btn_spr := HostSprite.new(0, host)
 			btn_spr.btn_id = btn.get("id", "")
 			btn_spr.is_button = true
@@ -602,7 +998,31 @@ class HostResourceManager extends RefCounted:
 
 			btn_spr.is_visible = true
 			btn_spr.transparency = 0
-			parent_sprite.add_sprite(0, btn_spr)
+			parent_sprite.add_sprite(button_index, btn_spr)
+		for bar_index in range(page.get("scroll_bars", []).size()):
+			var bar: Dictionary = page.scroll_bars[bar_index]
+			var bar_sprite := HostSprite.new(0, host)
+			bar_sprite.fields["form_item_id"] = bar.get("id", "")
+			bar_sprite.fields["control_type"] = "scroll_bar"
+			bar_sprite.fields["scroll_axis"] = str(skin_styles.get(str(bar.get("style", "")), {}).get("arrange_type", "horz"))
+			bar_sprite.fields["scroll_horz_range"] = 256
+			bar_sprite.fields["scroll_horz_pos"] = 0
+			bar_sprite.fields["scroll_vert_range"] = 256
+			bar_sprite.fields["scroll_vert_pos"] = 0
+			bar_sprite.fields["scroll_style_id"] = str(bar.get("style", ""))
+			var scroll_style: Dictionary = skin_styles.get(str(bar.get("style", "")), {})
+			for state_name in ["normal", "focus", "tracking", "disabled"]:
+				var image_info := _resolve_skin_image(str(scroll_style.get("%s_bar" % state_name, "")))
+				if not image_info.is_empty():
+					bar_sprite.fields["scroll_%s_bar" % state_name] = image_info["texture"]
+				var column_info := _resolve_skin_image(str(scroll_style.get("%s_column" % state_name, "")))
+				if not column_info.is_empty():
+					bar_sprite.fields["scroll_%s_column" % state_name] = column_info["texture"]
+			bar_sprite.position = Vector2i(bar.get("x", 0), bar.get("y", 0))
+			bar_sprite.size = Vector2i(bar.get("width", 0), bar.get("height", 0))
+			bar_sprite.is_visible = true
+			bar_sprite.form_resources = self
+			parent_sprite.add_sprite(buttons.size() + bar_index, bar_sprite)
 		for item: Dictionary in page.get("static_texts", []):
 			var text_sprite := HostSprite.new(0, host)
 			text_sprite.fields["form_item_id"] = item["id"]
@@ -616,6 +1036,16 @@ class HostResourceManager extends RefCounted:
 		parent_sprite.refresh_command_ids()
 
 		return 1
+
+	func _set_form_texture(sprite: HostSprite, resource_id: String) -> bool:
+		var info := _resolve_skin_image(resource_id)
+		if info.is_empty():
+			return false
+		sprite.image = info["image"]
+		sprite.texture = info["texture"]
+		sprite.size = sprite.image.get_size()
+		return true
+
 
 	func get_resource(id_name: String) -> Variant:
 		if resource_cache.has(id_name):
@@ -648,14 +1078,32 @@ class HostSprite extends RefCounted:
 	var attached_resource: HostResource = null
 	var image: Image = null
 	var texture: ImageTexture = null
+	var animation_frames: Array[Image] = []
+	var animation_sequence: Array[int] = []
+	var animation_total_time_ms: int = 0
+	var animation_loop_count: int = 0
+	var animation_elapsed_ms: float = 0.0
+	var animation_duration_ms: float = 0.0
+	var animation_begin_sequence: int = 0
+	var animation_start_sequence: int = 0
+	var animation_turn_sequence: int = -1
+	var animation_rewind_sequence: int = 0
+	var animation_view_frame: int = -1
+	var tone_filter: HostToneFilter = null
 	var is_activating: bool = false
 	var activation_duration_ms: float = 0.0
 	var activation_elapsed_ms: float = 0.0
 	var activation_start_alpha: int = 0
 	var activation_end_alpha: int = 0
 	var children: Array[HostSprite] = []
+	var form_resources: HostResourceManager
 	var text_content: String = ""
 	var message_style: Dictionary = {}
+	var message_char_speed_ms: int = 0
+	var message_fade_ms: int = 0
+	var message_elapsed_ms: float = 0.0
+	var message_visible_count: int = -1
+	var message_pending: bool = false
 	var btn_id: String = ""
 	var full_btn_id: String = ""
 	var is_button: bool = false
@@ -703,16 +1151,50 @@ class HostSprite extends RefCounted:
 		message_style = style
 		return 0
 
+	func set_default_message_speed(char_speed: int, fade_speed: int, ratio: int) -> int:
+		message_char_speed_ms = maxi(0, int(char_speed * ratio / 256))
+		message_fade_ms = maxi(0, fade_speed)
+		return 0
+
 	func clear_message() -> int:
 		text_content = ""
+		message_pending = false
+		message_visible_count = 0
 		if host != null:
+			host.active_messages.erase(get_instance_id())
 			host.message_output.emit(self)
 		return 0
 
 	func output_message(text: String) -> int:
+		flush_message()
 		text_content = text
+		message_elapsed_ms = 0.0
+		var count := display_text().length()
+		message_pending = count > 0 and (message_char_speed_ms > 0 or message_fade_ms > 0)
+		message_visible_count = 0 if message_pending else count
 		if host != null:
+			if message_pending:
+				host.active_messages[get_instance_id()] = weakref(self)
 			host.message_output.emit(self)
+		return text.length()
+
+	func advance_message(delta_ms: float) -> void:
+		message_elapsed_ms += delta_ms
+		var count := display_text().length()
+		var interval := message_char_speed_ms
+		message_visible_count = count if interval <= 0 else mini(count, maxi(0, ceili(message_elapsed_ms / interval)))
+		var duration := maxi(0, count - 1) * interval + message_fade_ms
+		if message_elapsed_ms >= duration:
+			flush_message()
+		elif host != null:
+			host.message_progress.emit(self)
+
+	func flush_message() -> int:
+		message_pending = false
+		message_visible_count = display_text().length()
+		if host != null:
+			host.active_messages.erase(get_instance_id())
+			host.message_progress.emit(self)
 		return 0
 
 	func display_text() -> String:
@@ -727,6 +1209,12 @@ class HostSprite extends RefCounted:
 			if res.get("ok", false):
 				image = res["image"]
 				texture = res["texture"]
+				animation_frames = res.get("frames", [image]).duplicate()
+				animation_sequence = res.get("frame_sequence", []).duplicate()
+				animation_total_time_ms = int(res.get("total_time_ms", 0))
+				if animation_sequence.is_empty():
+					for frame_index in animation_frames.size():
+						animation_sequence.append(frame_index)
 				size = Vector2i(image.get_width(), image.get_height())
 				is_visible = true
 				if host.current_bg.is_empty() or filename.begins_with("B") or filename.begins_with("EA"):
@@ -747,6 +1235,12 @@ class HostSprite extends RefCounted:
 				image = res.image
 				texture = res.texture
 				size = Vector2i(image.get_width(), image.get_height())
+				animation_frames = res.image_frames.duplicate()
+				animation_sequence = res.image_frame_sequence.duplicate()
+				animation_total_time_ms = res.image_total_time_ms
+				if animation_sequence.is_empty():
+					for frame_index in animation_frames.size():
+						animation_sequence.append(frame_index)
 		elif res is String:
 			load_image(res)
 
@@ -800,6 +1294,9 @@ class HostSprite extends RefCounted:
 		is_activating = false
 		if host != null:
 			host.active_sprites.erase(get_instance_id())
+		if fields.has("activation_position"):
+			position = fields["activation_position"]
+			fields.erase("activation_position")
 
 	func is_activation() -> int:
 		return -1 if is_activating else 0
@@ -807,12 +1304,258 @@ class HostSprite extends RefCounted:
 	func move_position(x: int, y: int) -> void:
 		position = Vector2i(x, y)
 
+	func create_message(width: int, height: int) -> int:
+		if width <= 0 or height <= 0:
+			return 0
+		size = Vector2i(width, height)
+		text_content = ""
+		message_visible_count = 0
+		message_pending = false
+		return 1
+
+	func set_sprite_text(item_id: String, value: String) -> int:
+		var target := find_form_item(item_id) if not item_id.is_empty() else self
+		if target == null:
+			target = self
+		target.text_content = value
+		target.message_visible_count = -1
+		target.message_pending = false
+		if host != null:
+			host.active_messages.erase(target.get_instance_id())
+			host.message_output.emit(target)
+		return 1
+
+	func get_sprite_text(item_id: String) -> String:
+		var target := find_form_item(item_id) if not item_id.is_empty() else self
+		return target.text_content if target != null else ""
+
+	func get_render_size() -> Vector2i:
+		if str(fields.get("effect_type", "")) == "TileImage":
+			var effect_size: Vector2i = fields.get("effect_size", Vector2i.ZERO)
+			if effect_size.x > 0 and effect_size.y > 0:
+				return effect_size
+		return size
+
+	func begin_animation(loop_count: int = 1, begin_sequence: int = 0, animation_time_ms: int = -1, rewind_sequence: int = 0, turn_sequence: int = -1) -> int:
+		if animation_frames.is_empty() or animation_sequence.is_empty():
+			return -1
+		var sequence_length := animation_sequence.size()
+		if begin_sequence < 0:
+			begin_sequence = animation_begin_sequence
+		else:
+			begin_sequence = posmod(begin_sequence, sequence_length)
+		animation_begin_sequence = begin_sequence
+		animation_start_sequence = begin_sequence
+		animation_elapsed_ms = 0.0
+		animation_loop_count = loop_count
+		animation_rewind_sequence = maxi(0, rewind_sequence)
+		animation_turn_sequence = sequence_length if turn_sequence < 0 else clampi(turn_sequence + 1, 1, 1000000)
+		var total_time := animation_total_time_ms
+		animation_duration_ms = float(total_time if animation_time_ms < 0 else maxi(0, animation_time_ms))
+		animation_elapsed_ms = float(begin_sequence * total_time / sequence_length)
+		_set_animation_frame(animation_sequence[begin_sequence])
+		if host != null and animation_loop_count != 0:
+			host.active_animated_sprites[get_instance_id()] = weakref(self)
+		return 0
+
+	func end_animation() -> int:
+		animation_loop_count = 0
+		if host != null:
+			host.active_animated_sprites.erase(get_instance_id())
+		return 0
+
+	func attach_tone_filter(filter: HostToneFilter) -> int:
+		tone_filter = filter
+		return 0
+
+	func advance_animation(delta_ms: float) -> void:
+		if animation_loop_count == 0 or animation_sequence.is_empty():
+			return
+		if host != null and (host.sprite_animation_flags & 1) == 0:
+			if animation_loop_count != -1:
+				end_animation()
+			return
+		var sequence_length := animation_sequence.size()
+		var turn_length := maxi(1, animation_turn_sequence)
+		var duration := animation_duration_ms
+		if duration <= 0:
+			return
+		animation_elapsed_ms += delta_ms
+		if animation_elapsed_ms >= duration:
+			var rewind_time := animation_rewind_sequence * duration / turn_length
+			if animation_loop_count != -1:
+				animation_loop_count -= 1
+			if animation_loop_count != 0:
+				animation_elapsed_ms = fmod(animation_elapsed_ms - duration, maxf(1.0, duration - rewind_time)) + rewind_time
+			else:
+				animation_elapsed_ms = maxf(0.0, duration - 1.0)
+		var sequence_index := posmod(int(animation_elapsed_ms * turn_length / duration), sequence_length)
+		animation_begin_sequence = sequence_index
+		_set_animation_frame(animation_sequence[sequence_index])
+		if animation_loop_count == 0 and host != null:
+			host.active_animated_sprites.erase(get_instance_id())
+
+	func _set_animation_frame(frame_index: int) -> void:
+		if frame_index < 0 or frame_index >= animation_frames.size() or animation_view_frame == frame_index:
+			return
+		animation_view_frame = frame_index
+		image = animation_frames[frame_index]
+		texture = ImageTexture.create_from_image(image)
+
+	func set_effect_parameter(parameter: Variant, mask: Variant = null) -> int:
+		if parameter == null or not parameter is Object or not parameter.has_method("get_field") or str(parameter.get("type_name")) != "EffectParam":
+			if host != null:
+				host.report_unsupported("HostSprite.SetEffectParameter requires EffectParam")
+			return -1
+		var effect: Variant = parameter
+		var effect_type := str(effect.get_field("strType"))
+		if effect_type.is_empty() or effect_type == "Nothing":
+			fields.erase("effect_type")
+			fields.erase("effect_parameters")
+			fields.erase("effect_size")
+			fields.erase("effect_scroll")
+			fields.erase("effect_elapsed_ms")
+			fields.erase("effect_mask")
+			fields.erase("effect_shaking_width")
+			fields.erase("effect_mesh_size")
+			fields.erase("effect_frequency")
+			fields.erase("effect_interval_ms")
+			fields.erase("effect_degree_step")
+			fields.erase("effect_transition")
+			if host != null:
+				host.active_effect_sprites.erase(get_instance_id())
+			return 0
+		var known_types := ["TileImage", "FilterWhite", "FilterLight", "FilterBlack", "FilterDark", "RasterScroll", "WaveCircle", "Shimmer", "MeshWarp", "ShadingOff", "ShadingLight", "SmashParticle2D", "SmashParticle3D"]
+		if not known_types.has(effect_type):
+			if host != null:
+				host.report_unsupported("HostSprite.SetEffectParameter %s" % effect_type)
+			return -1
+		if effect_type not in ["TileImage", "FilterWhite", "FilterLight", "FilterBlack", "FilterDark", "RasterScroll"]:
+			if host != null:
+				host.report_unsupported("HostSprite.SetEffectParameter %s renderer" % effect_type)
+			return -1
+		fields["effect_type"] = effect_type
+		fields["effect_parameters"] = effect.fields.duplicate(true)
+		if effect_type == "TileImage":
+			var size_value: Variant = effect.get_field("sizeView")
+			var speed_value: Variant = effect.get_field("ptSpeed")
+			var width := int(size_value.get_field("w")) if size_value is Object and size_value.has_method("get_field") else 0
+			var height := int(size_value.get_field("h")) if size_value is Object and size_value.has_method("get_field") else 0
+			if width <= 0 or height <= 0 or width > 8192 or height > 8192 or width * height > 33554432:
+				return -1
+			fields["effect_size"] = Vector2i(width, height)
+			var speed_x: Variant = speed_value.get_field("x") if speed_value is Object and speed_value.has_method("get_field") else 0
+			var speed_y: Variant = speed_value.get_field("y") if speed_value is Object and speed_value.has_method("get_field") else 0
+			fields["effect_scroll_speed"] = Vector2i(int(speed_x) if speed_x != null else 0, int(speed_y) if speed_y != null else 0)
+			fields["effect_scroll"] = Vector2i.ZERO
+			fields["effect_elapsed_ms"] = 0.0
+			var interval_value: Variant = effect.get_field("nInterval")
+			fields["effect_interval_ms"] = maxi(0, int(interval_value) if interval_value != null else 0)
+			fields["effect_mask"] = mask if mask is HostResource else null
+		elif effect_type == "RasterScroll":
+			fields["effect_shaking_width"] = maxi(0, mini(4096, _effect_integer(effect, "nShakingWidth")))
+			fields["effect_mesh_size"] = maxi(1, mini(8192, _effect_integer(effect, "nMeshSize", 1)))
+			fields["effect_frequency"] = _effect_integer(effect, "nFrequency")
+			fields["effect_interval_ms"] = maxi(0, _effect_integer(effect, "nInterval"))
+			fields["effect_degree_step"] = _effect_integer(effect, "nDegreeStep")
+			fields["effect_transition"] = (_effect_integer(effect, "nFlags") & 1) != 0
+			fields["effect_elapsed_ms"] = 0.0
+		else:
+			fields.erase("effect_size")
+			fields.erase("effect_scroll_speed")
+			fields.erase("effect_scroll")
+			fields.erase("effect_elapsed_ms")
+			fields.erase("effect_interval_ms")
+			fields.erase("effect_mask")
+			fields.erase("effect_shaking_width")
+			fields.erase("effect_mesh_size")
+			fields.erase("effect_frequency")
+			fields.erase("effect_degree_step")
+			fields.erase("effect_transition")
+		if host != null:
+			host.active_effect_sprites[get_instance_id()] = weakref(self)
+		return 0
+
+	func _effect_integer(effect: Variant, field_name: String, default_value: int = 0) -> int:
+		var value: Variant = effect.get_field(field_name)
+		return int(value) if value is int or value is float or value is bool else default_value
+
+	func modify_animation_flags(add_flags: int, remove_flags: int) -> int:
+		if host == null:
+			return 0
+		host.sprite_animation_flags = (host.sprite_animation_flags | add_flags) & ~remove_flags
+		return host.sprite_animation_flags
+
+	func get_scroll_position(item_id: String, axis: String = "horz") -> int:
+		var target := find_form_item(item_id)
+		if target != null:
+			return int(target.fields.get("scroll_%s_pos" % axis, 0))
+		var values: Dictionary = fields.get("scroll_%s_positions" % axis, {})
+		return int(values.get(item_id, 0))
+
+	func get_scroll_range(item_id: String, axis: String = "horz") -> int:
+		var target := find_form_item(item_id)
+		if target != null:
+			return int(target.fields.get("scroll_%s_range" % axis, 256))
+		var ranges: Dictionary = fields.get("scroll_%s_ranges" % axis, {})
+		return int(ranges.get(item_id, 256))
+
+	func set_scroll_position(value: int, item_id: String, axis: String = "horz") -> int:
+		var target := find_form_item(item_id)
+		if target != null:
+			var range_value := int(target.fields.get("scroll_%s_range" % axis, 256))
+			target.fields["scroll_%s_pos" % axis] = clampi(value, 0, maxi(0, range_value))
+			return 1
+		var values: Dictionary = fields.get("scroll_%s_positions" % axis, {})
+		var ranges: Dictionary = fields.get("scroll_%s_ranges" % axis, {})
+		values[item_id] = clampi(value, 0, maxi(0, int(ranges.get(item_id, 256))))
+		fields["scroll_%s_positions" % axis] = values
+		return 1
+
+	func set_scroll_range(value: int, item_id: String, axis: String = "horz") -> int:
+		var target := find_form_item(item_id)
+		if target != null:
+			target.fields["scroll_%s_range" % axis] = maxi(0, value)
+			var position_key := "scroll_%s_pos" % axis
+			target.fields[position_key] = mini(int(target.fields.get(position_key, 0)), maxi(0, value))
+			return 1
+		var ranges: Dictionary = fields.get("scroll_%s_ranges" % axis, {})
+		ranges[item_id] = maxi(0, value)
+		fields["scroll_%s_ranges" % axis] = ranges
+		return set_scroll_position(get_scroll_position(item_id, axis), item_id, axis)
+
+	func is_hit_at(x: int, y: int) -> bool:
+		if not is_visible or transparency >= 256:
+			return false
+		return get_sprite_rect().has_point(Vector2(x, y))
+
+	func get_sprite_rect() -> Rect2:
+		var render_size := get_render_size()
+		if render_size.x <= 0 or render_size.y <= 0:
+			return Rect2()
+		var pivot := Vector2(rev_center)
+		var first_corner := Vector2(position) - pivot + pivot - pivot * magnification
+		var second_corner := first_corner + Vector2(render_size) * magnification
+		var rect_position := Vector2(minf(first_corner.x, second_corner.x), minf(first_corner.y, second_corner.y))
+		var rect_size := Vector2(absf(second_corner.x - first_corner.x), absf(second_corner.y - first_corner.y))
+		return Rect2(rect_position, rect_size)
+
 	func add_sprite(z: int, child: Variant) -> void:
 		if child is HostSprite:
 			child.z_order = z
 			if not children.has(child):
 				children.append(child)
 			child.refresh_command_ids()
+
+	func find_form_item(item_id: String) -> HostSprite:
+		for child in children:
+			if child.btn_id == item_id or child.fields.get("form_item_id") == item_id:
+				return child
+		return null
+
+	func set_form_image(item_id: String, resource_id: String) -> bool:
+		var item := find_form_item(item_id)
+		return item != null and form_resources != null and form_resources._set_form_texture(item, resource_id)
 
 	func refresh_command_ids() -> void:
 		var page_id := str(fields.get("form_page_id", ""))
@@ -897,6 +1640,12 @@ class HostSprite extends RefCounted:
 			param.set_field("nImageWidth", size.x)
 			param.set_field("nImageHeight", size.y)
 			param.set_field("nTransparency", transparency)
+			for name in ["ptDstPos", "ptRevCenter"]:
+				var point = param.get_field(name)
+				if point != null and point.has_method("set_field"):
+					var coordinates := position if name == "ptDstPos" else rev_center
+					point.set_field("x", coordinates.x)
+					point.set_field("y", coordinates.y)
 		return 0
 
 	func set_parameter(param: Variant) -> int:
@@ -978,7 +1727,18 @@ class HostWindow extends RefCounted:
 		return 0
 
 	func get_joy_button_pushed(key: int, _dev: int = 0, during_activation: bool = false) -> int:
+		if host != null and host.active_input_filter_ref != null:
+			var active_filter = host.active_input_filter_ref.get_ref()
+			if active_filter is HostInputFilter:
+				return active_filter.get_joy_button_pushed(key, 0, during_activation)
 		return host.poll_advance_button(key, during_activation) if host != null else 0
+
+	func is_joy_button_pushing(key: int, _dev: int = 0) -> int:
+		if host != null and host.active_input_filter_ref != null:
+			var active_filter = host.active_input_filter_ref.get_ref()
+			if active_filter is HostInputFilter:
+				return active_filter.is_joy_button_pushing(key)
+		return 0
 
 	func unlock() -> int:
 		return 0
@@ -996,6 +1756,10 @@ class HostWindow extends RefCounted:
 	func flush_joy_button_pushed() -> int:
 		if host != null:
 			host.skip_input_pending = false
+			if host.active_input_filter_ref != null:
+				var active_filter = host.active_input_filter_ref.get_ref()
+				if active_filter is HostInputFilter:
+					return active_filter.flush_joy_button_pushed()
 		return 0
 
 	func flush_command_queue(_flag: int = -1) -> int:
@@ -1112,12 +1876,71 @@ func poll_advance_button(key: int, during_activation: bool) -> int:
 
 
 func advance_sprite_animations(delta: float) -> void:
+	for sprite_id in active_messages.keys():
+		var sprite := active_messages[sprite_id].get_ref() as HostSprite
+		if sprite == null:
+			active_messages.erase(sprite_id)
+		else:
+			sprite.advance_message(delta * 1000.0)
 	for sprite_id in active_sprites.keys():
 		var sprite := active_sprites[sprite_id].get_ref() as HostSprite
 		if sprite == null:
 			active_sprites.erase(sprite_id)
 		else:
 			sprite.advance_activation(delta * 1000.0)
+	for sprite_id in active_animated_sprites.keys():
+		var sprite := active_animated_sprites[sprite_id].get_ref() as HostSprite
+		if sprite == null:
+			active_animated_sprites.erase(sprite_id)
+		else:
+			sprite.advance_animation(delta * 1000.0)
+	for sprite_id in active_effect_sprites.keys():
+		var sprite := active_effect_sprites[sprite_id].get_ref() as HostSprite
+		if sprite == null:
+			active_effect_sprites.erase(sprite_id)
+			continue
+		var effect_type := str(sprite.fields.get("effect_type", ""))
+		if effect_type not in ["TileImage", "RasterScroll"]:
+			continue
+		var interval := int(sprite.fields.get("effect_interval_ms", 0))
+		if interval <= 0:
+			continue
+		var elapsed := float(sprite.fields.get("effect_elapsed_ms", 0.0)) + delta * 1000.0
+		var steps := int(elapsed / interval)
+		sprite.fields["effect_elapsed_ms"] = fmod(elapsed, float(interval))
+		if steps <= 0:
+			continue
+		if effect_type == "TileImage":
+			if (sprite_animation_flags & 4) == 0 or sprite.size.x <= 0 or sprite.size.y <= 0:
+				continue
+			var scroll: Vector2i = sprite.fields.get("effect_scroll", Vector2i.ZERO)
+			var speed: Vector2i = sprite.fields.get("effect_scroll_speed", Vector2i.ZERO)
+			scroll += speed * steps
+			if speed.x > 0:
+				scroll.x = posmod(scroll.x, sprite.size.x) - sprite.size.x
+			elif speed.x < 0:
+				scroll.x = posmod(scroll.x, sprite.size.x)
+			if speed.y > 0:
+				scroll.y = posmod(scroll.y, sprite.size.y) - sprite.size.y
+			elif speed.y < 0:
+				scroll.y = posmod(scroll.y, sprite.size.y)
+			sprite.fields["effect_scroll"] = scroll
+		elif (sprite_animation_flags & 4) != 0:
+			var degree := sprite.blending + steps * int(sprite.fields.get("effect_degree_step", 0))
+			while degree >= 0x300:
+				degree -= 0x100
+			sprite.blending = degree
+		elif sprite.blending != 0:
+			sprite.blending = 0
+
+
+func advance_audio_envelopes(delta: float) -> void:
+	for resource_id in active_volume_envelopes.keys():
+		var resource := active_volume_envelopes[resource_id].get_ref() as HostResource
+		if resource == null:
+			active_volume_envelopes.erase(resource_id)
+		else:
+			resource.advance_volume_envelope(delta * 1000.0)
 
 
 func push_command(cmd: String, full_id: String = "") -> void:
@@ -1345,7 +2168,7 @@ func load_image(filename: String, archive_hint: String = "") -> Dictionary:
 		var item: Dictionary = image_cache[cache_key]
 		image_cache_lru.erase(cache_key)
 		image_cache_lru.append(cache_key)
-		return {"ok": true, "image": item["image"], "texture": item["texture"]}
+		return item.duplicate()
 
 	var entry_res := _read_vfs_candidate(entry)
 	if not entry_res.get("ok", false):
@@ -1357,13 +2180,17 @@ func load_image(filename: String, archive_hint: String = "") -> Dictionary:
 
 	var img: Image = dec_res["image"]
 	var tex := ImageTexture.create_from_image(img)
-	var estimated_bytes := img.get_data().size() * 2
+	var frames: Array = dec_res.get("frames", [img])
+	var frame_sequence: Array = dec_res.get("frame_sequence", [])
+	var total_time_ms := int(dec_res.get("total_time_ms", 0))
+	var estimated_bytes := img.get_data().size() * maxi(2, frames.size())
+	var image_result := {"ok": true, "image": img, "texture": tex, "frames": frames, "frame_sequence": frame_sequence, "total_time_ms": total_time_ms}
 	if estimated_bytes <= image_cache_budget_bytes:
-		image_cache[cache_key] = {"image": img, "texture": tex, "bytes": estimated_bytes}
+		image_cache[cache_key] = image_result.merged({"bytes": estimated_bytes})
 		image_cache_lru.append(cache_key)
 		image_cache_bytes += estimated_bytes
 		_trim_image_cache()
-	return {"ok": true, "image": img, "texture": tex}
+	return image_result
 
 
 func load_sound(filename: String, archive_hint: String = "") -> Dictionary:
@@ -1455,6 +2282,16 @@ func resolve_audio_channel(name: String, archive_hint: String = "") -> String:
 	return ""
 
 
+func get_cursor_position() -> Vector2i:
+	if cursor_position_provider.is_valid():
+		var value: Variant = cursor_position_provider.call()
+		if value is Vector2i:
+			return value
+		if value is Vector2:
+			return Vector2i(roundi(value.x), roundi(value.y))
+	return Vector2i.ZERO
+
+
 func _audio_player_for_channel(channel: String) -> AudioStreamPlayer:
 	match channel.strip_edges().to_lower():
 		"bgm": return bgm_player
@@ -1465,7 +2302,7 @@ func _audio_player_for_channel(channel: String) -> AudioStreamPlayer:
 		_: return null
 
 
-func play_audio_stream(stream: AudioStreamWAV, name: String, channel_hint: String = "", start_pos_msec: int = 0, repeat: bool = false, channel_default_loop: bool = true) -> bool:
+func play_audio_stream(stream: AudioStreamWAV, name: String, channel_hint: String = "", start_frame: int = 0, repeat: bool = false, channel_default_loop: bool = true, end_frame: int = -1, rewind_frame: int = -1, play_type: int = -2, resource_volume: float = 1.0) -> bool:
 	if stream == null:
 		_audio_error("音频流为空: %s" % name)
 		return false
@@ -1477,21 +2314,42 @@ func play_audio_stream(stream: AudioStreamWAV, name: String, channel_hint: Strin
 	if player == null:
 		_audio_error("音频声道尚未初始化: %s" % channel)
 		return false
-	if start_pos_msec < 0:
-		_audio_error("音频起始位置不能为负数: %s (%d ms)" % [name, start_pos_msec])
-		return false
 	if channel == "voice" and _voice_is_muted(name):
 		return false
-	# load_sound() returns a cached WAV stream. Loop policy belongs to this
-	# playback, so duplicate before changing it to avoid mutating other handles.
-	var playback_stream := stream.duplicate() as AudioStreamWAV
-	if playback_stream == null:
-		_audio_error("无法复制音频流用于播放: %s" % name)
+	# Entis uses PCM frames, while AudioStreamPlayer.play takes seconds.
+	var bytes_per_frame := (2 if stream.stereo else 1) * (2 if stream.format == AudioStreamWAV.FORMAT_16_BITS else 1)
+	if stream.format not in [AudioStreamWAV.FORMAT_8_BITS, AudioStreamWAV.FORMAT_16_BITS] or stream.mix_rate <= 0:
+		_audio_error("音频区间需要 PCM 数据: %s" % name)
 		return false
-	playback_stream.loop_mode = AudioStreamWAV.LOOP_FORWARD if repeat or (channel_default_loop and channel in ["bgm", "env_se"]) else AudioStreamWAV.LOOP_DISABLED
+	var pcm := stream.data
+	@warning_ignore("integer_division")
+	var frame_count := pcm.size() / bytes_per_frame
+	var end := frame_count if end_frame == -1 else end_frame
+	var rewind := start_frame if rewind_frame == -1 else rewind_frame
+	var should_loop := repeat or (channel_default_loop and channel in ["bgm", "env_se"])
+	if start_frame < 0 or start_frame >= end or end > frame_count or (should_loop and (rewind < 0 or rewind >= end)):
+		_audio_error("无效的音频采样帧区间: %s (start=%d, end=%d, rewind=%d, frames=%d)" % [name, start_frame, end, rewind, frame_count])
+		return false
+
+	# Keep cached PCM untouched. WAV loop markers only take effect in loop mode.
+	var playback_stream := stream.duplicate() as AudioStreamWAV
+	if should_loop:
+		playback_stream.loop_mode = AudioStreamWAV.LOOP_FORWARD
+		playback_stream.loop_begin = rewind
+		playback_stream.loop_end = end
+	else:
+		playback_stream.loop_mode = AudioStreamWAV.LOOP_DISABLED
+		if end < frame_count:
+			playback_stream.data = pcm.slice(0, end * bytes_per_frame)
 	player.stream = playback_stream
 	player.stream_paused = false
-	player.play(maxf(0.0, float(start_pos_msec) / 1000.0))
+	player.set_meta("csx_audio_name", name.to_lower())
+	if play_type == -2:
+		play_type = _default_audio_play_type(channel)
+	player.set_meta("csx_play_type", play_type)
+	player.set_meta("csx_resource_volume", clampf(resource_volume, 0.0, 1.0))
+	set_resource_audio_volume(channel, resource_volume, play_type)
+	player.play(float(start_frame) / stream.mix_rate)
 	match channel:
 		"bgm":
 			current_bgm = name
@@ -1586,6 +2444,7 @@ func stop_audio(name: String, channel_hint: String = "") -> bool:
 		return false
 	player.stop()
 	player.stream_paused = false
+	player.set_meta("csx_play_type", AUDIO_PLAY_TYPE_NONE)
 	match channel:
 		"bgm":
 			current_bgm = ""
@@ -1598,7 +2457,7 @@ func stop_audio(name: String, channel_hint: String = "") -> bool:
 func pause_audio(name: String, channel_hint: String = "") -> bool:
 	var channel := channel_hint.strip_edges().to_lower() if not channel_hint.strip_edges().is_empty() else resolve_audio_channel(name)
 	var player := _audio_player_for_channel(channel)
-	if player == null or not player.playing:
+	if player == null or not player.playing or player.get_meta("csx_audio_name", "") != name.to_lower():
 		last_error = "无法暂停当前未播放的音频声道: %s (%s)" % [channel, name]
 		return false
 	player.stream_paused = true
@@ -1608,7 +2467,7 @@ func pause_audio(name: String, channel_hint: String = "") -> bool:
 func resume_audio(name: String, channel_hint: String = "") -> bool:
 	var channel := channel_hint.strip_edges().to_lower() if not channel_hint.strip_edges().is_empty() else resolve_audio_channel(name)
 	var player := _audio_player_for_channel(channel)
-	if player == null or player.stream == null:
+	if player == null or player.stream == null or player.get_meta("csx_audio_name", "") != name.to_lower():
 		last_error = "无法恢复未初始化的音频声道: %s (%s)" % [channel, name]
 		return false
 	if player.stream_paused:
@@ -1617,12 +2476,12 @@ func resume_audio(name: String, channel_hint: String = "") -> bool:
 	return false
 
 
-func get_audio_position_msec(name: String, channel_hint: String = "") -> int:
+func get_audio_position_frames(name: String, channel_hint: String = "") -> int:
 	var channel := channel_hint.strip_edges().to_lower() if not channel_hint.strip_edges().is_empty() else resolve_audio_channel(name)
 	var player := _audio_player_for_channel(channel)
-	if player == null:
-		return 0
-	return int(round(player.get_playback_position() * 1000.0))
+	if player == null or not player.playing or not player.stream is AudioStreamWAV or player.get_meta("csx_audio_name", "") != name.to_lower():
+		return -1
+	return roundi(player.get_playback_position() * player.stream.mix_rate)
 
 
 func set_audio_channel_volume(channel: String, linear_volume: float) -> bool:
@@ -1633,6 +2492,57 @@ func set_audio_channel_volume(channel: String, linear_volume: float) -> bool:
 		return false
 	var volume := clampf(linear_volume, 0.0, 1.0)
 	player.volume_db = -80.0 if volume <= 0.0001 else linear_to_db(volume)
+	return true
+
+
+func is_valid_audio_play_type(play_type: int) -> bool:
+	return play_type in [AUDIO_PLAY_TYPE_DEVICE, AUDIO_PLAY_TYPE_NONE, AUDIO_PLAY_TYPE_MUSIC, AUDIO_PLAY_TYPE_SOUND, AUDIO_PLAY_TYPE_VOICE, AUDIO_PLAY_TYPE_SYSTEM]
+
+
+func _default_audio_play_type(channel: String) -> int:
+	match channel:
+		"bgm": return AUDIO_PLAY_TYPE_MUSIC
+		"env_se", "se": return AUDIO_PLAY_TYPE_SOUND
+		"voice": return AUDIO_PLAY_TYPE_VOICE
+		"system": return AUDIO_PLAY_TYPE_SYSTEM
+		_: return AUDIO_PLAY_TYPE_NONE
+
+
+func set_resource_audio_volume(channel: String, resource_volume: float, play_type: int) -> bool:
+	var factor := float(audio_total_volumes.get(play_type, 1.0)) if play_type in [0, 1, 2, 3] else 1.0
+	var player := _audio_player_for_channel(channel)
+	if player == null:
+		return false
+	player.set_meta("csx_resource_volume", clampf(resource_volume, 0.0, 1.0))
+	player.set_meta("csx_play_type", play_type)
+	return set_audio_channel_volume(channel, clampf(resource_volume, 0.0, 1.0) * factor)
+
+
+func get_audio_total_volume(play_type: int) -> float:
+	if play_type == AUDIO_PLAY_TYPE_DEVICE:
+		var master_bus := AudioServer.get_bus_index("Master")
+		return db_to_linear(AudioServer.get_bus_volume_db(master_bus)) if master_bus >= 0 else 1.0
+	if play_type in [0, 1, 2, 3]:
+		return float(audio_total_volumes.get(play_type, 1.0))
+	return 1.0
+
+
+func set_audio_total_volume(play_type: int, linear_volume: float) -> bool:
+	var volume := clampf(linear_volume, 0.0, 1.0)
+	if play_type == AUDIO_PLAY_TYPE_DEVICE:
+		var master_bus := AudioServer.get_bus_index("Master")
+		if master_bus < 0:
+			return false
+		AudioServer.set_bus_volume_db(master_bus, -80.0 if volume <= 0.0001 else linear_to_db(volume))
+		return true
+	if play_type not in [0, 1, 2, 3]:
+		return true # Entis treats unknown total-volume selectors as unity/no-op.
+	audio_total_volumes[play_type] = volume
+	for channel in ["bgm", "env_se", "se", "voice", "system"]:
+		var player := _audio_player_for_channel(channel)
+		if player != null and player.stream != null and int(player.get_meta("csx_play_type", -1)) == play_type:
+			var resource_volume := float(player.get_meta("csx_resource_volume", 1.0))
+			set_resource_audio_volume(channel, resource_volume, play_type)
 	return true
 
 
@@ -1671,6 +2581,21 @@ func call_host_function(func_name: String, args: Array, vm: RefCounted) -> Dicti
 				time_obj.set_field("nMilliSecond", Time.get_ticks_msec() % 1000)
 				time_obj.set_field("nDayOfWeek", dt["weekday"])
 			return {"handled": true, "result": time_obj}
+		"IsHitSprite":
+			if args.size() >= 3 and args[0] is HostSprite:
+				var sprite := args[0] as HostSprite
+				return {"handled": true, "result": -1 if sprite.is_hit_at(int(args[1]), int(args[2])) else 0}
+			return {"handled": true, "result": 0}
+		"IsHitRect":
+			if args.size() >= 3 and args[0] != null and args[0].has_method("get_field"):
+				var rect_value: Variant = args[0]
+				var left := float(rect_value.get_field("left"))
+				var top := float(rect_value.get_field("top"))
+				var right := float(rect_value.get_field("right"))
+				var bottom := float(rect_value.get_field("bottom"))
+				var hit := float(args[1]) >= left and float(args[1]) < right and float(args[2]) >= top and float(args[2]) < bottom
+				return {"handled": true, "result": -1 if hit else 0}
+			return {"handled": true, "result": 0}
 		"InitRandom":
 			return {"handled": true, "result": 0}
 		"Sleep":
@@ -2001,6 +2926,11 @@ static func _serialize_value_checked(val: Variant, active_stack: Array, depth: i
 				"is_button": sprite.is_button,
 				"btn_state": sprite.btn_state,
 				"text_content": sprite.text_content,
+				"message_char_speed_ms": sprite.message_char_speed_ms,
+				"message_fade_ms": sprite.message_fade_ms,
+				"message_elapsed_ms": sprite.message_elapsed_ms,
+				"message_visible_count": sprite.message_visible_count,
+				"message_pending": sprite.message_pending,
 				"fields": _serialize_value_checked(sprite.fields, active_stack, depth + 1, state)
 			}
 		elif val is HostResource:
@@ -2014,7 +2944,11 @@ static func _serialize_value_checked(val: Variant, active_stack: Array, depth: i
 				"unpacked_size": resource.unpacked_size,
 				"payload_offset": resource.payload_offset,
 				"is_playing": resource.is_playing,
-				"current_position": resource.current_position,
+				"position_frames": resource.get_playing_position(),
+				"playback_end_frame": resource.playback_end_frame,
+				"playback_rewind_frame": resource.playback_rewind_frame,
+				"is_repeating": resource.is_repeating,
+				"use_channel_default_loop": resource.use_channel_default_loop,
 				"volume_left": resource.volume_left,
 				"volume_right": resource.volume_right,
 				"fields": _serialize_value_checked(resource.fields, active_stack, depth + 1, state)
@@ -2093,6 +3027,13 @@ static func deserialize_into(target: Variant, data: Variant, vm: RefCounted = nu
 			sprite.is_button = bool(data.get("is_button", false))
 			sprite.btn_state = str(data.get("btn_state", "normal"))
 			sprite.text_content = str(data.get("text_content", ""))
+			sprite.message_char_speed_ms = maxi(0, int(data.get("message_char_speed_ms", 0)))
+			sprite.message_fade_ms = maxi(0, int(data.get("message_fade_ms", 0)))
+			sprite.message_elapsed_ms = maxf(0.0, float(data.get("message_elapsed_ms", 0.0)))
+			sprite.message_visible_count = clampi(int(data.get("message_visible_count", sprite.display_text().length())), -1, sprite.display_text().length())
+			sprite.message_pending = bool(data.get("message_pending", false))
+			if sprite.message_pending and sprite.host != null:
+				sprite.host.active_messages[sprite.get_instance_id()] = weakref(sprite)
 			sprite.fields = deserialize_value(data.get("fields", {}), vm, context) if data.get("fields", {}) is Dictionary else {}
 			if not sprite.filename.is_empty() and sprite.host != null and sprite.filename.get_extension().to_lower() == "eri":
 				var image_res := sprite.host.load_image(sprite.filename, sprite.archive_hint)
@@ -2119,7 +3060,11 @@ static func deserialize_into(target: Variant, data: Variant, vm: RefCounted = nu
 			resource.unpacked_size = int(data.get("unpacked_size", 0))
 			resource.payload_offset = int(data.get("payload_offset", 0))
 			resource.is_playing = bool(data.get("is_playing", false))
-			resource.current_position = int(data.get("current_position", 0))
+			resource.current_position = int(data.get("position_frames", 0))
+			resource.playback_end_frame = int(data.get("playback_end_frame", -1))
+			resource.playback_rewind_frame = int(data.get("playback_rewind_frame", -1))
+			resource.is_repeating = bool(data.get("is_repeating", false))
+			resource.use_channel_default_loop = bool(data.get("use_channel_default_loop", false))
 			resource.volume_left = clampf(float(data.get("volume_left", 1.0)), 0.0, 1.0)
 			resource.volume_right = clampf(float(data.get("volume_right", 1.0)), 0.0, 1.0)
 			resource.fields = deserialize_value(data.get("fields", {}), vm, context) if data.get("fields", {}) is Dictionary else {}
@@ -2127,6 +3072,9 @@ static func deserialize_into(target: Variant, data: Variant, vm: RefCounted = nu
 				var extension := resource.name.get_extension().to_lower()
 				if extension == "mio":
 					resource.load_sound(resource.name)
+					if not data.has("position_frames") and resource.audio_stream != null:
+						var legacy_msec := float(data.get("current_position", 0))
+						resource.current_position = roundi(legacy_msec * resource.audio_stream.mix_rate / 1000.0)
 				elif extension == "eri":
 					resource.load_image(resource.name)
 			return resource

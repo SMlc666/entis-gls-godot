@@ -1,6 +1,7 @@
 extends "res://tests/smoke_test_base.gd"
 
 const TestSupport = preload("res://tests/test_support.gd")
+const CsxHostClass = preload("res://scripts/csx_host.gd")
 
 const EXPECTED_HASHES := {
 	"system/yosuga.csx": "157be9eb39cdc2d3cb654096340ca686f4ef48ac7fd7a6255673ba5f0c79afb6",
@@ -46,6 +47,13 @@ func _init() -> void:
 		frames += 1
 	expect(player.is_initialized, "Player failed to initialize")
 	expect(TestSupport.uses_isolated_saves(player.host, test_save_dir), "AdvPlayer initialization must use isolated test saves")
+	var cached_frame: Dictionary = player.host.load_image("FRM_0101.eri", "frame.noa")
+	var resource_a = CsxHostClass.HostResource.new("", "frame.noa", -1, 0, 0, player.host)
+	var resource_b = CsxHostClass.HostResource.new("", "frame.noa", -1, 0, 0, player.host)
+	expect(resource_a.load_image("FRM_0101.eri") == 1 and resource_b.load_image("FRM_0101.eri") == 1, "HostResource image copies must load from the original frame archive")
+	var cached_pixel: Color = cached_frame["image"].get_pixel(0, 0)
+	resource_a.image.set_pixel(0, 0, Color.BLACK)
+	expect(resource_b.image.get_pixel(0, 0).is_equal_approx(cached_pixel), "Mutating one HostResource image must not alter another resource or the VFS image cache")
 
 	expect(player.dialogue_box != null, "dialogue_box must exist")
 	expect(player.dialogue_box.size == Vector2(750, 152), "dialogue_box size must be 750x152, got %s" % str(player.dialogue_box.size))
@@ -147,23 +155,23 @@ func _init() -> void:
 
 	# Test BGM volume slider
 	player.cfg_slider_bgm.value = 0.5
-	expect(abs(player.bgm_player.volume_db - linear_to_db(0.5)) < 0.1, "BGM volume must update")
+	expect(is_equal_approx(player.host.get_audio_total_volume(CsxHostClass.AUDIO_PLAY_TYPE_MUSIC), 0.5), "BGM slider must update the SDK Music master volume")
 	player.cfg_slider_system.value = 0.36
 	expect(is_equal_approx(player.settings_state.audio_volume("system"), 0.36), "System slider must update settings state")
-	expect(abs(player.system_player.volume_db - linear_to_db(0.36)) < 0.1, "System slider must update actual system player volume")
+	expect(is_equal_approx(player.host.get_audio_total_volume(CsxHostClass.AUDIO_PLAY_TYPE_SYSTEM), 0.36), "System slider must update the SDK System master volume")
 	player.cfg_slider_auto_speed.value = 4.2
 	expect(is_equal_approx(player.settings_state.auto_delay_seconds(), 4.2), "Auto delay slider must update the active delay")
 
 	# Reset while system audio is muted to verify the state is applied before UI values.
 	player.cfg_check_system.emit_signal("pressed")
 	expect(player.settings_state.is_muted("system"), "System mute toggle must update settings state")
-	expect(player.system_player.volume_db <= -79.9, "System mute toggle must silence system output")
+	expect(is_zero_approx(player.host.get_audio_total_volume(CsxHostClass.AUDIO_PLAY_TYPE_SYSTEM)), "System mute toggle must silence the SDK System category")
 	var default_button: TextureButton = cfg_win_box.find_child("ID_DEFAULT", true, false)
 	expect(default_button != null, "ID_DEFAULT button must exist in ConfigWindowBox")
 	default_button.emit_signal("pressed")
 	expect(not player.settings_state.is_muted("system"), "Default settings must clear system mute")
 	expect(is_equal_approx(player.settings_state.audio_volume("system"), 0.8), "Default system volume must be restored")
-	expect(abs(player.system_player.volume_db - linear_to_db(0.8)) < 0.1, "Default action must restore actual system player volume")
+	expect(is_equal_approx(player.host.get_audio_total_volume(CsxHostClass.AUDIO_PLAY_TYPE_SYSTEM), 0.8), "Default action must restore the SDK System master volume")
 	expect(is_equal_approx(player.cfg_slider_system.value, 0.8), "Default action must restore system slider")
 	expect(is_equal_approx(player.settings_state.auto_delay_seconds(), 2.0), "Default auto delay must be restored")
 	expect(is_equal_approx(player.cfg_slider_auto_speed.value, 2.0), "Default action must restore auto delay slider")
@@ -199,7 +207,7 @@ func _init() -> void:
 	expect(restarted.is_initialized, "Player must initialize again from the same save directory")
 	expect(is_equal_approx(restarted.cfg_slider_bgm.value, 0.32), "BGM slider must restore after restarting")
 	expect(is_equal_approx(restarted.cfg_slider_auto_speed.value, 4.2), "Auto delay must restore after restarting")
-	expect(restarted.system_player.volume_db <= -79.9, "System mute must restore after restarting")
+	expect(is_zero_approx(restarted.host.get_audio_total_volume(CsxHostClass.AUDIO_PLAY_TYPE_SYSTEM)), "System mute must restore after restarting")
 	expect(restarted.host != null and restarted.host.voice_char_mutes.get("ID_SORA", false), "Character mute must restore after restarting")
 	restarted.free()
 

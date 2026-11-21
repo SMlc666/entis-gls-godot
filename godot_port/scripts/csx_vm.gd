@@ -772,14 +772,16 @@ func step() -> bool:
 					var res_val = _apply_operate(kind, current_val, rhs)
 					cur_frame.set_local(var_name, res_val)
 			else:
-				if cur_frame != null:
-					cur_frame.last_new_var_name = ""
-					cur_frame.last_new_stack_size = -1
 				if eval_stack.size() < 2:
 					last_error = "store 指令栈元素不足（需要至少2个，实际 %d）" % eval_stack.size()
 					return false
 				var rhs: Variant = resolve_value(eval_stack.pop_back())
 				var lhs: Variant = eval_stack.back()
+				# A scalar store can coerce an intermediate initializer result.
+				# Keep the pending declaration until its final store consumes it.
+				if cur_frame != null and (lhs is CsxRef or eval_stack.size() != cur_frame.last_new_stack_size + 1):
+					cur_frame.last_new_var_name = ""
+					cur_frame.last_new_stack_size = -1
 				var res_val: Variant = rhs
 				if lhs is CsxRef:
 					var ref := lhs as CsxRef
@@ -930,6 +932,12 @@ func step() -> bool:
 				var method_args: Array = []
 				for k in range(1, args.size()):
 					method_args.append(resolve_value(args[k]))
+				# Cotopha keeps reference output parameters on the eval stack while
+				# argc counts only the receiver for these host calls.
+				if func_name in ["GetCursorPos", "GetRectangle"] and not eval_stack.is_empty():
+					var output_value: Variant = resolve_value(eval_stack.back())
+					if output_value is CsxInstance:
+						method_args.append(output_value)
 
 				if func_name == "GetType":
 					if receiver == null:
@@ -1070,7 +1078,8 @@ func step() -> bool:
 					eval_stack.append(res)
 					return true
 				elif receiver is CsxHostClass.HostResource:
-					var res = _dispatch_resource_method(receiver as CsxHostClass.HostResource, func_name, method_args)
+					var resource_args := args.slice(1) if func_name == "GetVolume" else method_args
+					var res = _dispatch_resource_method(receiver as CsxHostClass.HostResource, func_name, resource_args)
 					eval_stack.append(res)
 					return true
 				elif receiver is CsxHostClass.HostToneFilter:
@@ -1475,13 +1484,39 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 			if args.size() > 0:
 				spr.attach_image(args[0])
 			return 0
+		"AttachToneFilter":
+			var filter: Variant = args[0] if not args.is_empty() else null
+			return spr.attach_tone_filter(filter as CsxHostClass.HostToneFilter) if filter is CsxHostClass.HostToneFilter else -1
+		"BeginAnimation":
+			return spr.begin_animation(
+				_to_int(args[0]) if args.size() > 0 else 1,
+				_to_int(args[1]) if args.size() > 1 else 0,
+				_to_int(args[2]) if args.size() > 2 else -1,
+				_to_int(args[3]) if args.size() > 3 else 0,
+				_to_int(args[4]) if args.size() > 4 else -1
+			)
+		"EndAnimation":
+			return spr.end_animation()
 		"SetVisible":
 			if args.size() > 0:
 				spr.set_visible(_to_int(args[0]))
 			return 0
 		"SetTransparency":
-			if args.size() > 0:
-				spr.set_transparency(_to_int(args[0]))
+			if not args.is_empty():
+				var item := spr.find_form_item(str(args[1])) if args.size() > 1 else spr
+				if item != null:
+					item.set_transparency(_to_int(args[0]))
+			return 0
+		"CheckButton":
+			if args.size() >= 2:
+				var button := spr.find_form_item(str(args[0]))
+				if button != null and button.is_button:
+					button.fields["checked"] = is_truthy(args[1])
+					button.set_button_state("pushed" if button.fields["checked"] else "normal")
+			return 0
+		"SetSpriteImage":
+			if args.size() >= 2:
+				return 1 if spr.set_form_image(str(args[0]), str(args[1])) else 0
 			return 0
 		"SetBezierCurve":
 			spr.activation_curves = [[], [], []]
@@ -1503,6 +1538,17 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 			if args.size() > 0:
 				spr.set_blending_envelope(_to_int(args[0]))
 			return 0
+		"SetBlendDegree":
+			spr.blending = _to_int(args[0]) if not args.is_empty() else 0
+			return 0
+		"SetEffectParameter":
+			return spr.set_effect_parameter(args[0] if not args.is_empty() else null, args[1] if args.size() > 1 else null)
+		"ModifyAnimationFlags":
+			var add_flags := _to_int(args[0]) if not args.is_empty() else 0
+			var remove_flags := _to_int(args[1]) if args.size() > 1 else 0
+			return spr.modify_animation_flags(add_flags, remove_flags)
+		"GetAnimationFlags":
+			return host.sprite_animation_flags if host != null else 0
 		"BeginActivation":
 			if args.size() > 0:
 				# Blocking entry points cannot present intermediate frames.
@@ -1544,6 +1590,10 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 			var w := _to_int(args[1]) if args.size() > 1 else 0
 			var h := _to_int(args[2]) if args.size() > 2 else 0
 			return spr.create_sprite(fmt, w, h)
+		"CreateMessage":
+			var message_width := _to_int(args[0]) if args.size() > 0 else 0
+			var message_height := _to_int(args[1]) if args.size() > 1 else 0
+			return spr.create_message(message_width, message_height)
 		"SetBackColor":
 			var rgb := _to_int(args[0]) if args.size() > 0 else 0
 			var en := is_truthy(args[1]) if args.size() > 1 else false
@@ -1602,10 +1652,55 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 			info.set_field("nImageWidth", w)
 			info.set_field("nImageHeight", h)
 			return info
+		"SetSpriteText":
+			var item_id := str(args[0]) if args.size() > 0 else ""
+			var text_value := str(args[1]) if args.size() > 1 else ""
+			return spr.set_sprite_text(item_id, text_value)
+		"GetSpriteText":
+			return spr.get_sprite_text(str(args[0]) if not args.is_empty() else "")
+		"GetHorzScrollPos":
+			return spr.get_scroll_position(str(args[0]) if not args.is_empty() else "", "horz")
+		"SetHorzScrollPos":
+			var position := _to_int(args[0]) if args.size() > 0 else 0
+			var item_id := str(args[1]) if args.size() > 1 else ""
+			return spr.set_scroll_position(position, item_id, "horz")
+		"SetHorzScrollRange":
+			var range_value := _to_int(args[0]) if args.size() > 0 else 0
+			var item_id := str(args[1]) if args.size() > 1 else ""
+			return spr.set_scroll_range(range_value, item_id, "horz")
+		"GetVertScrollPos":
+			return spr.get_scroll_position(str(args[0]) if not args.is_empty() else "", "vert")
+		"SetVertScrollPos":
+			var position := _to_int(args[0]) if args.size() > 0 else 0
+			var item_id := str(args[1]) if args.size() > 1 else ""
+			return spr.set_scroll_position(position, item_id, "vert")
+		"SetVertScrollRange":
+			var range_value := _to_int(args[0]) if args.size() > 0 else 0
+			var item_id := str(args[1]) if args.size() > 1 else ""
+			return spr.set_scroll_range(range_value, item_id, "vert")
+		"GetRectangle":
+			var rect: Variant = args[0] if not args.is_empty() else null
+			if rect is CsxInstance and rect.type_name == "Rect":
+				var bounds := spr.get_sprite_rect()
+				(rect as CsxInstance).set_field("left", floori(bounds.position.x))
+				(rect as CsxInstance).set_field("top", floori(bounds.position.y))
+				(rect as CsxInstance).set_field("right", ceili(bounds.end.x))
+				(rect as CsxInstance).set_field("bottom", ceili(bounds.end.y))
+			return rect
+		"GetCursorPos":
+			var point: Variant = args[0] if not args.is_empty() else null
+			_write_cursor_point(point, host.get_cursor_position() if host != null else Vector2i.ZERO)
+			return point if point is CsxInstance else 0
 		"AttachMessageStyle":
 			var res_mgr = args[0] if args.size() > 0 else null
 			var style_id: String = str(args[1]) if args.size() > 1 else ""
 			return spr.attach_message_style(res_mgr, style_id)
+		"SetDefaultMsgSpeed":
+			return spr.set_default_message_speed(_to_int(args[0]) if args.size() > 0 else 0, _to_int(args[1]) if args.size() > 1 else 0, _to_int(args[2], 256) if args.size() > 2 else 256)
+		"IsMessagePending":
+			return -1 if spr.message_pending else 0
+		"FlushMessage":
+			return spr.flush_message()
 		"ClearMessage":
 			return spr.clear_message()
 		"OutputMessage":
@@ -1663,7 +1758,9 @@ func _dispatch_input_filter_method(flt: CsxHostClass.HostInputFilter, method: St
 			var key := int(args[1]) if args.size() > 1 else -1
 			return flt.reset_joy_button_pushing(dev, key)
 		"GetCursorPos":
-			return flt.get_cursor_pos()
+			var point: Variant = args[0] if not args.is_empty() else null
+			_write_cursor_point(point, flt.get_cursor_pos())
+			return point if point is CsxInstance else 0
 		"MoveCursorPos":
 			var x := int(args[0]) if args.size() > 0 else 0
 			var y := int(args[1]) if args.size() > 1 else 0
@@ -1688,10 +1785,20 @@ func _dispatch_tone_filter_method(tf: CsxHostClass.HostToneFilter, method: Strin
 			if args.size() >= 3:
 				tf.set_tone(float(args[0]), float(args[1]), float(args[2]))
 			return 0
+		"SetGeneralTone":
+			if args.size() >= 8:
+				return tf.set_general_tone(
+					_to_int(args[0]), _to_int(args[1]), _to_int(args[2]), _to_int(args[3]),
+					_to_int(args[4]), _to_int(args[5]), _to_int(args[6]), _to_int(args[7]),
+					_to_int(args[8]) if args.size() > 8 else 0
+				)
+			return -1
 		"GetTone":
 			return tf.get_tone()
-		"AttachToneFilter", "CreateToneFilter", "DeleteToneFilter":
+		"CreateToneFilter":
 			return 0
+		"DeleteToneFilter":
+			return tf.delete_tone_filter()
 		_:
 			return 0
 
@@ -1717,6 +1824,11 @@ func _dispatch_resource_method(res: CsxHostClass.HostResource, method: String, a
 			var r_pos := int(args[3]) if args.size() > 3 else -1
 			var flag := int(args[4]) if args.size() > 4 else 0
 			return res.play_from(s_pos, e_pos, rep, r_pos, flag)
+		"SetRewindingPortion":
+			var rewind := _to_int(args[0]) if args.size() > 0 else -1
+			var end := _to_int(args[1]) if args.size() > 1 else -1
+			var repeat := _to_int(args[2]) != 0 if args.size() > 2 else false
+			return res.set_rewinding_portion(rewind, end, repeat)
 		"Stop":
 			return res.stop()
 		"Pause":
@@ -1736,11 +1848,71 @@ func _dispatch_resource_method(res: CsxHostClass.HostResource, method: String, a
 		"GetTotalVolume":
 			var flag := int(args[0]) if args.size() > 0 else 0
 			return res.get_total_volume(flag)
+		"GetVolume":
+			return res.get_volume(args[0] if args.size() > 0 else null, args[1] if args.size() > 1 else null)
+		"SetVolumeEnvelope":
+			return res.set_volume_envelope(args[0] if args.size() > 0 else null, int(args[1]) if args.size() > 1 else 0)
+		"CancelVolumeEnvelope":
+			return res.cancel_volume_envelope()
+		"IsPendingEnvelope":
+			return res.is_volume_envelope_pending()
 		"IsPlaying":
 			return -1 if res.is_playing else 0
 		"GetPlayingPosition":
 			return res.get_playing_position()
+		"GetPixel":
+			return res.get_pixel(_to_int(args[0]) if args.size() > 0 else 0, _to_int(args[1]) if args.size() > 1 else 0)
+		"GetPixelRect":
+			var get_pixels: Variant = args[0] if args.size() > 0 else null
+			if not get_pixels is Array:
+				if res.host != null:
+					res.host.report_unsupported("HostResource.GetPixelRect Pointer buffer")
+				return -1
+			return res.get_pixel_rect(get_pixels, _to_int(args[1]) if args.size() > 1 else 0, _to_int(args[2]) if args.size() > 2 else 0, _to_int(args[3]) if args.size() > 3 else 0, _to_int(args[4]) if args.size() > 4 else 0)
+		"SetPixelRect":
+			var set_pixels: Variant = args[0] if args.size() > 0 else null
+			if not set_pixels is Array:
+				if res.host != null:
+					res.host.report_unsupported("HostResource.SetPixelRect Pointer buffer")
+				return -1
+			return res.set_pixel_rect(set_pixels, _to_int(args[1]) if args.size() > 1 else 0, _to_int(args[2]) if args.size() > 2 else 0, _to_int(args[3]) if args.size() > 3 else 0, _to_int(args[4]) if args.size() > 4 else 0)
+		"GetSoundInfo":
+			if res.audio_stream == null:
+				return null
+			var sound_info := CsxInstance.new("SoundInfo")
+			var stream := res.audio_stream
+			var channels := 2 if stream.stereo else 1
+			var bits_per_sample := 8 if stream.format == AudioStreamWAV.FORMAT_8_BITS else 16
+			var bytes_per_frame := channels * bits_per_sample / 8
+			@warning_ignore("integer_division")
+			var samples := int(stream.data.size() / bytes_per_frame) if bytes_per_frame > 0 else 0
+			sound_info.set_field("nSamplesPerSec", stream.mix_rate)
+			sound_info.set_field("nChannelCount", channels)
+			sound_info.set_field("nBitsPerSample", bits_per_sample)
+			sound_info.set_field("nResourceBytes", stream.data.size())
+			sound_info.set_field("nSampleCount", samples)
+			sound_info.set_field("nRewoundPosition", res.playback_rewind_frame if res.playback_rewind_frame >= 0 else 0)
+			return sound_info
+		"GetInfo", "GetImageInfo":
+			if res.image == null:
+				return null
+			var image_info := CsxInstance.new("ImageInfo")
+			var base_position := CsxInstance.new("Point")
+			base_position.set_field("x", 0)
+			base_position.set_field("y", 0)
+			var local_position := CsxInstance.new("Point")
+			local_position.set_field("x", 0)
+			local_position.set_field("y", 0)
+			image_info.set_field("basePosition", base_position)
+			image_info.set_field("localPosition", local_position)
+			image_info.set_field("width", res.image.get_width())
+			image_info.set_field("height", res.image.get_height())
+			image_info.set_field("nImageWidth", res.image.get_width())
+			image_info.set_field("nImageHeight", res.image.get_height())
+			return image_info
 		_:
+			if res.host != null:
+				res.host.report_unsupported("HostResource.%s" % method)
 			return 0
 
 
@@ -1926,7 +2098,9 @@ func _dispatch_window_method(win: CsxHostClass.HostWindow, method: String, args:
 			var dev := _to_int(args[1]) if args.size() > 1 else 0
 			return win.get_joy_button_pushed(key, dev, _is_polling_sprite_activation())
 		"IsJoyButtonPushing":
-			return 0
+			var key := _to_int(args[0]) if args.size() > 0 else 0
+			var dev := _to_int(args[1]) if args.size() > 1 else 0
+			return win.is_joy_button_pushing(key, dev)
 		"FlushJoyButtonPushed":
 			return win.flush_joy_button_pushed()
 		"UpdateRect":
@@ -1937,7 +2111,9 @@ func _dispatch_window_method(win: CsxHostClass.HostWindow, method: String, args:
 			var flg: int = _to_int(args[0]) if args.size() > 0 else -1
 			return win.flush_command_queue(flg)
 		"GetCursorPos":
-			return Vector2i.ZERO
+			var point: Variant = args[0] if not args.is_empty() else null
+			_write_cursor_point(point, win.host.get_cursor_position() if win.host != null else Vector2i.ZERO)
+			return point if point is CsxInstance else 0
 		_:
 			return 0
 
@@ -2168,3 +2344,9 @@ func resolve_value(v: Variant) -> Variant:
 	if v is CsxRef:
 		return (v as CsxRef).get_value()
 	return v
+
+
+func _write_cursor_point(point: Variant, position: Vector2i) -> void:
+	if point is CsxInstance:
+		(point as CsxInstance).set_field("x", position.x)
+		(point as CsxInstance).set_field("y", position.y)

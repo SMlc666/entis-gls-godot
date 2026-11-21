@@ -1,6 +1,7 @@
 extends "res://tests/smoke_test_base.gd"
 
 const CsxHostClass = preload("res://scripts/csx_host.gd")
+const CsxVMClass = preload("res://scripts/csx_vm.gd")
 
 
 func _initialize() -> void:
@@ -17,8 +18,19 @@ func _run() -> void:
 
 	var bgm: Variant = _resource(host, "BGM07.mio", "bgm")
 	var se: Variant = _resource(host, "SE001.mio", "se")
+	var env_se: Variant = _resource(host, "SE270.mio", "env_se")
+	var voice: Variant = _resource(host, "SR000001.mio", "voice")
 	expect(bgm.play() == 1 and host.bgm_player.playing, "HostResource.play must start the selected BGM player")
 	expect(se.play() == 1 and host.se_player.playing, "HostResource.play must start the selected SE player")
+	expect(se.play(-2, 1) == 1 and se.current_position == 0, "Native Play sentinel -2 and flag 1 must start at the beginning")
+	expect(env_se.play(0, 1) == 1 and host.env_se_player.stream.loop_mode == AudioStreamWAV.LOOP_FORWARD, "Native environment sound Play must retain the channel loop policy")
+	expect(voice.play(-2, 2) == 1 and host.voice_player.stream.loop_mode == AudioStreamWAV.LOOP_DISABLED, "Native voice Play flag 2 must keep one-shot playback")
+	expect(se.play(-2, 3) == 1 and se.play_type == CsxHostClass.AUDIO_PLAY_TYPE_SYSTEM, "Native Play must accept the SDK System category flag")
+	expect(se.play(-2, 4) == -1 and host.last_error.contains("flag=4"), "Unknown native Play flags must be reported instead of ignored")
+	expect(se.play(20, 1) == 1 and se.current_position == 20, "Native Play start positions must use PCM frames")
+	se.stop()
+	env_se.stop()
+	voice.stop()
 	expect(host.bgm_player.stream != bgm.audio_stream, "Playback must use a duplicate of the cached stream")
 	expect(host.bgm_player.stream.loop_mode == AudioStreamWAV.LOOP_FORWARD, "BGM playback must retain the host's looping policy")
 	expect(bgm.audio_stream.loop_mode == AudioStreamWAV.LOOP_DISABLED, "BGM playback must not mutate the shared source stream")
@@ -27,6 +39,31 @@ func _run() -> void:
 
 	expect(bgm.set_volume(0.4, 0.4) == 1, "HostResource.set_volume must report success for an initialized channel")
 	expect(is_equal_approx(host.get_audio_channel_volume("bgm"), 0.4), "HostResource.set_volume must update the matching Godot player")
+	expect(bgm.set_total_volume(CsxHostClass.AUDIO_PLAY_TYPE_MUSIC, 0.5) == 1, "SetTotalVolume must update the SDK Music master volume")
+	expect(is_equal_approx(bgm.get_total_volume(CsxHostClass.AUDIO_PLAY_TYPE_MUSIC), 0.5), "GetTotalVolume must return the selected SDK category master volume")
+	expect(is_equal_approx(host.get_audio_channel_volume("bgm"), 0.2), "Changing a category master must scale currently playing resources of that category")
+	bgm.set_total_volume(CsxHostClass.AUDIO_PLAY_TYPE_MUSIC, 1.0)
+	var volume_out := {"left": 0.0, "right": 0.0}
+	var vm = CsxVMClass.new(host)
+	var volume_result: int = vm._dispatch_resource_method(
+		bgm,
+		"GetVolume",
+		[CsxVMClass.CsxRef.new(volume_out, "left"), CsxVMClass.CsxRef.new(volume_out, "right")]
+	)
+	expect(volume_result == 1 and is_equal_approx(volume_out.left, 0.4) and is_equal_approx(volume_out.right, 0.4), "GetVolume must write both native output references")
+	var sound_info: Variant = vm._dispatch_resource_method(bgm, "GetSoundInfo", [])
+	expect(sound_info is CsxVMClass.CsxInstance and sound_info.get_field("nSamplesPerSec") == 22050 and sound_info.get_field("nChannelCount") == 2, "GetSoundInfo must expose native PCM format metadata")
+	expect(sound_info.get_field("nSampleCount") == 22050 and sound_info.get_field("nResourceBytes") == bgm.audio_stream.data.size(), "GetSoundInfo must report PCM sample and byte counts")
+	var pixel_resource: Variant = _resource(host, "pixel-test.eri", "")
+	pixel_resource.image = Image.create(2, 2, false, Image.FORMAT_RGBA8)
+	pixel_resource.image.set_pixel(0, 0, Color8(0x12, 0x34, 0x56, 0x78))
+	pixel_resource.image.set_pixel(1, 0, Color8(0x9a, 0xbc, 0xde, 0xf0))
+	expect(vm._dispatch_resource_method(pixel_resource, "GetPixel", [0, 0]) == 0x78123456, "GetPixel must expose native 0xAARRGGBB values")
+	var pixel_rect: Array = []
+	expect(vm._dispatch_resource_method(pixel_resource, "GetPixelRect", [pixel_rect, 0, 0, 2, 1]) == 1, "GetPixelRect must fill CSX arrays")
+	expect(pixel_rect == [0x78123456, 0xf09abcde], "GetPixelRect must preserve native pixel order and channel packing")
+	expect(vm._dispatch_resource_method(pixel_resource, "SetPixelRect", [[0x80402010, 0xffabcdef], 0, 1, 2, 1]) == 1, "SetPixelRect must write native packed colors into images")
+	expect(vm._dispatch_resource_method(pixel_resource, "GetPixel", [0, 1]) == 0x80402010 and vm._dispatch_resource_method(pixel_resource, "GetPixel", [1, 1]) == 0xffabcdef, "SetPixelRect writes must round-trip through GetPixel")
 	expect(bgm.pause() == 1 and host.bgm_player.stream_paused, "HostResource.pause must pause the matching player")
 	expect(bgm.restart() == 1 and not host.bgm_player.stream_paused, "HostResource.restart must resume a paused player")
 	expect(se.play_from(0, -1, true) == 1, "HostResource.play_from must start and accept the repeat option")
@@ -35,12 +72,37 @@ func _run() -> void:
 	expect(se.is_repeating, "HostResource must retain the active repeat state for restart")
 
 	se.stop()
-	expect(se.play_from(0, 100, false) == -1, "Unsupported PlayFrom end_pos must be reported and rejected")
-	expect(not host.se_player.playing and host.last_error.contains("未实现"), "Unsupported end_pos must not silently start playback")
-	expect(se.play_from(0, -1, false, 100) == -1, "Unsupported PlayFrom rewind_pos must be reported and rejected")
-	expect(not host.se_player.playing, "Unsupported rewind_pos must not silently start playback")
-	expect(se.play_from(0, -1, false, -1, 1) == -1, "Unsupported PlayFrom flags must be reported and rejected")
-	expect(se.cancel_volume_envelope() == -1 and host.last_error.contains("未实现"), "CancelVolumeEnvelope must not pretend to be implemented")
+	expect(se.play_from(20, 100, false) == 1, "PlayFrom must start a bounded one-shot")
+	expect(host.se_player.stream.data.size() == 100 * 4, "One-shot playback must end after frame 100")
+	expect(se.audio_stream.data.size() == 22050 * 4, "Truncating playback must preserve the source PCM")
+	expect(se.play_from(10, 100, true, 20) == 1, "PlayFrom must support a loop with a distinct intro and rewind point")
+	expect(host.se_player.stream.loop_begin == 20 and host.se_player.stream.loop_end == 100, "WAV loop points must use PCM frames")
+	expect(host.se_player.stream.data.size() == se.audio_stream.data.size(), "Loop playback must keep the full source PCM")
+	expect(se.pause() == 1 and se.restart() == 1, "Pause and resume must keep the custom loop")
+	expect(host.se_player.stream.loop_begin == 20 and host.se_player.stream.loop_end == 100, "Resuming must preserve the loop bounds")
+	expect(se.play_from(100, 100, true, 20) == 0, "An empty playback range must be rejected")
+	expect(host.se_player.stream.loop_begin == 20 and host.se_player.stream.loop_end == 100, "An invalid request must preserve the active loop")
+	expect(se.play_from(0, 100, true, 100) == 0, "Rewind at the end frame must be rejected")
+	se.stop()
+	expect(vm._dispatch_resource_method(se, "SetRewindingPortion", [20, 100, -1]) == 1, "SetRewindingPortion must accept SDK frame bounds and repeat flag")
+	expect(se.play(-2, 1) == 1, "Play must apply a configured rewinding portion")
+	expect(host.se_player.stream.loop_mode == AudioStreamWAV.LOOP_FORWARD and host.se_player.stream.loop_begin == 20 and host.se_player.stream.loop_end == 100, "Configured rewinding bounds must drive native Play looping")
+	se.stop()
+	expect(vm._dispatch_resource_method(se, "SetRewindingPortion", [100, 100, 1]) == 0, "SetRewindingPortion must reject an empty range")
+	expect(host.bgm_player.stream.loop_begin == 0 and host.bgm_player.stream.loop_end == 22050, "Default loop must cover the whole track")
+	se.stop()
+	expect(se.play_from(0, -1, false, -1, 1) == 1 and se.play_type == CsxHostClass.AUDIO_PLAY_TYPE_SOUND, "PlayFrom must accept the SDK Sound category flag")
+	expect(se.play_from(0, -1, false, -1, 4) == -1, "Unknown PlayFrom category flags must be reported and rejected")
+	var volume_curve: Variant = _linear_volume_curve(0.0, 0.8)
+	expect(se.set_volume_envelope(volume_curve, 1000) == 1, "SetVolumeEnvelope must accept a native Bezier2D curve")
+	expect(se.is_volume_envelope_pending() == -1, "A timed volume envelope must report as pending")
+	host.advance_audio_envelopes(0.5)
+	expect(is_equal_approx(host.get_audio_channel_volume("se"), 0.4), "The native Bezier volume envelope must interpolate over elapsed time")
+	expect(se.cancel_volume_envelope() == 0 and se.is_volume_envelope_pending() == 0, "CancelVolumeEnvelope must stop the active envelope")
+	expect(is_equal_approx(host.get_audio_channel_volume("se"), 0.4), "CancelVolumeEnvelope must hold the current volume")
+	expect(se.set_volume_envelope(volume_curve, 100) == 1, "A new envelope must replace the cancelled envelope")
+	host.advance_audio_envelopes(0.1)
+	expect(se.is_volume_envelope_pending() == 0 and is_equal_approx(host.get_audio_channel_volume("se"), 0.8), "A completed envelope must reach its endpoint and clear its pending state")
 
 	var volume_before_asymmetric_request := host.get_audio_channel_volume("se")
 	expect(se.set_volume(0.2, 0.8) == -1, "Asymmetric stereo volume must be explicitly unsupported")
@@ -63,8 +125,17 @@ func _run() -> void:
 	expect(host.se_player.playing, "Stopping BGM must not stop the SE player")
 	expect(se.stop() == 1 and not host.se_player.playing, "HostResource.stop must stop the selected SE player")
 
-	print("PASS HostResource audio routing, play_from limits, pause/resume, volume, and stop contract")
-	quit(0)
+	expect(se.play_from(2205, 4410, false) == 1, "A one-shot must play from a nonzero frame")
+	await create_timer(0.35).timeout
+	expect(not host.se_player.playing, "A bounded one-shot must finish before the original file ends")
+	expect(se.play_from(0, 2205, true, 1102) == 1, "A short intro and loop must play")
+	await create_timer(0.35).timeout
+	expect(host.se_player.playing, "Repeating playback must continue past its first end frame")
+	var playback_frame: int = se.get_playing_position()
+	expect(playback_frame >= 1102 and playback_frame <= 2205, "The mixer must wrap to the rewind frame, not the intro")
+	se.stop()
+
+	finish_success("PASS HostResource audio routing, PCM playback ranges, pause/resume, volume, and stop contract")
 
 
 func _new_player(player_name: String) -> AudioStreamPlayer:
@@ -90,3 +161,17 @@ func _silence_stream() -> AudioStreamWAV:
 	silence.resize(22050 * 2 * 2)
 	stream.data = silence
 	return stream
+
+
+func _linear_volume_curve(start_volume: float, end_volume: float) -> Variant:
+	var curve = CsxVMClass.CsxInstance.new("Bezier2D")
+	var points: Array = []
+	for step in range(4):
+		var point = CsxVMClass.CsxInstance.new("Point")
+		var t := float(step) / 3.0
+		var value := lerpf(start_volume, end_volume, t)
+		point.set_field("x", value)
+		point.set_field("y", value)
+		points.append(point)
+	curve.set_field("parent", points)
+	return curve
