@@ -68,13 +68,20 @@ func _initialize() -> void:
 	if result.get("video_frames_decoded", true):
 		_fail("decoder must not claim that ERI Layer-3 frames are decoded")
 		return
-	if not str(result.get("video_error", "")).contains("Layer-3"):
-		_fail("undecoded video boundary must identify ERI Layer-3")
+	if not result.get("first_frame_entropy_decoded", false):
+		_fail("first I-frame entropy decode failed: %s" % result.get("video_error", "missing error"))
+		return
+	if int(result.get("first_frame_coefficient_count", -1)) != 729600:
+		_fail("expected 729600 decoded first-frame coefficients, got %s" % result.get("first_frame_coefficient_count", "missing"))
+		return
+	var coefficients: PackedByteArray = result.get("first_frame_coefficients", PackedByteArray())
+	if coefficients.size() != 729600:
+		_fail("first I-frame coefficient payload has wrong size: %d" % coefficients.size())
 		return
 	if FileAccess.get_file_as_bytes(movie_path) != original:
 		_fail("decode_mei modified the original movie")
 		return
-	print("PASS MEI container/audio decode; ERI video-frame boundary is explicit")
+	print("PASS MEI container/audio decode and first I-frame ERINA coefficient decode")
 	quit(0)
 
 

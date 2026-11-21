@@ -2,6 +2,8 @@
 // In-process native codec shared library for Godot Yosuga no Sora port.
 #include <cstddef>
 #include <cstdint>
+#include <algorithm>
+#include <array>
 #include <cstring>
 #include <limits>
 #include <string>
@@ -12,6 +14,7 @@
 #include "dec/entis/common/erisan_decoder.h"
 #include "dec/entis/eri_image_decoder.h"
 #include "dec/entis/mio_audio_decoder.h"
+#include "dec/entis/common/huffman_tree.h"
 #include "io/file.h"
 #include "io/memory_byte_stream.h"
 #include "logger.h"
@@ -51,6 +54,7 @@ struct SectionRange {
 
 struct MeiFrameRecord {
     std::string record_type;
+    size_t offset = 0;
     size_t payload_size = 0;
     uint8_t eri_version = 0;
     uint8_t operation_flags = 0;
@@ -58,6 +62,160 @@ struct MeiFrameRecord {
     uint8_t bit_count = 0;
     char picture_type = 'P';
 };
+
+class MeiBitReader {
+public:
+    MeiBitReader(const uint8_t *bytes, size_t size) : bytes_(bytes), size_(size) {}
+    bool read(unsigned count, uint32_t &value) {
+        if (count > 32 || count > remaining()) return false;
+        value = 0;
+        for (unsigned i = 0; i < count; ++i) {
+            value = (value << 1) | ((bytes_[bit_ >> 3] >> (7 - (bit_ & 7))) & 1);
+            ++bit_;
+        }
+        return true;
+    }
+    size_t remaining() const { return size_ * 8 - bit_; }
+private:
+    const uint8_t *bytes_;
+    size_t size_;
+    size_t bit_ = 0;
+};
+
+bool mei_gamma(MeiBitReader &bits, uint32_t &value) {
+    uint32_t bit = 0;
+    if (!bits.read(1, bit)) return false;
+    if (!bit) { value = 1; return true; }
+    uint32_t base = 2, code = 0;
+    for (unsigned n = 0; n < 31; ++n) {
+        if (!bits.read(1, bit)) return false;
+        code = (code << 1) | bit;
+        if (!bits.read(1, bit)) return false;
+        if (!bit) { value = code + base; return true; }
+        if (base > (UINT32_MAX >> 1)) return false;
+        base <<= 1;
+    }
+    return false;
+}
+
+bool mei_huffman(MeiBitReader &bits, au::dec::entis::common::HuffmanTree &tree,
+    bool gamma_escape, int &value) {
+    using namespace au::dec::entis::common;
+    if (tree.escape != HuffmanNodes::Null) {
+        int entry = HuffmanNodes::Root;
+        uint32_t child = tree.nodes[entry].code;
+        while (!(child & HuffmanFlags::Code)) {
+            uint32_t branch = 0;
+            if (!bits.read(1, branch)) return false;
+            entry = static_cast<int>(child) + static_cast<int>(branch);
+            child = tree.nodes[entry].code;
+        }
+        if (tree.nodes[HuffmanNodes::Root].weight < 0x3fff)
+            tree.increase_occurrences(entry);
+        const uint32_t code = child & ~HuffmanFlags::Code;
+        if (code != HuffmanFlags::Escape) { value = static_cast<int>(code); return true; }
+    }
+    uint32_t raw = 0;
+    if (gamma_escape) {
+        if (!mei_gamma(bits, raw)) return false;
+    } else if (!bits.read(8, raw)) return false;
+    value = static_cast<int>(raw);
+    tree.add_new_entry(value);
+    return true;
+}
+
+bool decode_mei_first_frame_coefficients(const uint8_t *frame, size_t frame_size,
+    size_t width, size_t height, std::vector<int8_t> &coefficients, std::string &error) {
+    using namespace au::dec::entis::common;
+    if (!frame || frame_size < 4 || frame[0] != 0x28 || frame[1] != 0
+        || frame[2] != 1 || frame[3] != 8 || width == 0 || height == 0) {
+        error = "First MEI image frame has unsupported ERI parameters.";
+        return false;
+    }
+    MeiBitReader bits(frame + 4, frame_size - 4);
+    uint32_t reserved = 0;
+    if (!bits.read(1, reserved) || reserved != 0) {
+        error = "First MEI image frame has invalid reserved bits.";
+        return false;
+    }
+    const size_t block_width = (width + 15) / 16;
+    const size_t block_height = (height + 15) / 16;
+    if (block_width > SIZE_MAX / block_height / 384) {
+        error = "First MEI frame coefficient count exceeds bounds.";
+        return false;
+    }
+    const size_t total = block_width * block_height * 384;
+    HuffmanTree initial_tree;
+    std::array<uint8_t, 128> quantization{};
+    for (uint8_t &item : quantization) {
+        int symbol = 0;
+        if (!mei_huffman(bits, initial_tree, false, symbol) || symbol < 0 || symbol > 255) {
+            error = "First MEI frame quantization table is truncated.";
+            return false;
+        }
+        item = static_cast<uint8_t>(symbol);
+    }
+    const size_t op_count = block_width * block_height * 2;
+    std::vector<int8_t> operations(op_count);
+    uint32_t zero_flag = 0;
+    if (!bits.read(1, zero_flag)) {
+        error = "First MEI frame operation table is truncated.";
+        return false;
+    }
+    bool zero_run = zero_flag == 0;
+    size_t cursor = 0;
+    while (cursor < operations.size()) {
+        uint32_t run = 0;
+        if (!mei_gamma(bits, run) || run == 0) {
+            error = "First MEI frame operation run is invalid.";
+            return false;
+        }
+        const size_t count = std::min<size_t>(run, operations.size() - cursor);
+        if (!zero_run) {
+            for (size_t i = 0; i < count; ++i) {
+                uint32_t sign = 0, magnitude = 0;
+                if (!bits.read(1, sign) || !mei_gamma(bits, magnitude) || magnitude == 0 || magnitude > 128) {
+                    error = "First MEI frame operation value is invalid.";
+                    return false;
+                }
+                operations[cursor++] = static_cast<int8_t>(sign ? -static_cast<int>(magnitude) : static_cast<int>(magnitude));
+            }
+        } else {
+            std::fill_n(operations.begin() + static_cast<std::ptrdiff_t>(cursor), count, 0);
+            cursor += count;
+        }
+        zero_run = !zero_run;
+    }
+    // ERINA's image stream has independent adaptive trees from the initial table.
+    HuffmanTree data_tree, length_tree;
+    coefficients.clear();
+    coefficients.reserve(total);
+    size_t pending_zeros = 0;
+    while (coefficients.size() < total) {
+        if (pending_zeros) {
+            const size_t count = std::min(pending_zeros, total - coefficients.size());
+            coefficients.insert(coefficients.end(), count, 0);
+            pending_zeros -= count;
+            continue;
+        }
+        int symbol = 0;
+        if (!mei_huffman(bits, data_tree, false, symbol) || symbol < 0 || symbol > 255) {
+            error = "First MEI frame ERINA coefficient stream is truncated.";
+            return false;
+        }
+        if (symbol == 0) {
+            int run = 0;
+            if (!mei_huffman(bits, length_tree, true, run) || run <= 0 || static_cast<size_t>(run) > total) {
+                error = "First MEI frame ERINA zero run is invalid.";
+                return false;
+            }
+            pending_zeros = static_cast<size_t>(run);
+        } else {
+            coefficients.push_back(static_cast<int8_t>(static_cast<uint8_t>(symbol)));
+        }
+    }
+    return true;
+}
 
 uint32_t read_u32_le(const uint8_t *data) {
     return static_cast<uint32_t>(data[0])
@@ -293,6 +451,7 @@ bool validate_mei_size(
         }
         MeiFrameRecord record;
         record.record_type = section.name;
+        record.offset = section.offset;
         record.payload_size = section.size;
         record.eri_version = frame[0];
         record.operation_flags = frame[1];
@@ -626,6 +785,12 @@ Dictionary YzkCodec::decode_mei(const PackedByteArray &input) const {
             || audio.channel_count != channels || audio.sample_rate != sample_rate
             || audio.bits_per_sample != bits_per_sample)
             return codec_failure("Decoded MEI audio is outside the supported bounds.");
+        std::vector<int8_t> first_frame_coefficients;
+        std::string video_error;
+        const MeiFrameRecord &first_frame = frame_records.front();
+        const bool first_frame_entropy_decoded = decode_mei_first_frame_coefficients(
+            input.ptr() + first_frame.offset, first_frame.payload_size,
+            width, height, first_frame_coefficients, video_error);
         PackedByteArray samples;
         samples.resize(static_cast<int64_t>(expected_audio_bytes));
         std::memcpy(samples.ptrw(), audio.samples.get<const uint8_t>(), static_cast<size_t>(expected_audio_bytes));
@@ -657,8 +822,18 @@ Dictionary YzkCodec::decode_mei(const PackedByteArray &input) const {
         result["sample_rate"] = static_cast<int64_t>(sample_rate);
         result["bits_per_sample"] = static_cast<int64_t>(bits_per_sample);
         result["audio_data"] = samples;
+        result["first_frame_entropy_decoded"] = first_frame_entropy_decoded;
+        result["first_frame_coefficient_count"] = static_cast<int64_t>(first_frame_coefficients.size());
+        if (first_frame_entropy_decoded) {
+            PackedByteArray coefficient_bytes;
+            coefficient_bytes.resize(static_cast<int64_t>(first_frame_coefficients.size()));
+            std::memcpy(coefficient_bytes.ptrw(), first_frame_coefficients.data(), first_frame_coefficients.size());
+            result["first_frame_coefficients"] = coefficient_bytes;
+        }
         result["video_frames_decoded"] = false;
-        result["video_error"] = "MEI ERI Layer-3 frame decoding is not implemented yet.";
+        result["video_error"] = first_frame_entropy_decoded
+            ? "First I-frame entropy decoded; inverse quantization, transforms, color reconstruction, and remaining frames are pending."
+            : String::utf8(video_error.c_str());
         return result;
     } catch (const std::exception &error) {
         return codec_failure(error.what());
