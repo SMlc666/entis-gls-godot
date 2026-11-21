@@ -44,6 +44,10 @@ func _run() -> void:
 		if int(prepared[index].get("index", -1)) != expected_group_indices[index]:
 			_fail("native MEI playback reordered frame %d incorrectly" % index)
 			return
+	player.call("_process_mei_movie", float(player.get("mei_movie_frame_duration")) * 3.1)
+	if player.get("mei_movie_displayed_index") != 3:
+		_fail("native MEI player did not skip overdue frames to catch up with its media clock")
+		return
 	for _frame: int in range(8):
 		await process_frame
 	print("MEI first two GOPs and 8 display ticks: %d ms" % ((Time.get_ticks_usec() - playback_start_usec) / 1000))

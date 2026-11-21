@@ -1208,15 +1208,20 @@ func _process_mei_movie(delta: float) -> void:
 	mei_movie_elapsed += delta
 	if mei_movie_elapsed < mei_movie_frame_duration:
 		return
+	var due_frames := maxi(1, int(floor(mei_movie_elapsed / mei_movie_frame_duration)))
+	due_frames = mini(due_frames, mei_movie_frames.size())
 	mei_movie_elapsed = fposmod(mei_movie_elapsed, mei_movie_frame_duration)
-	if mei_movie_queue.is_empty() and not _prepare_next_mei_group():
-		if mei_movie_loop:
-			_restart_mei_movie()
-		else:
-			_finish_mei_movie()
-		return
-	var frame: Dictionary = mei_movie_queue.pop_front()
-	_show_mei_frame(frame["rgba"], int(frame["width"]), int(frame["height"]), int(frame["index"]))
+	for _step: int in range(due_frames):
+		if mei_movie_queue.is_empty() and not _prepare_next_mei_group():
+			if mei_movie_loop:
+				_restart_mei_movie()
+			else:
+				_finish_mei_movie()
+				return
+		if mei_movie_queue.is_empty():
+			return
+		var frame: Dictionary = mei_movie_queue.pop_front()
+		_show_mei_frame(frame["rgba"], int(frame["width"]), int(frame["height"]), int(frame["index"]))
 
 
 func _prepare_next_mei_group() -> bool:
