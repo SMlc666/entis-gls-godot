@@ -687,6 +687,71 @@ class HostToneFilter extends RefCounted:
 		tone_texture = null
 		return 0
 
+	func morphing_filter(filter1: HostToneFilter, filter2: HostToneFilter, degree: int) -> int:
+		if filter1 == null or filter2 == null:
+			return -1
+		var amount := clampi(degree, 0, 256)
+		var source_weight := _tone_table(-amount, 0)
+		var target_weight := _tone_table(amount - 256, 0)
+		if source_weight.is_empty() or target_weight.is_empty():
+			return -1
+		for channel in ["red_table", "green_table", "blue_table", "alpha_table"]:
+			var source: PackedByteArray = filter1.get(channel)
+			var target: PackedByteArray = filter2.get(channel)
+			var mixed := PackedByteArray()
+			mixed.resize(256)
+			for i in 256:
+				# Entis stores the sum in a byte, preserving its 8-bit wrap semantics.
+				mixed[i] = (source_weight[source[i]] + target_weight[target[i]]) & 0xFF
+			set(channel, mixed)
+		tone_flags = filter1.tone_flags
+		tone_texture = null
+		return 0
+
+	func load_filter_file(filename: String) -> int:
+		if host == null or filename.is_empty():
+			return 1
+		var data := PackedByteArray()
+		var local_path := host.game_dir.path_join("system").path_join(filename)
+		if FileAccess.file_exists(local_path):
+			data = FileAccess.get_file_as_bytes(local_path)
+		else:
+			var entry := host.read_vfs_entry("system/".path_join(filename))
+			if not entry.get("ok", false):
+				entry = host.read_vfs_entry(filename)
+			if entry.get("ok", false):
+				data = entry.get("data", PackedByteArray())
+		if data.size() < 80 or data.slice(0, 8) != PackedByteArray([69, 110, 116, 105, 115, 26, 0, 0]):
+			return 1
+		var tables := {"red": PackedByteArray(), "green": PackedByteArray(), "blue": PackedByteArray(), "alpha": PackedByteArray()}
+		var flags := 0
+		var offset := 80
+		while offset + 16 <= data.size():
+			var record_id := data.slice(offset, offset + 8).get_string_from_ascii().strip_edges()
+			var length := data.decode_u64(offset + 8)
+			offset += 16
+			if length > data.size() - offset:
+				return 1
+			var record := data.slice(offset, offset + int(length))
+			if tables.has(record_id):
+				if record.size() < 256:
+					return 1
+				tables[record_id] = record.slice(0, 256)
+			elif record_id == "info":
+				if record.size() >= 4:
+					flags = record.decode_u32(0)
+			offset += int(length)
+		for channel in ["red", "green", "blue", "alpha"]:
+			if tables[channel].size() != 256:
+				return 1
+		red_table = tables["red"]
+		green_table = tables["green"]
+		blue_table = tables["blue"]
+		alpha_table = tables["alpha"]
+		tone_flags = flags
+		tone_texture = null
+		return 0
+
 	func _tone_table(amount: int, mode: int) -> PackedByteArray:
 		var table := PackedByteArray()
 		table.resize(256)

@@ -1830,6 +1830,12 @@ func _dispatch_tone_filter_method(tf: CsxHostClass.HostToneFilter, method: Strin
 					_to_int(args[8]) if args.size() > 8 else 0
 				)
 			return -1
+		"MorphingFilter":
+			if args.size() >= 3 and args[0] is CsxHostClass.HostToneFilter and args[1] is CsxHostClass.HostToneFilter:
+				return tf.morphing_filter(args[0] as CsxHostClass.HostToneFilter, args[1] as CsxHostClass.HostToneFilter, _to_int(args[2]))
+			return -1
+		"LoadFilterFile":
+			return tf.load_filter_file(str(args[0])) if args.size() > 0 else -1
 		"GetTone":
 			return tf.get_tone()
 		"CreateToneFilter":
