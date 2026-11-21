@@ -65,6 +65,12 @@ func _run() -> void:
 	var image_info: Variant = vm._dispatch_resource_method(pixel_resource, "GetInfo", [])
 	expect(image_info is CsxVMClass.CsxInstance and image_info.type_name == "ImageInfo" and image_info.get_field("nImageWidth") == 2 and image_info.get_field("nImageHeight") == 2, "Resource.GetInfo must return complete image dimensions")
 	expect(image_info.get_field("nFormatType") == 0x04000001 and image_info.get_field("nBitsPerPixel") == 32 and image_info.get_field("nFrameCount") == 1 and image_info.get_field("nResourceBytes") == 16, "Resource.GetInfo must report native ARGB frame storage metadata")
+	var info_sprite: Variant = CsxHostClass.HostSprite.new(0, host)
+	info_sprite.image = pixel_resource.image
+	info_sprite.animation_frames.append(pixel_resource.image)
+	info_sprite.size = Vector2i(2, 2)
+	var sprite_info: Variant = vm._dispatch_sprite_method(info_sprite, "GetInfo", [])
+	expect(sprite_info is CsxVMClass.CsxInstance and sprite_info.type_name == "ImageInfo" and sprite_info.get_field("nFormatType") == 0x04000001 and sprite_info.get_field("nBitsPerPixel") == 32 and sprite_info.get_field("nFrameCount") == 1 and sprite_info.get_field("nResourceBytes") == 16, "Sprite.GetInfo must expose native image storage metadata")
 	pixel_resource.image.set_pixel(0, 0, Color8(0x12, 0x34, 0x56, 0x78))
 	pixel_resource.image.set_pixel(1, 0, Color8(0x9a, 0xbc, 0xde, 0xf0))
 	expect(vm._dispatch_resource_method(pixel_resource, "GetPixel", [0, 0]) == 0x78123456, "GetPixel must expose native 0xAARRGGBB values")

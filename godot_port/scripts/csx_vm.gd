@@ -1661,8 +1661,8 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 			info.set_field("nImageHeight", h)
 			info.set_field("nFormatType", 0x04000001) # formatImageARGB from the host RGBA image surface.
 			info.set_field("nBitsPerPixel", 32)
-			info.set_field("nFrameCount", maxi(1, spr.image_frames.size()))
-			info.set_field("nResourceBytes", spr.image.get_data().size() * maxi(1, spr.image_frames.size()) if spr.image != null else w * h * 4)
+			info.set_field("nFrameCount", maxi(1, spr.animation_frames.size()))
+			info.set_field("nResourceBytes", spr.image.get_data().size() * maxi(1, spr.animation_frames.size()) if spr.image != null else w * h * 4)
 			info.set_field("xHotSpot", 0)
 			info.set_field("yHotSpot", 0)
 			return info
