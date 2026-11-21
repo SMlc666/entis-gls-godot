@@ -36,6 +36,7 @@ func _initialize() -> void:
 
 	var calls: Dictionary = {}
 	var callsites: Dictionary = {}
+	var volume_callsites: Dictionary = {}
 	var movie_callsites: Dictionary = {}
 	var effect_literals: Dictionary = {}
 	var cursor := 0
@@ -62,6 +63,8 @@ func _initialize() -> void:
 			calls[key] = int(calls.get(key, 0)) + 1
 			if method_name == "SetEffectParameter":
 				callsites[int(instruction["address"])] = _function_owner(vm.functions, int(instruction["address"]))
+			if method_name in ["SetVolume", "SetVolumeEnvelope", "GetVolume", "SetRewindingPortion"]:
+				volume_callsites[int(instruction["address"])] = "%s mode=%d" % [_function_owner(vm.functions, int(instruction["address"])), mode]
 			if method_name in ["OpenMovie", "PlayMovie", "IsMoviePlaying", "StopMovie", "CloseMovie"]:
 				movie_callsites[int(instruction["address"])] = "%s mode=%d" % [_function_owner(vm.functions, int(instruction["address"])), mode]
 		cursor = int(batch.get("next_address", cursor))
@@ -81,6 +84,11 @@ func _initialize() -> void:
 	print("SetEffectParameter callsites:")
 	for address in site_addresses:
 		print("  0x%X %s" % [address, callsites[address]])
+	var volume_addresses: Array = volume_callsites.keys()
+	volume_addresses.sort()
+	print("Audio parameter callsites:")
+	for address in volume_addresses:
+		print("  0x%X %s" % [address, volume_callsites[address]])
 	var literal_names: Array = effect_literals.keys()
 	literal_names.sort()
 	print("Effect type literals:")
