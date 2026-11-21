@@ -281,6 +281,7 @@ var mei_movie_frames: Array = []
 var mei_movie_queue: Array[Dictionary] = []
 var mei_movie_anchor_rgba := PackedByteArray()
 var mei_movie_first_rgba := PackedByteArray()
+var mei_movie_first_reference_rgba := PackedByteArray()
 var mei_movie_anchor_index := -1
 var mei_movie_displayed_index := -1
 var mei_movie_frame_duration := 1.0 / 30.0
@@ -290,6 +291,7 @@ var mei_movie_elapsed := 0.0
 var mei_movie_active := false
 var mei_movie_loop := false
 var mei_movie_no_skip_frame := false
+var mei_movie_decode_flags := 0
 
 # Audio Nodes
 var bgm_player: AudioStreamPlayer
@@ -1184,7 +1186,8 @@ func _open_native_mei_movie(path: String) -> bool:
 		return false
 	var frames: Variant = decoded.get("video_frame_info", [])
 	var first_rgba: Variant = decoded.get("first_frame_rgba", PackedByteArray())
-	if not frames is Array or frames.is_empty() or not first_rgba is PackedByteArray:
+	var first_reference_rgba: Variant = decoded.get("first_frame_reference_rgba", first_rgba)
+	if not frames is Array or frames.is_empty() or not first_rgba is PackedByteArray or not first_reference_rgba is PackedByteArray:
 		push_warning("MEI file has no decoded initial frame: %s" % path)
 		return false
 	if str(frames[0].get("picture_type", "")) != "I":
@@ -1198,7 +1201,8 @@ func _open_native_mei_movie(path: String) -> bool:
 	mei_movie_width = int(decoded.get("width", 0))
 	mei_movie_height = int(decoded.get("height", 0))
 	mei_movie_first_rgba = first_rgba
-	mei_movie_anchor_rgba = first_rgba
+	mei_movie_first_reference_rgba = first_reference_rgba
+	mei_movie_anchor_rgba = first_reference_rgba
 	mei_movie_anchor_index = 0
 	mei_movie_queue.clear()
 	var frame_count := int(decoded.get("frame_count", frames.size()))
@@ -1231,19 +1235,28 @@ func _start_native_mei_movie(path: String, play_mode: int = 0) -> bool:
 	if not _open_native_mei_movie(path):
 		return false
 	var decoded: Dictionary = mei_movie_decoded
-	var first_rgba: PackedByteArray = decoded.get("first_frame_rgba", mei_movie_first_rgba)
 	var frame_count := int(decoded.get("frame_count", mei_movie_frames.size()))
 	var duration_ms := int(decoded.get("duration_ms", 0))
 	if video_player != null:
 		video_player.stop()
 		video_player.visible = false
-	mei_movie_anchor_rgba = first_rgba
 	mei_movie_anchor_index = 0
 	mei_movie_queue.clear()
 	mei_movie_elapsed = 0.0
 	mei_movie_active = true
 	mei_movie_loop = (play_mode & 0x02) != 0
 	mei_movie_no_skip_frame = (play_mode & 0x04) != 0
+	mei_movie_decode_flags = play_mode & 0x0c00
+	var first_frame_result: Variant = mei_movie_codec.call("decode_mei_i_frame", mei_movie_bytes, 0, mei_movie_decode_flags)
+	if not first_frame_result is Dictionary or not first_frame_result.get("ok", false):
+		push_error("MEI initial frame decode failed: %s" % [first_frame_result.get("error", "invalid result") if first_frame_result is Dictionary else "invalid result"])
+		_stop_mei_movie()
+		return false
+	var first_rgba: PackedByteArray = first_frame_result.get("rgba", mei_movie_first_rgba)
+	var first_reference_rgba: PackedByteArray = first_frame_result.get("reference_rgba", first_rgba)
+	mei_movie_first_rgba = first_rgba
+	mei_movie_first_reference_rgba = first_reference_rgba
+	mei_movie_anchor_rgba = first_reference_rgba
 	mei_audio_player.play()
 	_show_mei_frame(first_rgba, mei_movie_width, mei_movie_height, 0)
 	mei_video_backdrop.visible = true
@@ -1301,16 +1314,16 @@ func _on_movie_seek_requested(frame_index: int) -> void:
 			break
 	if preceding_i < 0:
 		return
-	var result: Variant = mei_movie_codec.call("decode_mei_i_frame", mei_movie_bytes, preceding_i)
+	var result: Variant = mei_movie_codec.call("decode_mei_i_frame", mei_movie_bytes, preceding_i, mei_movie_decode_flags)
 	if not result is Dictionary or not result.get("ok", false):
 		push_error("MEI seek I-frame %d failed: %s" % [preceding_i, result.get("error", "invalid result") if result is Dictionary else "invalid result"])
 		return
 	mei_movie_queue.clear()
 	mei_movie_anchor_index = preceding_i
-	mei_movie_anchor_rgba = result.get("rgba", PackedByteArray())
+	mei_movie_anchor_rgba = result.get("reference_rgba", result.get("rgba", PackedByteArray()))
 	mei_movie_elapsed = 0.0
 	if target_index == preceding_i:
-		_show_mei_frame(mei_movie_anchor_rgba, mei_movie_width, mei_movie_height, target_index)
+		_show_mei_frame(result.get("rgba", PackedByteArray()), mei_movie_width, mei_movie_height, target_index)
 	else:
 		while mei_movie_anchor_index < target_index:
 			if not _prepare_next_mei_group():
@@ -1348,9 +1361,9 @@ func _prepare_next_mei_group() -> bool:
 	var kind := str(mei_movie_frames[next_anchor_index].get("picture_type", ""))
 	var anchor_result: Variant
 	if kind == "I":
-		anchor_result = mei_movie_codec.call("decode_mei_i_frame", mei_movie_bytes, next_anchor_index)
+		anchor_result = mei_movie_codec.call("decode_mei_i_frame", mei_movie_bytes, next_anchor_index, mei_movie_decode_flags)
 	elif kind == "P":
-		anchor_result = mei_movie_codec.call("decode_mei_p_frame", mei_movie_bytes, next_anchor_index, mei_movie_anchor_rgba)
+		anchor_result = mei_movie_codec.call("decode_mei_p_frame", mei_movie_bytes, next_anchor_index, mei_movie_anchor_rgba, mei_movie_decode_flags)
 	else:
 		push_error("MEI stream has an unsupported reference frame at %d" % next_anchor_index)
 		return false
@@ -1358,17 +1371,18 @@ func _prepare_next_mei_group() -> bool:
 		push_error("MEI anchor frame %d failed: %s" % [next_anchor_index, anchor_result.get("error", "invalid result") if anchor_result is Dictionary else "invalid result"])
 		return false
 	var next_rgba: PackedByteArray = anchor_result.get("rgba", PackedByteArray())
+	var next_reference_rgba: PackedByteArray = anchor_result.get("reference_rgba", next_rgba)
 	var width := int(anchor_result.get("width", 0))
 	var height := int(anchor_result.get("height", 0))
 	for b_index: int in b_indices:
-		var b_result: Variant = mei_movie_codec.call("decode_mei_b_frame", mei_movie_bytes, b_index, mei_movie_anchor_rgba, next_rgba)
+		var b_result: Variant = mei_movie_codec.call("decode_mei_b_frame", mei_movie_bytes, b_index, mei_movie_anchor_rgba, next_reference_rgba, mei_movie_decode_flags)
 		if not b_result is Dictionary or not b_result.get("ok", false):
 			push_error("MEI B-frame %d failed: %s" % [b_index, b_result.get("error", "invalid result") if b_result is Dictionary else "invalid result"])
 			return false
 		mei_movie_queue.append({"rgba": b_result["rgba"], "width": width, "height": height, "index": b_index})
 	mei_movie_queue.append({"rgba": next_rgba, "width": width, "height": height, "index": next_anchor_index})
 	mei_movie_anchor_index = next_anchor_index
-	mei_movie_anchor_rgba = next_rgba
+	mei_movie_anchor_rgba = next_reference_rgba
 	return true
 
 
@@ -1412,10 +1426,12 @@ func _close_native_mei_movie() -> void:
 	mei_movie_queue.clear()
 	mei_movie_anchor_rgba = PackedByteArray()
 	mei_movie_first_rgba = PackedByteArray()
+	mei_movie_first_reference_rgba = PackedByteArray()
 	mei_movie_anchor_index = -1
 	mei_movie_displayed_index = -1
 	mei_movie_width = 0
 	mei_movie_height = 0
+	mei_movie_decode_flags = 0
 	if host != null:
 		host.movie_opened = false
 		host.movie_current_frame = -1
@@ -1431,7 +1447,7 @@ func _finish_mei_movie() -> void:
 func _restart_mei_movie() -> void:
 	mei_movie_queue.clear()
 	mei_movie_anchor_index = 0
-	mei_movie_anchor_rgba = mei_movie_first_rgba
+	mei_movie_anchor_rgba = mei_movie_first_reference_rgba
 	mei_movie_elapsed = 0.0
 	_show_mei_frame(mei_movie_first_rgba, mei_movie_width, mei_movie_height, 0)
 	if mei_audio_player != null and mei_audio_player.stream != null:

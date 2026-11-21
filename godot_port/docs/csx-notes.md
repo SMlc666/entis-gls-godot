@@ -47,7 +47,7 @@
 7. **原生 MEI 视频播放（Movie Playback）**：
    - `tools/yzk_codec.cc` 在进程内解码 Entis MEI 音频及 ERI 图像帧，处理 I/P/B 帧、半像素运动矢量和重排；原始 `.mei` 文件只读。`opening.mei` 实测为 800x600、声明 2521 帧/126 秒，包含 2520 条帧记录（582 I、259 P、1679 B），音轨为 44.1 kHz 立体声 16 位 PCM。
    - `MovieSprite` 已实现打开并查询帧数/时长、播放、随机 seek、停止后保留解码资源、关闭释放资源；播放模式支持 SDK 的 loop、no-skip-frame 与 no-loop-filter 标志。视频和音频按媒体时钟播放，慢帧时普通模式追时钟，no-skip-frame 模式逐帧清空积压。
-   - 对照 Entis SDK 的 `eriImageFilterLoop421` 移植了 operation-table `0x08` 的局部 4-2-1 滤波，并按差分帧的运动标志只滤帧内块；真实 MEI 样本的隔离副本验证了启用滤波后的像素变化。`opening.mei` 原始帧标志为 0、1、3，且游戏调用带 `NoLoopFilter`，所以原片播放保持未滤波结果。SDK 的全帧 `0x04`/`UseLoopFilter` 跨帧滤波缓冲仍未移植，其他 MEI 内容尚未逐像素覆盖。
+   - 对照 Entis SDK 的 `eriImageFilterLoop421` 移植了 operation-table `0x08` 的局部滤波、`0x04` 的全帧滤波，以及 `UseLoopFilter` 强制全帧滤波和 `NoLoopFilter` 优先关闭的播放标志。滤波后显示像素存于独立结果，P/B 预测继续使用未滤波参考帧。原版 `opening.mei` 的 operation table 为 0、1、3，游戏调用带 `NoLoopFilter`，因此原片保持未滤波结果。测试以原片隔离副本核对 I/P/B、标志优先级与参考帧保持；其他 MEI 内容仍未逐像素覆盖。
    - 若找不到原生 `.mei`，仍尝试 `VideoStreamPlayer` 播放 `.ogv`；没有可用视频时安全跳过。`mei_codec_smoke.gd`、`mei_playback_smoke.gd` 和 `bustup_smoke.gd` 使用真实游戏资源验证解码、帧序、模式和生命周期；集成测试会核对 CSX/NOA 原始文件未改变。
 
 8. **CG 鉴赏与全屏差分查看器（Appreciation / Gallery）**：

@@ -128,6 +128,37 @@ func _initialize() -> void:
 	if filtered_byte_count == 0:
 		_fail("SDK local 4-2-1 frame flag did not filter the second I-frame")
 		return
+	if _changed_byte_count(second_pixels, filtered_i.get("reference_rgba", PackedByteArray())) != 0:
+		_fail("local filtering changed the raw I-frame prediction reference")
+		return
+	var full_filtered_mei := original.duplicate()
+	full_filtered_mei[second_image_header + 1] |= 0x04
+	var full_filtered_i: Variant = codec.call("decode_mei_i_frame", full_filtered_mei, second_i_index)
+	if not full_filtered_i is Dictionary or not full_filtered_i.get("ok", false):
+		_fail("SDK full-frame 4-2-1 operation-table decode failed")
+		return
+	if _changed_byte_count(second_pixels, full_filtered_i.get("rgba", PackedByteArray())) == 0:
+		_fail("SDK full-frame 0x04 operation-table flag did not filter the I-frame")
+		return
+	var forced_filtered_i: Variant = codec.call("decode_mei_i_frame", original, second_i_index, 0x0800)
+	if not forced_filtered_i is Dictionary or not forced_filtered_i.get("ok", false):
+		_fail("SDK UseLoopFilter mode failed on an I-frame")
+		return
+	if _changed_byte_count(second_pixels, forced_filtered_i.get("rgba", PackedByteArray())) == 0:
+		_fail("SDK UseLoopFilter did not force full-frame 4-2-1 filtering")
+		return
+	if _changed_byte_count(second_pixels, forced_filtered_i.get("reference_rgba", PackedByteArray())) != 0:
+		_fail("full-frame filtering changed the raw I-frame prediction reference")
+		return
+	var no_filter_mei := original.duplicate()
+	no_filter_mei[second_image_header + 1] |= 0x0c
+	var suppressed_i: Variant = codec.call("decode_mei_i_frame", no_filter_mei, second_i_index, 0x0400)
+	if not suppressed_i is Dictionary or not suppressed_i.get("ok", false):
+		_fail("SDK NoLoopFilter mode failed on an I-frame")
+		return
+	if _changed_byte_count(second_pixels, suppressed_i.get("rgba", PackedByteArray())) != 0:
+		_fail("SDK NoLoopFilter did not suppress both operation-table filters")
+		return
 	var b_frame: Variant = codec.call("decode_mei_i_frame", original, 1)
 	if not b_frame is Dictionary or b_frame.get("ok", true):
 		_fail("random access must not decode a differential B-frame without references")
@@ -210,6 +241,54 @@ func _initialize() -> void:
 	if not fourth_b is Dictionary or not fourth_b.get("ok", false):
 		_fail("second B-frame after the next P anchor failed: %s" % (fourth_b.get("error", "invalid result") if fourth_b is Dictionary else "invalid result"))
 		return
+	var following_p_index := -1
+	var following_b_index := -1
+	for index: int in range(second_i_index + 1, frames.size()):
+		var picture_type := str(frames[index].get("picture_type", ""))
+		if picture_type == "B" and following_b_index < 0:
+			following_b_index = index
+		elif picture_type == "P":
+			following_p_index = index
+			break
+	if following_p_index < 0 or following_b_index < 0:
+		_fail("second GOP has no B/P frames to verify UseLoopFilter propagation")
+		return
+	var filtered_second_i: Variant = codec.call("decode_mei_i_frame", original, second_i_index, 0x0800)
+	if not filtered_second_i is Dictionary or not filtered_second_i.get("ok", false):
+		_fail("SDK UseLoopFilter mode failed on the second I-frame")
+		return
+	var baseline_following_p: Variant = codec.call("decode_mei_p_frame", original, following_p_index, second_pixels)
+	var forced_following_p: Variant = codec.call("decode_mei_p_frame", original, following_p_index,
+		filtered_second_i.get("reference_rgba", second_pixels), 0x0800)
+	if (not baseline_following_p is Dictionary or not baseline_following_p.get("ok", false)
+		or not forced_following_p is Dictionary or not forced_following_p.get("ok", false)):
+		_fail("SDK UseLoopFilter mode failed on a P-frame")
+		return
+	if _changed_byte_count(baseline_following_p.get("rgba", PackedByteArray()),
+		forced_following_p.get("rgba", PackedByteArray())) == 0:
+		_fail("SDK UseLoopFilter did not force full-frame filtering on a P-frame")
+		return
+	if _changed_byte_count(baseline_following_p.get("rgba", PackedByteArray()),
+		forced_following_p.get("reference_rgba", PackedByteArray())) != 0:
+		_fail("full-frame filtering changed the raw P-frame prediction reference")
+		return
+	var baseline_following_b: Variant = codec.call("decode_mei_b_frame", original, following_b_index,
+		second_pixels, baseline_following_p.get("rgba", PackedByteArray()))
+	var forced_following_b: Variant = codec.call("decode_mei_b_frame", original, following_b_index,
+		filtered_second_i.get("reference_rgba", second_pixels),
+		forced_following_p.get("reference_rgba", PackedByteArray()), 0x0800)
+	if (not baseline_following_b is Dictionary or not baseline_following_b.get("ok", false)
+		or not forced_following_b is Dictionary or not forced_following_b.get("ok", false)):
+		_fail("SDK UseLoopFilter mode failed on a B-frame")
+		return
+	if _changed_byte_count(baseline_following_b.get("rgba", PackedByteArray()),
+		forced_following_b.get("rgba", PackedByteArray())) == 0:
+		_fail("SDK UseLoopFilter did not force full-frame filtering on a B-frame")
+		return
+	if _changed_byte_count(baseline_following_b.get("rgba", PackedByteArray()),
+		forced_following_b.get("reference_rgba", PackedByteArray())) != 0:
+		_fail("full-frame filtering changed the raw B-frame prediction reference")
+		return
 	var b_as_p: Variant = codec.call("decode_mei_p_frame", original, 1, first_frame)
 	if not b_as_p is Dictionary or b_as_p.get("ok", true):
 		_fail("P-frame decoder must reject a bidirectional B-frame")
@@ -217,7 +296,7 @@ func _initialize() -> void:
 	if FileAccess.get_file_as_bytes(movie_path) != original:
 		_fail("decode_mei modified the original movie")
 		return
-	print("PASS MEI audio, random I-frame decode, and first reference-based P/B frames")
+	print("PASS MEI audio, I/P/B decode, SDK loop-filter modes, and reference-buffer preservation")
 	quit(0)
 
 
@@ -241,3 +320,13 @@ func _find_record_header(data: PackedByteArray, record_name: String, ordinal: in
 			return offset + signature.size() + 8
 		found += 1
 	return -1
+
+
+func _changed_byte_count(left: PackedByteArray, right: PackedByteArray) -> int:
+	if left.size() != right.size():
+		return maxi(left.size(), right.size())
+	var changed := 0
+	for index: int in left.size():
+		if left[index] != right[index]:
+			changed += 1
+	return changed

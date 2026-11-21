@@ -84,8 +84,15 @@ func _run() -> void:
 	if player.get("mei_movie_active") or player.get("mei_video_rect").visible:
 		_fail("native MEI stop did not clear playback state")
 		return
-	if not player.call("_start_native_mei_movie", GAME_DIR.path_join("opening.mei"), 0x07):
-		_fail("native MEI player refused SDK no-skip playback mode")
+	if movie_resource.play_movie(0x0400) != 1 or int(player.get("mei_movie_decode_flags")) != 0x0400:
+		_fail("MovieSprite did not forward SDK NoLoopFilter into native MEI decoding")
+		return
+	player.call("_on_movie_stop_requested")
+	if not player.call("_start_native_mei_movie", GAME_DIR.path_join("opening.mei"), 0x0807):
+		_fail("native MEI player refused SDK UseLoopFilter and no-skip playback mode")
+		return
+	if int(player.get("mei_movie_decode_flags")) != 0x0800:
+		_fail("SDK UseLoopFilter was not retained by native MEI playback")
 		return
 	player.call("_process_mei_movie", float(player.get("mei_movie_frame_duration")) * 3.1)
 	if player.get("mei_movie_displayed_index") != 1 or (player.get("mei_movie_queue") as Array).size() != 2:

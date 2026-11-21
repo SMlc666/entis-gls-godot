@@ -331,7 +331,9 @@ bool reconstruct_mei_frame_pixels(size_t width, size_t height,
     const std::vector<int8_t> *motion_flags = nullptr,
     const std::vector<int8_t> *motion_vectors = nullptr,
     const std::vector<uint8_t> *next_reference = nullptr,
-    bool allow_bidirectional = false, bool apply_local_loop_filter = false) {
+    bool allow_bidirectional = false, int operation_flags = 0,
+    uint32_t play_mode_flags = 0,
+    std::vector<uint8_t> *reference_rgba = nullptr) {
     const size_t block_width = (width + 15) / 16;
     const size_t block_height = (height + 15) / 16;
     if (coefficients.size() != block_width * block_height * 384
@@ -566,8 +568,17 @@ bool reconstruct_mei_frame_pixels(size_t width, size_t height,
             }
         }
     }
-    if (apply_local_loop_filter)
-        mei_apply_local_loop_filter_421(rgba, width, height, motion_flags);
+    if ((play_mode_flags & 0x0400) == 0) {
+        if ((operation_flags & 0x04) != 0 || (play_mode_flags & 0x0800) != 0) {
+            if (reference_rgba)
+                *reference_rgba = rgba;
+            mei_filter_421_region(rgba, width, 0, 0, width, height);
+        } else if ((operation_flags & 0x08) != 0) {
+            if (reference_rgba)
+                *reference_rgba = rgba;
+            mei_apply_local_loop_filter_421(rgba, width, height, motion_flags);
+        }
+    }
     return true;
 }
 
@@ -945,11 +956,13 @@ public:
     Dictionary decode_eri(const PackedByteArray &input) const;
     Dictionary decode_mio(const PackedByteArray &input) const;
     Dictionary decode_mei(const PackedByteArray &input) const;
-    Dictionary decode_mei_i_frame(const PackedByteArray &input, int64_t frame_index) const;
+    Dictionary decode_mei_i_frame(const PackedByteArray &input, int64_t frame_index,
+        int64_t play_mode_flags = 0) const;
     Dictionary decode_mei_p_frame(const PackedByteArray &input, int64_t frame_index,
-        const PackedByteArray &previous_rgba) const;
+        const PackedByteArray &previous_rgba, int64_t play_mode_flags = 0) const;
     Dictionary decode_mei_b_frame(const PackedByteArray &input, int64_t frame_index,
-        const PackedByteArray &previous_rgba, const PackedByteArray &next_rgba) const;
+        const PackedByteArray &previous_rgba, const PackedByteArray &next_rgba,
+        int64_t play_mode_flags = 0) const;
     Array build_shading_levels(const PackedByteArray &rgba, int64_t width, int64_t height) const;
 };
 
@@ -958,9 +971,9 @@ void YzkCodec::_bind_methods() {
     ClassDB::bind_method(D_METHOD("decode_eri", "input"), &YzkCodec::decode_eri);
     ClassDB::bind_method(D_METHOD("decode_mio", "input"), &YzkCodec::decode_mio);
     ClassDB::bind_method(D_METHOD("decode_mei", "input"), &YzkCodec::decode_mei);
-    ClassDB::bind_method(D_METHOD("decode_mei_i_frame", "input", "frame_index"), &YzkCodec::decode_mei_i_frame);
-    ClassDB::bind_method(D_METHOD("decode_mei_p_frame", "input", "frame_index", "previous_rgba"), &YzkCodec::decode_mei_p_frame);
-    ClassDB::bind_method(D_METHOD("decode_mei_b_frame", "input", "frame_index", "previous_rgba", "next_rgba"), &YzkCodec::decode_mei_b_frame);
+    ClassDB::bind_method(D_METHOD("decode_mei_i_frame", "input", "frame_index", "play_mode_flags"), &YzkCodec::decode_mei_i_frame, DEFVAL(0));
+    ClassDB::bind_method(D_METHOD("decode_mei_p_frame", "input", "frame_index", "previous_rgba", "play_mode_flags"), &YzkCodec::decode_mei_p_frame, DEFVAL(0));
+    ClassDB::bind_method(D_METHOD("decode_mei_b_frame", "input", "frame_index", "previous_rgba", "next_rgba", "play_mode_flags"), &YzkCodec::decode_mei_b_frame, DEFVAL(0));
     ClassDB::bind_method(D_METHOD("build_shading_levels", "rgba", "width", "height"), &YzkCodec::build_shading_levels);
 }
 
@@ -1157,13 +1170,14 @@ Dictionary YzkCodec::decode_mei(const PackedByteArray &input) const {
             width, height, first_frame_coefficients, first_frame_quantization,
             first_frame_operations, first_frame_motion_flags, first_frame_motion_vectors, video_error);
         std::vector<uint8_t> first_frame_rgba;
+        std::vector<uint8_t> first_frame_reference_rgba;
         int first_frame_min_luma = 0, first_frame_max_luma = 0;
         const bool first_frame_decoded = first_frame_entropy_decoded
             && reconstruct_mei_frame_pixels(width, height, first_frame_coefficients,
                 first_frame_quantization, first_frame_operations, first_frame_rgba,
                 first_frame_min_luma, first_frame_max_luma, video_error,
                 false, nullptr, nullptr, nullptr, nullptr, false,
-                (first_frame.operation_flags & 0x08) != 0);
+                first_frame.operation_flags, 0, &first_frame_reference_rgba);
         PackedByteArray samples;
         samples.resize(static_cast<int64_t>(expected_audio_bytes));
         std::memcpy(samples.ptrw(), audio.samples.get<const uint8_t>(), static_cast<size_t>(expected_audio_bytes));
@@ -1211,6 +1225,14 @@ Dictionary YzkCodec::decode_mei(const PackedByteArray &input) const {
             rgba.resize(static_cast<int64_t>(first_frame_rgba.size()));
             std::memcpy(rgba.ptrw(), first_frame_rgba.data(), first_frame_rgba.size());
             result["first_frame_rgba"] = rgba;
+            PackedByteArray reference_rgba;
+            if (first_frame_reference_rgba.empty()) {
+                reference_rgba = rgba;
+            } else {
+                reference_rgba.resize(static_cast<int64_t>(first_frame_reference_rgba.size()));
+                std::memcpy(reference_rgba.ptrw(), first_frame_reference_rgba.data(), first_frame_reference_rgba.size());
+            }
+            result["first_frame_reference_rgba"] = reference_rgba;
         }
         result["video_frames_decoded"] = false;
         result["video_error"] = first_frame_decoded
@@ -1224,7 +1246,8 @@ Dictionary YzkCodec::decode_mei(const PackedByteArray &input) const {
     }
 }
 
-Dictionary YzkCodec::decode_mei_i_frame(const PackedByteArray &input, int64_t frame_index) const {
+Dictionary YzkCodec::decode_mei_i_frame(const PackedByteArray &input, int64_t frame_index,
+    int64_t play_mode_flags) const {
     if (input.size() < 64 || static_cast<size_t>(input.size()) > kMaxCodecInputBytes)
         return codec_failure("MEI input size is outside the supported bounds.");
     std::string validation_error;
@@ -1248,21 +1271,30 @@ Dictionary YzkCodec::decode_mei_i_frame(const PackedByteArray &input, int64_t fr
         width, height, coefficients, quantization, operations, motion_flags, motion_vectors, frame_error))
         return codec_failure(frame_error);
     std::vector<uint8_t> rgba;
+    std::vector<uint8_t> reference_rgba;
     int minimum_luma = 0, maximum_luma = 0;
     if (!reconstruct_mei_frame_pixels(width, height, coefficients, quantization,
         operations, rgba, minimum_luma, maximum_luma, frame_error,
         false, nullptr, nullptr, nullptr, nullptr, false,
-        (frame.operation_flags & 0x08) != 0))
+        frame.operation_flags, static_cast<uint32_t>(play_mode_flags), &reference_rgba))
         return codec_failure(frame_error);
     PackedByteArray pixels;
     pixels.resize(static_cast<int64_t>(rgba.size()));
     std::memcpy(pixels.ptrw(), rgba.data(), rgba.size());
+    PackedByteArray reference_pixels;
+    if (reference_rgba.empty()) {
+        reference_pixels = pixels;
+    } else {
+        reference_pixels.resize(static_cast<int64_t>(reference_rgba.size()));
+        std::memcpy(reference_pixels.ptrw(), reference_rgba.data(), reference_rgba.size());
+    }
     Dictionary result;
     result["ok"] = true;
     result["frame_index"] = frame_index;
     result["width"] = static_cast<int64_t>(width);
     result["height"] = static_cast<int64_t>(height);
     result["rgba"] = pixels;
+    result["reference_rgba"] = reference_pixels;
     result["coefficient_count"] = static_cast<int64_t>(coefficients.size());
     result["min_luma"] = minimum_luma;
     result["max_luma"] = maximum_luma;
@@ -1270,7 +1302,7 @@ Dictionary YzkCodec::decode_mei_i_frame(const PackedByteArray &input, int64_t fr
 }
 
 Dictionary YzkCodec::decode_mei_p_frame(const PackedByteArray &input, int64_t frame_index,
-    const PackedByteArray &previous_rgba) const {
+    const PackedByteArray &previous_rgba, int64_t play_mode_flags) const {
     if (input.size() < 64 || static_cast<size_t>(input.size()) > kMaxCodecInputBytes)
         return codec_failure("MEI input size is outside the supported bounds.");
     std::string validation_error;
@@ -1298,21 +1330,30 @@ Dictionary YzkCodec::decode_mei_p_frame(const PackedByteArray &input, int64_t fr
     std::vector<uint8_t> previous(static_cast<size_t>(previous_rgba.size()));
     std::memcpy(previous.data(), previous_rgba.ptr(), previous.size());
     std::vector<uint8_t> rgba;
+    std::vector<uint8_t> reference_rgba;
     int minimum_luma = 0, maximum_luma = 0;
     if (!reconstruct_mei_frame_pixels(width, height, coefficients, quantization,
         operations, rgba, minimum_luma, maximum_luma, frame_error, true,
         &previous, &motion_flags, &motion_vectors, nullptr, false,
-        (frame.operation_flags & 0x08) != 0))
+        frame.operation_flags, static_cast<uint32_t>(play_mode_flags), &reference_rgba))
         return codec_failure(frame_error);
     PackedByteArray pixels;
     pixels.resize(static_cast<int64_t>(rgba.size()));
     std::memcpy(pixels.ptrw(), rgba.data(), rgba.size());
+    PackedByteArray reference_pixels;
+    if (reference_rgba.empty()) {
+        reference_pixels = pixels;
+    } else {
+        reference_pixels.resize(static_cast<int64_t>(reference_rgba.size()));
+        std::memcpy(reference_pixels.ptrw(), reference_rgba.data(), reference_rgba.size());
+    }
     Dictionary result;
     result["ok"] = true;
     result["frame_index"] = frame_index;
     result["width"] = static_cast<int64_t>(width);
     result["height"] = static_cast<int64_t>(height);
     result["rgba"] = pixels;
+    result["reference_rgba"] = reference_pixels;
     result["coefficient_count"] = static_cast<int64_t>(coefficients.size());
     result["min_luma"] = minimum_luma;
     result["max_luma"] = maximum_luma;
@@ -1320,7 +1361,8 @@ Dictionary YzkCodec::decode_mei_p_frame(const PackedByteArray &input, int64_t fr
 }
 
 Dictionary YzkCodec::decode_mei_b_frame(const PackedByteArray &input, int64_t frame_index,
-    const PackedByteArray &previous_rgba, const PackedByteArray &next_rgba) const {
+    const PackedByteArray &previous_rgba, const PackedByteArray &next_rgba,
+    int64_t play_mode_flags) const {
     if (input.size() < 64 || static_cast<size_t>(input.size()) > kMaxCodecInputBytes)
         return codec_failure("MEI input size is outside the supported bounds.");
     std::string validation_error;
@@ -1352,21 +1394,30 @@ Dictionary YzkCodec::decode_mei_b_frame(const PackedByteArray &input, int64_t fr
     std::vector<uint8_t> next(static_cast<size_t>(next_rgba.size()));
     std::memcpy(next.data(), next_rgba.ptr(), next.size());
     std::vector<uint8_t> rgba;
+    std::vector<uint8_t> reference_rgba;
     int minimum_luma = 0, maximum_luma = 0;
     if (!reconstruct_mei_frame_pixels(width, height, coefficients, quantization,
         operations, rgba, minimum_luma, maximum_luma, frame_error, true,
         &previous, &motion_flags, &motion_vectors, &next, true,
-        (frame.operation_flags & 0x08) != 0))
+        frame.operation_flags, static_cast<uint32_t>(play_mode_flags), &reference_rgba))
         return codec_failure(frame_error);
     PackedByteArray pixels;
     pixels.resize(static_cast<int64_t>(rgba.size()));
     std::memcpy(pixels.ptrw(), rgba.data(), rgba.size());
+    PackedByteArray reference_pixels;
+    if (reference_rgba.empty()) {
+        reference_pixels = pixels;
+    } else {
+        reference_pixels.resize(static_cast<int64_t>(reference_rgba.size()));
+        std::memcpy(reference_pixels.ptrw(), reference_rgba.data(), reference_rgba.size());
+    }
     Dictionary result;
     result["ok"] = true;
     result["frame_index"] = frame_index;
     result["width"] = static_cast<int64_t>(width);
     result["height"] = static_cast<int64_t>(height);
     result["rgba"] = pixels;
+    result["reference_rgba"] = reference_pixels;
     result["coefficient_count"] = static_cast<int64_t>(coefficients.size());
     result["min_luma"] = minimum_luma;
     result["max_luma"] = maximum_luma;
