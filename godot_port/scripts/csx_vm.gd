@@ -1659,6 +1659,12 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 			info.set_field("height", h)
 			info.set_field("nImageWidth", w)
 			info.set_field("nImageHeight", h)
+			info.set_field("nFormatType", 0x04000001) # formatImageARGB from the host RGBA image surface.
+			info.set_field("nBitsPerPixel", 32)
+			info.set_field("nFrameCount", maxi(1, spr.image_frames.size()))
+			info.set_field("nResourceBytes", spr.image.get_data().size() * maxi(1, spr.image_frames.size()) if spr.image != null else w * h * 4)
+			info.set_field("xHotSpot", 0)
+			info.set_field("yHotSpot", 0)
 			return info
 		"SetSpriteText":
 			var item_id := str(args[0]) if args.size() > 0 else ""
@@ -1889,21 +1895,12 @@ func _dispatch_resource_method(res: CsxHostClass.HostResource, method: String, a
 		"GetSoundInfo":
 			if res.audio_stream == null:
 				return null
-			var sound_info := CsxInstance.new("SoundInfo")
-			var stream := res.audio_stream
-			var channels := 2 if stream.stereo else 1
-			var bits_per_sample := 8 if stream.format == AudioStreamWAV.FORMAT_8_BITS else 16
-			var bytes_per_frame := channels * bits_per_sample / 8
-			@warning_ignore("integer_division")
-			var samples := int(stream.data.size() / bytes_per_frame) if bytes_per_frame > 0 else 0
-			sound_info.set_field("nSamplesPerSec", stream.mix_rate)
-			sound_info.set_field("nChannelCount", channels)
-			sound_info.set_field("nBitsPerSample", bits_per_sample)
-			sound_info.set_field("nResourceBytes", stream.data.size())
-			sound_info.set_field("nSampleCount", samples)
-			sound_info.set_field("nRewoundPosition", res.playback_rewind_frame if res.playback_rewind_frame >= 0 else 0)
-			return sound_info
+			return _make_sound_info(res)
 		"GetInfo", "GetImageInfo":
+			# Entis Resource.GetInfo reports SoundInfo when the resource owns a
+			# sound player; GetImageInfo always requests image metadata.
+			if method == "GetInfo" and res.audio_stream != null:
+				return _make_sound_info(res)
 			if res.image == null:
 				return null
 			var image_info := CsxInstance.new("ImageInfo")
@@ -1919,11 +1916,34 @@ func _dispatch_resource_method(res: CsxHostClass.HostResource, method: String, a
 			image_info.set_field("height", res.image.get_height())
 			image_info.set_field("nImageWidth", res.image.get_width())
 			image_info.set_field("nImageHeight", res.image.get_height())
+			image_info.set_field("nFormatType", 0x04000001) # formatImageARGB from the host RGBA image surface.
+			image_info.set_field("nBitsPerPixel", 32)
+			image_info.set_field("nFrameCount", maxi(1, res.image_frames.size()))
+			image_info.set_field("nResourceBytes", res.image.get_data().size() * maxi(1, res.image_frames.size()))
+			image_info.set_field("xHotSpot", 0)
+			image_info.set_field("yHotSpot", 0)
 			return image_info
 		_:
 			if res.host != null:
 				res.host.report_unsupported("HostResource.%s" % method)
 			return 0
+
+
+func _make_sound_info(res: CsxHostClass.HostResource) -> CsxInstance:
+	var sound_info := CsxInstance.new("SoundInfo")
+	var stream := res.audio_stream
+	var channels := 2 if stream.stereo else 1
+	var bits_per_sample := 8 if stream.format == AudioStreamWAV.FORMAT_8_BITS else 16
+	var bytes_per_frame := channels * bits_per_sample / 8
+	@warning_ignore("integer_division")
+	var samples := int(stream.data.size() / bytes_per_frame) if bytes_per_frame > 0 else 0
+	sound_info.set_field("nSamplesPerSec", stream.mix_rate)
+	sound_info.set_field("nChannelCount", channels)
+	sound_info.set_field("nBitsPerSample", bits_per_sample)
+	sound_info.set_field("nResourceBytes", stream.data.size())
+	sound_info.set_field("nSampleCount", samples)
+	sound_info.set_field("nRewoundPosition", res.playback_rewind_frame if res.playback_rewind_frame >= 0 else 0)
+	return sound_info
 
 
 func _to_int(v: Variant, default_val: int = 0) -> int:
