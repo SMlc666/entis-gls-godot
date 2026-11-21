@@ -65,6 +65,32 @@ func _initialize() -> void:
 	if i_count != 582 or p_count != 259 or b_count != 1679:
 		_fail("unexpected I/P/B frame counts: %d/%d/%d" % [i_count, p_count, b_count])
 		return
+	if not codec.has_method("decode_mei_i_frame"):
+		_fail("YzkCodec must expose random access to independent MEI I-frames")
+		return
+	var second_i_index := -1
+	for index: int in range(1, frames.size()):
+		if str(frames[index].get("picture_type", "")) == "I":
+			second_i_index = index
+			break
+	if second_i_index < 0:
+		_fail("MEI stream has no second I-frame to validate random access")
+		return
+	var second_i: Variant = codec.call("decode_mei_i_frame", original, second_i_index)
+	if not second_i is Dictionary or not second_i.get("ok", false):
+		_fail("second I-frame decode failed: %s" % (second_i.get("error", "invalid result") if second_i is Dictionary else "invalid result"))
+		return
+	if int(second_i.get("frame_index", -1)) != second_i_index:
+		_fail("I-frame decoder returned the wrong frame index")
+		return
+	var second_pixels: PackedByteArray = second_i.get("rgba", PackedByteArray())
+	if second_pixels.size() != 800 * 600 * 4:
+		_fail("second I-frame RGBA output has wrong size: %d" % second_pixels.size())
+		return
+	var b_frame: Variant = codec.call("decode_mei_i_frame", original, 1)
+	if not b_frame is Dictionary or b_frame.get("ok", true):
+		_fail("random access must not decode a differential B-frame without references")
+		return
 	if result.get("video_frames_decoded", true):
 		_fail("decoder must not claim that ERI Layer-3 frames are decoded")
 		return
@@ -92,7 +118,7 @@ func _initialize() -> void:
 	if FileAccess.get_file_as_bytes(movie_path) != original:
 		_fail("decode_mei modified the original movie")
 		return
-	print("PASS MEI container/audio decode and first I-frame ERINA coefficient decode")
+	print("PASS MEI container/audio decode and random access to native I-frames")
 	quit(0)
 
 

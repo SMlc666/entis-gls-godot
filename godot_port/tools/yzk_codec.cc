@@ -125,12 +125,48 @@ bool mei_huffman(MeiBitReader &bits, au::dec::entis::common::HuffmanTree &tree,
     return true;
 }
 
+bool mei_gamma_bytes(MeiBitReader &bits, size_t count, std::vector<int8_t> &decoded,
+    std::string &error) {
+    decoded.assign(count, 0);
+    uint32_t zero_flag = 0;
+    if (!bits.read(1, zero_flag)) {
+        error = "First MEI frame gamma-coded table is truncated.";
+        return false;
+    }
+    bool zero_run = zero_flag == 0;
+    size_t cursor = 0;
+    while (cursor < decoded.size()) {
+        uint32_t run = 0;
+        if (!mei_gamma(bits, run) || run == 0) {
+            error = "First MEI frame gamma-coded run is invalid.";
+            return false;
+        }
+        const size_t run_size = std::min<size_t>(run, decoded.size() - cursor);
+        if (zero_run) {
+            cursor += run_size;
+        } else {
+            for (size_t i = 0; i < run_size; ++i) {
+                uint32_t sign = 0, magnitude = 0;
+                if (!bits.read(1, sign) || !mei_gamma(bits, magnitude)
+                    || magnitude == 0 || magnitude > 128) {
+                    error = "First MEI frame gamma-coded value is invalid.";
+                    return false;
+                }
+                decoded[cursor++] = static_cast<int8_t>(sign
+                    ? -static_cast<int>(magnitude) : static_cast<int>(magnitude));
+            }
+        }
+        zero_run = !zero_run;
+    }
+    return true;
+}
+
 bool decode_mei_first_frame_coefficients(const uint8_t *frame, size_t frame_size,
     size_t width, size_t height, std::vector<int8_t> &coefficients,
     std::array<uint8_t, 128> &quantization, std::vector<int8_t> &operations,
     std::string &error) {
     using namespace au::dec::entis::common;
-    if (!frame || frame_size < 4 || frame[0] != 0x28 || frame[1] != 0
+    if (!frame || frame_size < 4 || frame[0] != 0x28 || (frame[1] & 0x02) != 0
         || frame[2] != 1 || frame[3] != 8 || width == 0 || height == 0) {
         error = "First MEI image frame has unsupported ERI parameters.";
         return false;
@@ -158,35 +194,13 @@ bool decode_mei_first_frame_coefficients(const uint8_t *frame, size_t frame_size
         item = static_cast<uint8_t>(symbol);
     }
     const size_t op_count = block_width * block_height * 2;
-    operations.assign(op_count, 0);
-    uint32_t zero_flag = 0;
-    if (!bits.read(1, zero_flag)) {
-        error = "First MEI frame operation table is truncated.";
-        return false;
-    }
-    bool zero_run = zero_flag == 0;
-    size_t cursor = 0;
-    while (cursor < operations.size()) {
-        uint32_t run = 0;
-        if (!mei_gamma(bits, run) || run == 0) {
-            error = "First MEI frame operation run is invalid.";
+    if (!mei_gamma_bytes(bits, op_count, operations, error)) return false;
+    if ((frame[1] & 0x01) != 0) {
+        std::vector<int8_t> motion_flags, motion_vectors;
+        const size_t macroblocks = block_width * block_height;
+        if (!mei_gamma_bytes(bits, macroblocks, motion_flags, error)
+            || !mei_gamma_bytes(bits, macroblocks * 4, motion_vectors, error))
             return false;
-        }
-        const size_t count = std::min<size_t>(run, operations.size() - cursor);
-        if (!zero_run) {
-            for (size_t i = 0; i < count; ++i) {
-                uint32_t sign = 0, magnitude = 0;
-                if (!bits.read(1, sign) || !mei_gamma(bits, magnitude) || magnitude == 0 || magnitude > 128) {
-                    error = "First MEI frame operation value is invalid.";
-                    return false;
-                }
-                operations[cursor++] = static_cast<int8_t>(sign ? -static_cast<int>(magnitude) : static_cast<int>(magnitude));
-            }
-        } else {
-            std::fill_n(operations.begin() + static_cast<std::ptrdiff_t>(cursor), count, 0);
-            cursor += count;
-        }
-        zero_run = !zero_run;
     }
     // ERINA's image stream has independent adaptive trees from the initial table.
     HuffmanTree data_tree, length_tree;
@@ -712,6 +726,7 @@ public:
     Dictionary decode_eri(const PackedByteArray &input) const;
     Dictionary decode_mio(const PackedByteArray &input) const;
     Dictionary decode_mei(const PackedByteArray &input) const;
+    Dictionary decode_mei_i_frame(const PackedByteArray &input, int64_t frame_index) const;
     Array build_shading_levels(const PackedByteArray &rgba, int64_t width, int64_t height) const;
 };
 
@@ -720,6 +735,7 @@ void YzkCodec::_bind_methods() {
     ClassDB::bind_method(D_METHOD("decode_eri", "input"), &YzkCodec::decode_eri);
     ClassDB::bind_method(D_METHOD("decode_mio", "input"), &YzkCodec::decode_mio);
     ClassDB::bind_method(D_METHOD("decode_mei", "input"), &YzkCodec::decode_mei);
+    ClassDB::bind_method(D_METHOD("decode_mei_i_frame", "input", "frame_index"), &YzkCodec::decode_mei_i_frame);
     ClassDB::bind_method(D_METHOD("build_shading_levels", "rgba", "width", "height"), &YzkCodec::build_shading_levels);
 }
 
@@ -979,6 +995,49 @@ Dictionary YzkCodec::decode_mei(const PackedByteArray &input) const {
     } catch (...) {
         return codec_failure("Unknown native MEI decoder error.");
     }
+}
+
+Dictionary YzkCodec::decode_mei_i_frame(const PackedByteArray &input, int64_t frame_index) const {
+    if (input.size() < 64 || static_cast<size_t>(input.size()) > kMaxCodecInputBytes)
+        return codec_failure("MEI input size is outside the supported bounds.");
+    std::string validation_error;
+    size_t width = 0, height = 0;
+    std::vector<MeiFrameRecord> frame_records;
+    uint32_t declared_frames = 0, duration_ms = 0, declared_samples = 0;
+    uint32_t channels = 0, sample_rate = 0, bits_per_sample = 0;
+    if (!validate_mei_size(input.ptr(), static_cast<size_t>(input.size()), validation_error,
+        width, height, frame_records, declared_frames, duration_ms, declared_samples,
+        channels, sample_rate, bits_per_sample))
+        return codec_failure(validation_error);
+    if (frame_index < 0 || static_cast<uint64_t>(frame_index) >= frame_records.size())
+        return codec_failure("MEI frame index is outside the stream.");
+    const MeiFrameRecord &frame = frame_records[static_cast<size_t>(frame_index)];
+    if (frame.picture_type != 'I' || frame.record_type != "ImageFrm")
+        return codec_failure("Selected MEI frame is differential and needs reference frames.");
+    std::vector<int8_t> coefficients, operations;
+    std::array<uint8_t, 128> quantization{};
+    std::string frame_error;
+    if (!decode_mei_first_frame_coefficients(input.ptr() + frame.offset, frame.payload_size,
+        width, height, coefficients, quantization, operations, frame_error))
+        return codec_failure(frame_error);
+    std::vector<uint8_t> rgba;
+    int minimum_luma = 0, maximum_luma = 0;
+    if (!reconstruct_mei_first_i_frame(width, height, coefficients, quantization,
+        operations, rgba, minimum_luma, maximum_luma, frame_error))
+        return codec_failure(frame_error);
+    PackedByteArray pixels;
+    pixels.resize(static_cast<int64_t>(rgba.size()));
+    std::memcpy(pixels.ptrw(), rgba.data(), rgba.size());
+    Dictionary result;
+    result["ok"] = true;
+    result["frame_index"] = frame_index;
+    result["width"] = static_cast<int64_t>(width);
+    result["height"] = static_cast<int64_t>(height);
+    result["rgba"] = pixels;
+    result["coefficient_count"] = static_cast<int64_t>(coefficients.size());
+    result["min_luma"] = minimum_luma;
+    result["max_luma"] = maximum_luma;
+    return result;
 }
 
 static void yzk_codec_initialize(ModuleInitializationLevel level) {
