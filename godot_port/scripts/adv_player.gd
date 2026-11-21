@@ -1189,6 +1189,13 @@ func _sync_adv_cg_sprite(sprite: Variant) -> void:
 		for parameter: String in ["filter_mode", "intensity", "use_tone_lut", "tone_lut", "tone_flags"]:
 			adv_cg_material.set_shader_parameter(parameter, tone_material.get_shader_parameter(parameter))
 	var active_mask: bool = native_sprite.alpha_texture != null and native_sprite.alpha_range > 0 and native_sprite.alpha_range < 256
+	var tile_image := str(native_sprite.fields.get("effect_type", "")) == "TileImage"
+	var source_size := Vector2(native_sprite.texture.get_size())
+	var effect_size := Vector2(native_sprite.get_render_size())
+	var tile_scroll: Vector2i = native_sprite.fields.get("effect_scroll", Vector2i.ZERO)
+	adv_cg_material.set_shader_parameter("sprite_tile_image", tile_image)
+	adv_cg_material.set_shader_parameter("sprite_repeat_scale", effect_size / source_size if tile_image and source_size.x > 0.0 and source_size.y > 0.0 else Vector2.ONE)
+	adv_cg_material.set_shader_parameter("sprite_scroll_uv", Vector2(tile_scroll) / source_size if tile_image and source_size.x > 0.0 and source_size.y > 0.0 else Vector2.ZERO)
 	adv_cg_material.set_shader_parameter("alpha_mask_ready", active_mask)
 	adv_cg_material.set_shader_parameter("alpha_mask_range", float(native_sprite.alpha_range))
 	adv_cg_material.set_shader_parameter("alpha_mask_blend", float(native_sprite.blending))
@@ -1818,13 +1825,18 @@ uniform sampler2D alpha_mask_texture;
 uniform bool alpha_mask_ready = false;
 uniform float alpha_mask_range = 256.0;
 uniform float alpha_mask_blend = 0.0;
+uniform bool sprite_tile_image = false;
+uniform vec2 sprite_repeat_scale = vec2(1.0, 1.0);
+uniform vec2 sprite_scroll_uv = vec2(0.0, 0.0);
 
 float tone_coord(float value) {
 	return (floor(clamp(value, 0.0, 1.0) * 255.0 + 0.5) + 0.5) / 256.0;
 }
 
 void fragment() {
-	vec4 c = texture(TEXTURE, UV);
+	vec2 source_uv = UV;
+	if (sprite_tile_image) source_uv = fract(UV * sprite_repeat_scale + sprite_scroll_uv);
+	vec4 c = texture(TEXTURE, source_uv);
 	if (use_tone_lut) {
 		if ((tone_flags & 8) != 0) {
 			float gray = dot(c.rgb, vec3(0.299, 0.587, 0.114));

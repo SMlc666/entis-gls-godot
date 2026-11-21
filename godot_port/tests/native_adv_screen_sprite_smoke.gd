@@ -1,6 +1,7 @@
 extends SceneTree
 
 const Host = preload("res://scripts/csx_host.gd")
+const CsxVM = preload("res://scripts/csx_vm.gd")
 const TestSupport = preload("res://tests/test_support.gd")
 
 
@@ -61,6 +62,31 @@ func _run() -> void:
 		return
 	if sprite.filename != "B27A.eri" or sprite.size != Vector2i(800, 1200) or sprite.position != Vector2i(0, -300):
 		_fail("The startup CG's original 800x1200 vertical-pan state must reach the renderer")
+		return
+	var tile_effect := CsxVM.CsxInstance.new("EffectParam")
+	var view_size := CsxVM.CsxInstance.new("ISize")
+	view_size.set_field("w", 800)
+	view_size.set_field("h", 600)
+	var speed := CsxVM.CsxInstance.new("IPoint")
+	speed.set_field("x", 1)
+	speed.set_field("y", 0)
+	tile_effect.set_field("strType", "TileImage")
+	tile_effect.set_field("sizeView", view_size)
+	tile_effect.set_field("ptSpeed", speed)
+	tile_effect.set_field("nInterval", 100)
+	tile_effect.set_field("nDegreeStep", 0)
+	if sprite.set_effect_parameter(tile_effect) != 0:
+		_fail("Native AdvScreen CG must accept Entis TileImage effect parameters")
+		return
+	player._sync_adv_cg_sprite(sprite)
+	if not bool(player.adv_cg_material.get_shader_parameter("sprite_tile_image")) or player.adv_cg_rect.size != Vector2(800, 600):
+		_fail("TileImage must render the original CG inside its 800x600 view rectangle")
+		return
+	player.host.advance_sprite_animations(0.1)
+	player._sync_adv_cg_sprite(sprite)
+	var expected_scroll := Vector2(sprite.fields.get("effect_scroll", Vector2i.ZERO)) / Vector2(sprite.texture.get_size())
+	if player.adv_cg_material.get_shader_parameter("sprite_scroll_uv") != expected_scroll:
+		_fail("TileImage shader must follow the native per-frame scroll offset")
 		return
 	if FileAccess.get_sha256(csx_path) != csx_hash or FileAccess.get_sha256(noa_path) != noa_hash:
 		_fail("Original CSX and NOA files must remain unchanged")
