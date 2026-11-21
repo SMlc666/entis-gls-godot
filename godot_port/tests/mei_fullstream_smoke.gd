@@ -17,7 +17,7 @@ func _run() -> void:
 	player.set("start_in_title", true)
 	root.add_child(player)
 	await process_frame
-	if not player.call("_start_native_mei_movie", GAME_DIR.path_join("opening.mei")):
+	if not player.call("_start_native_mei_movie", GAME_DIR.path_join("opening.mei"), 0):
 		_fail("native MEI player refused opening.mei")
 		return
 	var frame_info: Array = player.get("mei_movie_frames")
