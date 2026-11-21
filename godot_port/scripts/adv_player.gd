@@ -1964,7 +1964,24 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 	var native_texture: TextureRect = wrapper.get_node_or_null("NativeTexture")
 	if native_texture != null:
 		native_texture.texture = sprite.texture
-		native_texture.visible = sprite.texture != null
+		var is_mesh_warp := str(sprite.fields.get("effect_type", "")) == "MeshWarp" and sprite.texture != null
+		native_texture.visible = sprite.texture != null and not is_mesh_warp
+		var native_mesh: MeshInstance2D = wrapper.get_node_or_null("NativeMeshWarp")
+		if is_mesh_warp:
+			if native_mesh == null:
+				native_mesh = MeshInstance2D.new()
+				native_mesh.name = "NativeMeshWarp"
+				wrapper.add_child(native_mesh)
+			var mesh_state := [int(sprite.fields.get("effect_render_revision", 0)), sprite.blending, sprite.size, sprite.texture.get_instance_id()]
+			if native_mesh.get_meta("mesh_state", []) != mesh_state:
+				native_mesh.mesh = _build_native_mesh_warp(sprite)
+				native_mesh.set_meta("mesh_state", mesh_state)
+			native_mesh.texture = sprite.texture
+			native_mesh.visible = native_mesh.mesh != null
+			var warp_degree := clampf(float(sprite.blending) / 256.0, 0.0, 1.0)
+			native_mesh.modulate.a = 1.0 - warp_degree * warp_degree if bool(sprite.fields.get("effect_transition", false)) else 1.0
+		elif native_mesh != null:
+			native_mesh.visible = false
 		var effect_type := str(sprite.fields.get("effect_type", ""))
 		var effect_mode: int = int({"TileImage": 1, "FilterWhite": 2, "FilterLight": 3, "FilterBlack": 4, "FilterDark": 5, "RasterScroll": 6, "WaveCircle": 7}.get(effect_type, 0))
 		if effect_mode > 0 and sprite.texture != null:
@@ -2013,7 +2030,7 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 				vec4 sampled = texture(TEXTURE, uv);
 				if ((effect_mode == 6 || effect_mode == 7) && raster_transition) {
 					float transition_alpha = clamp(float(raster_degree) / 256.0, 0.0, 1.0);
-					sampled.a *= transition_alpha * transition_alpha;
+					sampled.a *= 1.0 - transition_alpha * transition_alpha;
 				}
 				vec3 channels = floor(sampled.rgb * 255.0 + vec3(0.5));
 				int degree = clamp(blend_degree, 0, 256);
@@ -2081,6 +2098,58 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 			native_label.set_meta("message_style", sprite.message_style)
 	if not sprite.children.is_empty():
 		_sync_native_sprite_children(sprite.children, wrapper, seen, filter_title_depth)
+
+
+func _build_native_mesh_warp(sprite: CsxHostClass.HostSprite) -> ArrayMesh:
+	var frames: Array = sprite.fields.get("effect_mesh_frames", [])
+	var base: PackedVector2Array = sprite.fields.get("effect_mesh_base", PackedVector2Array())
+	var cells_x := int(sprite.fields.get("effect_mesh_width", 0))
+	var cells_y := int(sprite.fields.get("effect_mesh_height", 0))
+	if frames.is_empty() or base.is_empty() or cells_x <= 0 or cells_y <= 0:
+		return null
+	var frame_index := 0
+	var frame_blend := 0.0
+	if frames.size() > 1:
+		var interval := 256 / (frames.size() - 1)
+		frame_index = mini(frames.size() - 1, sprite.blending * (frames.size() - 1) / 256)
+		if frame_index < frames.size() - 1:
+			frame_blend = clampf(float(sprite.blending - frame_index * interval) / maxf(1.0, float(interval)), 0.0, 1.0)
+	var current_frame: PackedVector2Array = frames[frame_index]
+	var next_frame: PackedVector2Array = frames[mini(frame_index + 1, frames.size() - 1)]
+	var vertices := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	vertices.resize(base.size())
+	uvs.resize(base.size())
+	var texture_size := Vector2(sprite.texture.get_size())
+	for i in range(base.size()):
+		var point := current_frame[i].lerp(next_frame[i], frame_blend)
+		vertices[i] = Vector3(point.x, point.y, 0.0)
+		uvs[i] = Vector2(base[i].x / maxf(1.0, texture_size.x), base[i].y / maxf(1.0, texture_size.y))
+	var indices := PackedInt32Array()
+	indices.resize(cells_x * cells_y * 6)
+	var write_index := 0
+	var row_width := cells_x + 1
+	for row in range(1, cells_y + 1):
+		for column in range(1, cells_x + 1):
+			var top_left := (row - 1) * row_width + column - 1
+			var top_right := top_left + 1
+			var bottom_left := row * row_width + column - 1
+			var bottom_right := bottom_left + 1
+			indices[write_index] = top_left
+			indices[write_index + 1] = top_right
+			indices[write_index + 2] = bottom_left
+			indices[write_index + 3] = bottom_right
+			indices[write_index + 4] = top_right
+			indices[write_index + 5] = bottom_left
+			write_index += 6
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_INDEX] = indices
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return mesh
 
 
 func _on_native_scroll_changed(value: float, sprite: CsxHostClass.HostSprite) -> void:

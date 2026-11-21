@@ -33,6 +33,21 @@ func _initialize() -> void:
 	if sprite.blending != 0:
 		_fail("WaveCircle degree must return to zero when animeEffect is disabled")
 		return
+	var vm := CsxVMClass.new(host)
+	var mesh_values: Array = [
+		0.0, 0.0, 64.0, 0.0, 0.0, 64.0, 64.0, 64.0,
+		0.0, 0.0, 64.0, 10.0, 10.0, 64.0, 64.0, 64.0,
+	]
+	var mesh_result: Variant = vm._dispatch_sprite_method(sprite, "SetMeshWarpEffect", [mesh_values, 2, 1, 1])
+	if mesh_result != 0 or sprite.fields.get("effect_type") != "MeshWarp":
+		_fail("SetMeshWarpEffect must accept native flattened mesh arrays")
+		return
+	if sprite.fields["effect_mesh_frames"].size() != 2 or sprite.fields["effect_mesh_base"].size() != 4:
+		_fail("SetMeshWarpEffect must retain all morph frames and its generated base mesh")
+		return
+	if vm._dispatch_sprite_method(sprite, "SetMeshWarpEffect", [[], 0, 0, 0]) != -1:
+		_fail("SetMeshWarpEffect must reject invalid mesh dimensions")
+		return
 	print("PASS WaveCircle native parameters and animeEffect timing")
 	quit(0)
 

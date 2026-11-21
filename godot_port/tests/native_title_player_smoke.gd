@@ -73,6 +73,21 @@ func _run() -> void:
 	var effect_material := effect_texture.material as ShaderMaterial if effect_texture != null else null
 	if not _require(effect_material != null and effect_material.get_shader_parameter("effect_mode") == 7, "WaveCircle must reach the native TextureRect shader renderer"): return
 	if not _require(effect_material.shader.code.contains("wave_front") and effect_material.get_shader_parameter("raster_transition") == true, "WaveCircle shader must apply the native radial curve and transition flag"): return
+	var mesh_values: Array = [
+		0.0, 0.0, 64.0, 0.0, 0.0, 64.0, 64.0, 64.0,
+		0.0, 0.0, 64.0, 10.0, 10.0, 64.0, 64.0, 64.0,
+	]
+	effect_sprite.blending = 128
+	if not _require(player.vm._dispatch_sprite_method(effect_sprite, "SetMeshWarpEffect", [mesh_values, 2, 1, 1]) == 0, "Original SetMeshWarpEffect must accept two flattened mesh poses"): return
+	player._sync_native_title_sprite(effect_sprite, player.native_title_canvas, {}, false)
+	var mesh_wrapper: Control = player.native_title_controls.get(effect_sprite.get_instance_id(), null)
+	var mesh_node: MeshInstance2D = mesh_wrapper.get_node_or_null("NativeMeshWarp") if mesh_wrapper != null else null
+	if not _require(mesh_node != null and mesh_node.mesh != null and mesh_node.texture == effect_sprite.texture, "MeshWarp must render as a textured native mesh"): return
+	var mesh_arrays: Array = mesh_node.mesh.surface_get_arrays(0)
+	var mesh_vertices: PackedVector3Array = mesh_arrays[Mesh.ARRAY_VERTEX]
+	if not _require(mesh_vertices.size() == 4 and mesh_vertices[1].is_equal_approx(Vector3(64.0, 5.0, 0.0)), "MeshWarp degree must interpolate the original vertex poses"): return
+	if not _require(is_equal_approx(mesh_node.modulate.a, 0.75) and not effect_texture.visible, "MeshWarp transition must use SDK transparency and replace the flat image"):
+		return
 	await process_frame
 	var hand_made_menu = player.title_panel.find_child("TitleMenu", true, false)
 	if not _require(hand_made_menu != null and not hand_made_menu.visible, "Hand-authored title menu must be hidden"): return

@@ -1502,6 +1502,57 @@ class HostSprite extends RefCounted:
 			host.active_effect_sprites[get_instance_id()] = weakref(self)
 		return 0
 
+	func set_mesh_warp_effect(mesh_values: Variant, mesh_list_count: int, mesh_width: int, mesh_height: int, base_values: Variant = null) -> int:
+		if not mesh_values is Array or mesh_list_count <= 0 or mesh_list_count > 32 or mesh_width <= 0 or mesh_height <= 0 or mesh_width > 128 or mesh_height > 128:
+			return -1
+		var vertex_count := (mesh_width + 1) * (mesh_height + 1)
+		if vertex_count > 16384 or vertex_count * mesh_list_count > 65536:
+			return -1
+		var flattened: Array = mesh_values
+		if flattened.size() < vertex_count * mesh_list_count * 2:
+			return -1
+		var mesh_frames: Array[PackedVector2Array] = []
+		var value_index := 0
+		for _frame_index in range(mesh_list_count):
+			var frame := PackedVector2Array()
+			frame.resize(vertex_count)
+			for point_index in range(vertex_count):
+				var x_value: Variant = flattened[value_index]
+				var y_value: Variant = flattened[value_index + 1]
+				if not (x_value is int or x_value is float) or not (y_value is int or y_value is float):
+					return -1
+				var point := Vector2(float(x_value), float(y_value))
+				if not is_finite(point.x) or not is_finite(point.y) or absf(point.x) > 65536.0 or absf(point.y) > 65536.0:
+					return -1
+				frame[point_index] = point
+				value_index += 2
+			mesh_frames.append(frame)
+		var base_frame := PackedVector2Array()
+		base_frame.resize(vertex_count)
+		if base_values is Array:
+			var base_array: Array = base_values
+			if base_array.size() < vertex_count * 2:
+				return -1
+			for point_index in range(vertex_count):
+				var bx: Variant = base_array[point_index * 2]
+				var by: Variant = base_array[point_index * 2 + 1]
+				if not (bx is int or bx is float) or not (by is int or by is float):
+					return -1
+				base_frame[point_index] = Vector2(float(bx), float(by))
+		else:
+			for row in range(mesh_height + 1):
+				for column in range(mesh_width + 1):
+					var idx := row * (mesh_width + 1) + column
+					base_frame[idx] = Vector2(float(size.x) * column / mesh_width, float(size.y) * row / mesh_height)
+		fields["effect_type"] = "MeshWarp"
+		fields["effect_mesh_frames"] = mesh_frames
+		fields["effect_mesh_base"] = base_frame
+		fields["effect_mesh_width"] = mesh_width
+		fields["effect_mesh_height"] = mesh_height
+		fields["effect_transition"] = true
+		fields["effect_render_revision"] = int(fields.get("effect_render_revision", 0)) + 1
+		return 0
+
 	func _effect_integer(effect: Variant, field_name: String, default_value: int = 0) -> int:
 		var value: Variant = effect.get_field(field_name)
 		return int(value) if value is int or value is float or value is bool else default_value

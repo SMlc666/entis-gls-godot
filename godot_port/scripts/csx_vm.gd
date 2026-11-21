@@ -1543,6 +1543,14 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 			return 0
 		"SetEffectParameter":
 			return spr.set_effect_parameter(args[0] if not args.is_empty() else null, args[1] if args.size() > 1 else null)
+		"SetMeshWarpEffect":
+			return spr.set_mesh_warp_effect(
+				args[0] if args.size() > 0 else null,
+			_to_int(args[1]) if args.size() > 1 else 0,
+			_to_int(args[2]) if args.size() > 2 else 0,
+			_to_int(args[3]) if args.size() > 3 else 0,
+			args[4] if args.size() > 4 else null
+		)
 		"ModifyAnimationFlags":
 			var add_flags := _to_int(args[0]) if not args.is_empty() else 0
 			var remove_flags := _to_int(args[1]) if args.size() > 1 else 0
