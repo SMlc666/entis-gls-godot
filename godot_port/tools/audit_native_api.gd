@@ -11,6 +11,7 @@ const AUDITED_METHODS := [
 	"CancelVolumeEnvelope", "GetSoundInfo", "GetWaveData", "LoadMidi", "SaveImage",
 	"GetPixel", "GetPixelRect", "SetPixelRect", "GetInfo", "GetImageInfo",
 	"Enable", "IsEnabled", "SetFontBordering", "GetCursorPos", "MoveCursorPos", "Refresh",
+	"DeleteContents", "LoadResource", "CreateFormPage",
 	"SetEffectParameter", "SetMeshWarpEffect", "OpenMovie", "PlayMovie",
 	"IsMoviePlaying", "StopMovie", "CloseMovie",
 ]
@@ -36,6 +37,7 @@ func _initialize() -> void:
 		return
 
 	var calls: Dictionary = {}
+	var all_calls: Dictionary = {}
 	var callsites: Dictionary = {}
 	var volume_callsites: Dictionary = {}
 	var movie_callsites: Dictionary = {}
@@ -57,9 +59,11 @@ func _initialize() -> void:
 			if int(instruction["opcode"]) != 8:
 				continue
 			var method_name := str(operands.get("name", ""))
+			var mode := int(operands.get("mode", -1))
+			var all_key := "%s mode=%d" % [method_name, mode]
+			all_calls[all_key] = int(all_calls.get(all_key, 0)) + 1
 			if not AUDITED_METHODS.has(method_name):
 				continue
-			var mode := int(operands.get("mode", -1))
 			var key := "%s mode=%d" % [method_name, mode]
 			calls[key] = int(calls.get(key, 0)) + 1
 			if method_name == "SetEffectParameter":
@@ -75,6 +79,11 @@ func _initialize() -> void:
 			return
 
 	print("CSX instructions=%d functions=%d conststr=%d" % [vm.instruction_starts.size(), vm.functions.size(), vm.const_strings.size()])
+	var all_call_keys: Array = all_calls.keys()
+	all_call_keys.sort()
+	print("All bytecode member/method callsites by name and dispatch mode:")
+	for key in all_call_keys:
+		print("  %s count=%d" % [key, all_calls[key]])
 	var call_keys: Array = calls.keys()
 	call_keys.sort()
 	print("Observed native API callsites:")
