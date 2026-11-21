@@ -12,7 +12,7 @@ const AUDITED_METHODS := [
 	"GetPixel", "GetPixelRect", "SetPixelRect", "GetInfo", "GetImageInfo",
 	"Enable", "IsEnabled", "SetFontBordering", "GetCursorPos", "MoveCursorPos", "Refresh",
 	"DeleteContents", "LoadResource", "CreateFormPage",
-	"SetEffectParameter", "SetMeshWarpEffect", "OpenMovie", "PlayMovie",
+	"SetEffectParameter", "SetMeshWarpEffect", "SetAlphaImage", "GetBlendDegree", "SetBlendDegree", "OpenMovie", "PlayMovie",
 	"IsMoviePlaying", "StopMovie", "CloseMovie",
 ]
 
@@ -41,6 +41,7 @@ func _initialize() -> void:
 	var callsites: Dictionary = {}
 	var volume_callsites: Dictionary = {}
 	var movie_callsites: Dictionary = {}
+	var alpha_callsites: Dictionary = {}
 	var effect_literals: Dictionary = {}
 	var cursor := 0
 	while cursor < vm.image.size():
@@ -72,6 +73,8 @@ func _initialize() -> void:
 				volume_callsites[int(instruction["address"])] = "%s %s mode=%d" % [method_name, _function_owner(vm.functions, int(instruction["address"])), mode]
 			if method_name in ["OpenMovie", "PlayMovie", "IsMoviePlaying", "StopMovie", "CloseMovie"]:
 				movie_callsites[int(instruction["address"])] = "%s mode=%d" % [_function_owner(vm.functions, int(instruction["address"])), mode]
+			if method_name in ["SetAlphaImage", "GetBlendDegree", "SetBlendDegree"]:
+				alpha_callsites[int(instruction["address"])] = "%s mode=%d" % [_function_owner(vm.functions, int(instruction["address"])), mode]
 		cursor = int(batch.get("next_address", cursor))
 		if cursor <= 0:
 			push_error("CSX decoder failed to advance")
@@ -109,6 +112,11 @@ func _initialize() -> void:
 	print("Movie callsites:")
 	for address in movie_addresses:
 		print("  0x%X %s" % [address, movie_callsites[address]])
+	var alpha_addresses: Array = alpha_callsites.keys()
+	alpha_addresses.sort()
+	print("Alpha mask callsites:")
+	for address in alpha_addresses:
+		print("  0x%X %s" % [address, alpha_callsites[address]])
 	quit(0)
 
 

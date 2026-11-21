@@ -1184,6 +1184,10 @@ class HostSprite extends RefCounted:
 	var attached_resource: HostResource = null
 	var image: Image = null
 	var texture: ImageTexture = null
+	var alpha_resource: HostResource = null
+	var alpha_image: Image = null
+	var alpha_texture: ImageTexture = null
+	var alpha_range: int = 256
 	var animation_frames: Array[Image] = []
 	var animation_sequence: Array[int] = []
 	var animation_total_time_ms: int = 0
@@ -1393,6 +1397,14 @@ class HostSprite extends RefCounted:
 
 	func set_transparency(alpha: int) -> void:
 		transparency = clampi(alpha, 0, 256)
+
+	func set_blend_degree(degree: int) -> void:
+		blending = degree
+		if alpha_resource == null or alpha_range >= 256:
+			transparency = clampi(degree, 0, 256)
+
+	func get_blend_degree() -> int:
+		return blending if alpha_resource != null and alpha_range < 256 else transparency
 
 	func set_blending_envelope(b: int) -> void:
 		blending = b
@@ -1793,6 +1805,9 @@ class HostSprite extends RefCounted:
 		attached_resource = null
 		image = null
 		texture = null
+		alpha_resource = null
+		alpha_image = null
+		alpha_texture = null
 		return 0
 
 	func create_sprite(_format: int, w: int, h: int) -> int:
@@ -1807,7 +1822,37 @@ class HostSprite extends RefCounted:
 	func set_back_color(_rgb: int, _enable: bool) -> int:
 		return 0
 
-	func set_alpha_image(_alpha_res: Variant, _range: int = 0) -> int:
+	func set_alpha_image(alpha_res: Variant, alpha_range_value: int = 256) -> int:
+		alpha_resource = alpha_res as HostResource if alpha_res is HostResource else null
+		alpha_image = null
+		alpha_texture = null
+		alpha_range = alpha_range_value & 0xffffffff
+		if alpha_resource == null:
+			return 0
+		if alpha_resource.image == null and not alpha_resource.name.is_empty():
+			alpha_resource.load_image(alpha_resource.name)
+		if alpha_resource.image == null or alpha_resource.image.is_empty():
+			alpha_resource = null
+			return 0
+		alpha_image = alpha_resource.image
+		if alpha_range <= 256:
+			var mask_size := alpha_image.get_size()
+			if image == null or image.get_size() != mask_size or image.get_format() != Image.FORMAT_RGBA8:
+				image = Image.create(mask_size.x, mask_size.y, false, Image.FORMAT_RGBA8)
+				image.fill(Color(0, 0, 0, 0))
+				texture = ImageTexture.create_from_image(image)
+				size = Vector2i(mask_size)
+			alpha_range = maxi(0, alpha_range)
+			var mask: Image = alpha_image.duplicate()
+			mask.convert(Image.FORMAT_RGBA8)
+			var pixels: PackedByteArray = mask.get_data()
+			for offset in range(0, pixels.size(), 4):
+				var value: int = pixels[offset]
+				pixels[offset + 1] = value
+				pixels[offset + 2] = value
+				pixels[offset + 3] = 255
+			mask.set_data(mask.get_width(), mask.get_height(), false, Image.FORMAT_RGBA8, pixels)
+			alpha_texture = ImageTexture.create_from_image(mask)
 		return 0
 
 	func fill_rect(rect: Variant = null, color: int = 0, trans: int = 0, _flags: int = 0) -> int:

@@ -2372,7 +2372,8 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 			native_mesh.visible = false
 		var effect_type := str(sprite.fields.get("effect_type", ""))
 		var effect_mode: int = int({"TileImage": 1, "FilterWhite": 2, "FilterLight": 3, "FilterBlack": 4, "FilterDark": 5, "RasterScroll": 6, "WaveCircle": 7, "ShadingOff": 8, "ShadingLight": 9}.get(effect_type, 0))
-		if effect_mode > 0 and sprite.texture != null:
+		var alpha_mask_active := sprite.alpha_texture != null and sprite.alpha_range > 0 and sprite.alpha_range < 256 and sprite.texture != null
+		if (effect_mode > 0 or alpha_mask_active) and sprite.texture != null:
 			var effect_material: ShaderMaterial = native_texture.get_meta("native_effect_material") as ShaderMaterial if native_texture.has_meta("native_effect_material") else null
 			if effect_material == null:
 				var effect_shader := Shader.new()
@@ -2387,6 +2388,10 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 			uniform float raster_mesh_size = 1.0;
 			uniform float raster_frequency = 0.0;
 			uniform bool raster_transition = false;
+			uniform sampler2D alpha_mask_texture;
+			uniform bool alpha_mask_ready = false;
+			uniform float alpha_mask_range = 256.0;
+			uniform float alpha_mask_blend = 0.0;
 			uniform sampler2D shading_level_0;
 			uniform sampler2D shading_level_1;
 			uniform sampler2D shading_level_2;
@@ -2451,7 +2456,14 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 				} else if (effect_mode == 5) {
 					channels = max(channels - vec3(float(degree)), vec3(0.0));
 				}
-				COLOR = vec4(clamp(channels / 255.0, vec3(0.0), vec3(1.0)), sampled.a) * COLOR;
+				float output_alpha = sampled.a;
+				if (alpha_mask_ready && alpha_mask_range < 256.0) {
+					float mask_value = texture(alpha_mask_texture, UV).r * 255.0;
+					float alpha_base = 256.0 - (alpha_mask_range * 256.0 + 256.0) * clamp(alpha_mask_blend, 0.0, 256.0) / 256.0;
+					float mask_factor = clamp(floor(mask_value * alpha_mask_range + 0.5) + alpha_base, 0.0, 255.0) / 255.0;
+					output_alpha *= mask_factor;
+				}
+				COLOR = vec4(clamp(channels / 255.0, vec3(0.0), vec3(1.0)), output_alpha) * COLOR;
 			}
 				"""
 				effect_material = ShaderMaterial.new()
@@ -2464,6 +2476,11 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 			effect_material.set_shader_parameter("scroll_uv", Vector2(tile_scroll) / source_size if effect_mode == 1 else Vector2.ZERO)
 			effect_material.set_shader_parameter("effect_mode", effect_mode)
 			effect_material.set_shader_parameter("blend_degree", clampi(sprite.blending, 0, 256))
+			effect_material.set_shader_parameter("alpha_mask_ready", alpha_mask_active)
+			effect_material.set_shader_parameter("alpha_mask_range", float(sprite.alpha_range))
+			effect_material.set_shader_parameter("alpha_mask_blend", float(sprite.blending))
+			if alpha_mask_active:
+				effect_material.set_shader_parameter("alpha_mask_texture", sprite.alpha_texture)
 			effect_material.set_shader_parameter("raster_degree", sprite.blending)
 			effect_material.set_shader_parameter("raster_shaking_width", float(sprite.fields.get("effect_shaking_width", 0)))
 			effect_material.set_shader_parameter("raster_mesh_size", float(sprite.fields.get("effect_mesh_size", 1)))

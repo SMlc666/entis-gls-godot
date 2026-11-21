@@ -1556,8 +1556,10 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 				spr.set_blending_envelope(_to_int(args[0]))
 			return 0
 		"SetBlendDegree":
-			spr.blending = _to_int(args[0]) if not args.is_empty() else 0
+			spr.set_blend_degree(_to_int(args[0]) if not args.is_empty() else 0)
 			return 0
+		"GetBlendDegree":
+			return spr.get_blend_degree()
 		"SetEffectParameter":
 			return spr.set_effect_parameter(args[0] if not args.is_empty() else null, args[1] if args.size() > 1 else null)
 		"SetMeshWarpEffect":
@@ -1626,7 +1628,7 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 			return spr.set_back_color(rgb, en)
 		"SetAlphaImage":
 			var a_res = args[0] if args.size() > 0 else null
-			var rng := _to_int(args[1]) if args.size() > 1 else 0
+			var rng := _to_int(args[1]) if args.size() > 1 else 256
 			return spr.set_alpha_image(a_res, rng)
 		"FillRect":
 			var rect = args[0] if args.size() > 0 else null

@@ -73,6 +73,23 @@ func _run() -> void:
 	var effect_material := effect_texture.material as ShaderMaterial if effect_texture != null else null
 	if not _require(effect_material != null and effect_material.get_shader_parameter("effect_mode") == 7, "WaveCircle must reach the native TextureRect shader renderer"): return
 	if not _require(effect_material.shader.code.contains("wave_front") and effect_material.shader.code.contains("1.0 - transition_alpha * transition_alpha") and effect_material.get_shader_parameter("raster_transition") == true, "WaveCircle shader must apply the native radial curve and SDK transparency transition"): return
+	var masked_sprite := CsxHostClass.HostSprite.new(9002, player.host)
+	masked_sprite.position = Vector2i(160, 80)
+	masked_sprite.size = Vector2i(2, 1)
+	masked_sprite.image = Image.create(2, 1, false, Image.FORMAT_RGBA8)
+	masked_sprite.image.fill(Color.WHITE)
+	masked_sprite.texture = ImageTexture.create_from_image(masked_sprite.image)
+	var alpha_resource := CsxHostClass.HostResource.new("smoke_alpha", "", -1, 0, 0, player.host)
+	alpha_resource.image = Image.create(2, 1, false, Image.FORMAT_RGBA8)
+	alpha_resource.image.fill(Color.WHITE)
+	if not _require(masked_sprite.set_alpha_image(alpha_resource, 128) == 0, "Alpha mask must attach before rendering"): return
+	masked_sprite.set_blend_degree(96)
+	player._sync_native_title_sprite(masked_sprite, player.native_title_canvas, {}, false)
+	var masked_wrapper: Control = player.native_title_controls.get(masked_sprite.get_instance_id(), null)
+	var masked_texture: TextureRect = masked_wrapper.get_node_or_null("NativeTexture") if masked_wrapper != null else null
+	var masked_material := masked_texture.material as ShaderMaterial if masked_texture != null else null
+	if not _require(masked_material != null and masked_material.get_shader_parameter("alpha_mask_ready") == true, "Alpha mask must activate shader compositing without another sprite effect"): return
+	if not _require(masked_material.get_shader_parameter("alpha_mask_texture") == masked_sprite.alpha_texture and masked_material.get_shader_parameter("alpha_mask_range") == 128.0 and masked_material.get_shader_parameter("alpha_mask_blend") == 96.0, "Alpha mask image, range and SetBlendDegree must reach native shader uniforms"): return
 	var mesh_values: Array = [
 		0.0, 0.0, 64.0, 0.0, 0.0, 64.0, 64.0, 64.0,
 		0.0, 0.0, 64.0, 10.0, 10.0, 64.0, 64.0, 64.0,
