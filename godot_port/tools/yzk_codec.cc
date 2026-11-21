@@ -241,6 +241,86 @@ uint8_t mei_clamp_byte(int value) {
     return static_cast<uint8_t>(std::clamp(value, 0, 255));
 }
 
+int mei_average_byte(int left, int right) {
+    // Matches the rounded byte average used by Entis' 486 loop-filter path.
+    return ((left >> 1) & 0x7f) + ((right >> 1) & 0x7f) + (left & right & 1);
+}
+
+void mei_filter_421_region(std::vector<uint8_t> &rgba, size_t image_width,
+    size_t x_begin, size_t y_begin, size_t region_width, size_t region_height) {
+    if (region_width < 2 || region_height < 2) return;
+    std::vector<uint8_t> horizontal(region_width * region_height * 4);
+    const auto source_offset = [=](size_t x, size_t y, size_t channel) {
+        return ((y_begin + y) * image_width + x_begin + x) * 4 + channel;
+    };
+    for (size_t y = 0; y < region_height; ++y) {
+        for (size_t channel = 0; channel < 4; ++channel) {
+            horizontal[(y * region_width) * 4 + channel] = rgba[source_offset(0, y, channel)];
+            horizontal[(y * region_width + region_width - 1) * 4 + channel]
+                = rgba[source_offset(region_width - 1, y, channel)];
+            for (size_t x = 1; x + 1 < region_width; ++x) {
+                const int neighbors = mei_average_byte(
+                    rgba[source_offset(x - 1, y, channel)],
+                    rgba[source_offset(x + 1, y, channel)]);
+                horizontal[(y * region_width + x) * 4 + channel]
+                    = static_cast<uint8_t>(mei_average_byte(
+                        rgba[source_offset(x, y, channel)], neighbors));
+            }
+        }
+    }
+    for (size_t y = 1; y + 1 < region_height; ++y) {
+        for (size_t x = 0; x < region_width; ++x) {
+            for (size_t channel = 0; channel < 4; ++channel) {
+                const size_t dst = source_offset(x, y, channel);
+                const int neighbors = mei_average_byte(
+                    horizontal[((y - 1) * region_width + x) * 4 + channel],
+                    horizontal[((y + 1) * region_width + x) * 4 + channel]);
+                rgba[dst] = static_cast<uint8_t>(mei_average_byte(
+                    horizontal[(y * region_width + x) * 4 + channel], neighbors));
+            }
+        }
+    }
+    for (size_t x = 0; x < region_width; ++x) {
+        for (size_t channel = 0; channel < 4; ++channel) {
+            rgba[source_offset(x, 0, channel)] = horizontal[x * 4 + channel];
+            rgba[source_offset(x, region_height - 1, channel)]
+                = horizontal[((region_height - 1) * region_width + x) * 4 + channel];
+        }
+    }
+}
+
+void mei_apply_local_loop_filter_421(std::vector<uint8_t> &rgba,
+    size_t width, size_t height, const std::vector<int8_t> *motion_flags) {
+    const size_t blocks_wide = (width + 15) / 16;
+    const size_t blocks_high = (height + 15) / 16;
+    if (!motion_flags || motion_flags->empty()) {
+        mei_filter_421_region(rgba, width, 0, 0, width, height);
+        return;
+    }
+    for (size_t by = 0; by < blocks_high; ++by) {
+        size_t bx = 0;
+        while (bx < blocks_wide) {
+            const size_t block_index = by * blocks_wide + bx;
+            if (block_index >= motion_flags->size() || (*motion_flags)[block_index] != 0) {
+                ++bx;
+                continue;
+            }
+            const size_t begin = bx;
+            do {
+                ++bx;
+            } while (bx < blocks_wide
+                && by * blocks_wide + bx < motion_flags->size()
+                && (*motion_flags)[by * blocks_wide + bx] == 0);
+            const size_t x_begin = begin * 16;
+            const size_t x_end = std::min(width, bx * 16);
+            const size_t y_begin = by * 16;
+            const size_t y_end = std::min(height, y_begin + 16);
+            mei_filter_421_region(rgba, width, x_begin, y_begin,
+                x_end - x_begin, y_end - y_begin);
+        }
+    }
+}
+
 bool reconstruct_mei_frame_pixels(size_t width, size_t height,
     const std::vector<int8_t> &coefficients,
     const std::array<uint8_t, 128> &quantization,
@@ -251,7 +331,7 @@ bool reconstruct_mei_frame_pixels(size_t width, size_t height,
     const std::vector<int8_t> *motion_flags = nullptr,
     const std::vector<int8_t> *motion_vectors = nullptr,
     const std::vector<uint8_t> *next_reference = nullptr,
-    bool allow_bidirectional = false) {
+    bool allow_bidirectional = false, bool apply_local_loop_filter = false) {
     const size_t block_width = (width + 15) / 16;
     const size_t block_height = (height + 15) / 16;
     if (coefficients.size() != block_width * block_height * 384
@@ -486,6 +566,8 @@ bool reconstruct_mei_frame_pixels(size_t width, size_t height,
             }
         }
     }
+    if (apply_local_loop_filter)
+        mei_apply_local_loop_filter_421(rgba, width, height, motion_flags);
     return true;
 }
 
@@ -1079,7 +1161,9 @@ Dictionary YzkCodec::decode_mei(const PackedByteArray &input) const {
         const bool first_frame_decoded = first_frame_entropy_decoded
             && reconstruct_mei_frame_pixels(width, height, first_frame_coefficients,
                 first_frame_quantization, first_frame_operations, first_frame_rgba,
-                first_frame_min_luma, first_frame_max_luma, video_error);
+                first_frame_min_luma, first_frame_max_luma, video_error,
+                false, nullptr, nullptr, nullptr, nullptr, false,
+                (first_frame.operation_flags & 0x08) != 0);
         PackedByteArray samples;
         samples.resize(static_cast<int64_t>(expected_audio_bytes));
         std::memcpy(samples.ptrw(), audio.samples.get<const uint8_t>(), static_cast<size_t>(expected_audio_bytes));
@@ -1166,7 +1250,9 @@ Dictionary YzkCodec::decode_mei_i_frame(const PackedByteArray &input, int64_t fr
     std::vector<uint8_t> rgba;
     int minimum_luma = 0, maximum_luma = 0;
     if (!reconstruct_mei_frame_pixels(width, height, coefficients, quantization,
-        operations, rgba, minimum_luma, maximum_luma, frame_error))
+        operations, rgba, minimum_luma, maximum_luma, frame_error,
+        false, nullptr, nullptr, nullptr, nullptr, false,
+        (frame.operation_flags & 0x08) != 0))
         return codec_failure(frame_error);
     PackedByteArray pixels;
     pixels.resize(static_cast<int64_t>(rgba.size()));
@@ -1215,7 +1301,8 @@ Dictionary YzkCodec::decode_mei_p_frame(const PackedByteArray &input, int64_t fr
     int minimum_luma = 0, maximum_luma = 0;
     if (!reconstruct_mei_frame_pixels(width, height, coefficients, quantization,
         operations, rgba, minimum_luma, maximum_luma, frame_error, true,
-        &previous, &motion_flags, &motion_vectors))
+        &previous, &motion_flags, &motion_vectors, nullptr, false,
+        (frame.operation_flags & 0x08) != 0))
         return codec_failure(frame_error);
     PackedByteArray pixels;
     pixels.resize(static_cast<int64_t>(rgba.size()));
@@ -1268,7 +1355,8 @@ Dictionary YzkCodec::decode_mei_b_frame(const PackedByteArray &input, int64_t fr
     int minimum_luma = 0, maximum_luma = 0;
     if (!reconstruct_mei_frame_pixels(width, height, coefficients, quantization,
         operations, rgba, minimum_luma, maximum_luma, frame_error, true,
-        &previous, &motion_flags, &motion_vectors, &next, true))
+        &previous, &motion_flags, &motion_vectors, &next, true,
+        (frame.operation_flags & 0x08) != 0))
         return codec_failure(frame_error);
     PackedByteArray pixels;
     pixels.resize(static_cast<int64_t>(rgba.size()));

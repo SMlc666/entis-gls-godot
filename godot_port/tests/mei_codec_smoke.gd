@@ -99,6 +99,35 @@ func _initialize() -> void:
 	if int(second_i.get("min_luma", 0)) >= int(second_i.get("max_luma", 0)):
 		_fail("second I-frame reconstruction produced a uniform image")
 		return
+	var image_record_ordinal := 0
+	for index: int in range(second_i_index):
+		if str(frames[index].get("record_type", "")) == "ImageFrm":
+			image_record_ordinal += 1
+	var second_image_header := _find_record_header(original, "ImageFrm", image_record_ordinal)
+	if second_image_header < 0:
+		_fail("could not locate the second I-frame in the read-only source bytes")
+		return
+	var filtered_mei := original.duplicate()
+	var original_operation_flags := int(frames[second_i_index].get("operation_flags", 0))
+	if filtered_mei[second_image_header] != 0x28 or filtered_mei[second_image_header + 1] != original_operation_flags:
+		_fail("second I-frame section lookup does not match the parsed frame metadata")
+		return
+	filtered_mei[second_image_header + 1] |= 0x08
+	if filtered_mei[second_image_header + 1] != (original_operation_flags | 0x08):
+		_fail("could not enable the local 4-2-1 operation-table flag in memory")
+		return
+	var filtered_i: Variant = codec.call("decode_mei_i_frame", filtered_mei, second_i_index)
+	if not filtered_i is Dictionary or not filtered_i.get("ok", false):
+		_fail("SDK 4-2-1 loop-filter I-frame decode failed")
+		return
+	var filtered_pixels: PackedByteArray = filtered_i.get("rgba", PackedByteArray())
+	var filtered_byte_count := 0
+	for index: int in second_pixels.size():
+		if second_pixels[index] != filtered_pixels[index]:
+			filtered_byte_count += 1
+	if filtered_byte_count == 0:
+		_fail("SDK local 4-2-1 frame flag did not filter the second I-frame")
+		return
 	var b_frame: Variant = codec.call("decode_mei_i_frame", original, 1)
 	if not b_frame is Dictionary or b_frame.get("ok", true):
 		_fail("random access must not decode a differential B-frame without references")
@@ -195,3 +224,20 @@ func _initialize() -> void:
 func _fail(message: String) -> void:
 	printerr("FAIL %s" % message)
 	quit(1)
+
+
+func _find_record_header(data: PackedByteArray, record_name: String, ordinal: int) -> int:
+	var signature := record_name.to_ascii_buffer()
+	var found := 0
+	for offset: int in range(data.size() - signature.size()):
+		var matches := true
+		for index: int in signature.size():
+			if data[offset + index] != signature[index]:
+				matches = false
+				break
+		if not matches:
+			continue
+		if found == ordinal:
+			return offset + signature.size() + 8
+		found += 1
+	return -1
