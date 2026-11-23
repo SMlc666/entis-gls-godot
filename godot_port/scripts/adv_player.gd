@@ -2403,6 +2403,10 @@ func _sync_native_title_canvas() -> void:
 			var focused_button: TextureButton = focused_wrapper.get_node_or_null("NativeButton")
 			if focused_button != null and focused_button.is_visible_in_tree() and not focused_button.disabled and not focused_button.has_focus():
 				focused_button.grab_focus()
+	else:
+		var current_focus := get_viewport().gui_get_focus_owner()
+		if current_focus != null and native_title_canvas.is_ancestor_of(current_focus):
+			current_focus.release_focus()
 	for instance_id in native_title_controls.keys():
 		if not seen.has(instance_id):
 			var stale_node: Node = native_title_controls[instance_id]

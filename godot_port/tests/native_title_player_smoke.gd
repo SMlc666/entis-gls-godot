@@ -76,6 +76,8 @@ func _run() -> void:
 	player._sync_native_title_canvas()
 	if not _require(focus_continue_button.has_focus(), "Native focus synchronization must not restore the previously focused button"): return
 	native_window.set_focus("")
+	player._sync_native_title_canvas()
+	if not _require(not focus_continue_button.has_focus(), "Clearing native focus must release the matching Godot button focus"): return
 	for command_id: String in ["ID_CONFIG", "ID_EXITGAME"]:
 		if not _require(_find_button_sprite(native_window.root_sprites, command_id) != null, "Native Title() must expose its original %s command" % command_id): return
 	if not _require(player.is_title_mode and player.is_running, "Title() must run asynchronously in title mode"): return
