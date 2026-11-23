@@ -1898,6 +1898,7 @@ class HostSprite extends RefCounted:
 			var dst_pos := Vector2i.ZERO
 			var center := Vector2i.ZERO
 			var scale := Vector2.ONE
+			var draw_transparency := 0
 			if param != null and param.has_method("get_field"):
 				var pt = param.get_field("ptDstPos")
 				if pt != null and pt.has_method("get_field"):
@@ -1909,6 +1910,8 @@ class HostSprite extends RefCounted:
 				var vert = param.get_field("rVertUnit")
 				if horz != null: scale.x = float(horz)
 				if vert != null: scale.y = float(vert)
+				var alpha = param.get_field("nTransparency")
+				if alpha != null: draw_transparency = clampi(int(alpha), 0, 256)
 			var src_rect := Rect2i(Vector2i.ZERO, src_img.get_size())
 			if clip != null and clip.has_method("get_field"):
 				var left := int(clip.get_field("left"))
@@ -1916,13 +1919,24 @@ class HostSprite extends RefCounted:
 				var right := int(clip.get_field("right"))
 				var bottom := int(clip.get_field("bottom"))
 				src_rect = Rect2i(left, top, maxi(0, right - left), maxi(0, bottom - top)).intersection(src_rect)
-			if scale.x <= 0.0 or scale.y <= 0.0 or src_rect.size.x <= 0 or src_rect.size.y <= 0:
+			if is_zero_approx(scale.x) or is_zero_approx(scale.y) or src_rect.size.x <= 0 or src_rect.size.y <= 0 or draw_transparency >= 256:
 				return 1
 			var source_view := src_img.get_region(src_rect)
-			var scaled_size := Vector2i(maxi(1, roundi(src_rect.size.x * scale.x)), maxi(1, roundi(src_rect.size.y * scale.y)))
+			var scaled_size := Vector2i(maxi(1, roundi(src_rect.size.x * absf(scale.x))), maxi(1, roundi(src_rect.size.y * absf(scale.y))))
 			if scaled_size != src_rect.size:
 				source_view.resize(scaled_size.x, scaled_size.y, Image.INTERPOLATE_BILINEAR)
-			image.blend_rect(source_view, Rect2i(Vector2i.ZERO, scaled_size), dst_pos - Vector2i(Vector2(center) * scale))
+			if scale.x < 0.0: source_view.flip_x()
+			if scale.y < 0.0: source_view.flip_y()
+			if draw_transparency > 0:
+				source_view.convert(Image.FORMAT_RGBA8)
+				var pixels := source_view.get_data()
+				for offset in range(3, pixels.size(), 4):
+					pixels[offset] = (int(pixels[offset]) * (256 - draw_transparency) + 128) >> 8
+				source_view.set_data(scaled_size.x, scaled_size.y, false, Image.FORMAT_RGBA8, pixels)
+			var draw_origin := dst_pos - Vector2i(Vector2(center) * scale)
+			if scale.x < 0.0: draw_origin.x -= scaled_size.x
+			if scale.y < 0.0: draw_origin.y -= scaled_size.y
+			image.blend_rect(source_view, Rect2i(Vector2i.ZERO, scaled_size), draw_origin)
 			texture = ImageTexture.create_from_image(image)
 			return 1
 		return 0
