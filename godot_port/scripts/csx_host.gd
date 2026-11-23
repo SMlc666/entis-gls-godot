@@ -1996,9 +1996,17 @@ class HostWindow extends RefCounted:
 
 	func detach_sprite(spr: Variant) -> void:
 		if spr is HostSprite:
-			root_sprites.erase(spr)
-			if focused_sprite == spr:
+			if _contains_focused_sprite(spr):
 				set_focus("")
+			root_sprites.erase(spr)
+
+	func _contains_focused_sprite(sprite: HostSprite) -> bool:
+		if sprite == focused_sprite:
+			return true
+		for child: HostSprite in sprite.children:
+			if _contains_focused_sprite(child):
+				return true
+		return false
 
 	func detach_all_sprites() -> void:
 		root_sprites.clear()

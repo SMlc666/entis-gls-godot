@@ -2397,6 +2397,12 @@ func _sync_native_title_canvas() -> void:
 	var filter_title_depth := is_title_mode and not native_appreciation_mode
 	var seen: Dictionary = {}
 	_sync_native_sprite_children(window.root_sprites, native_title_canvas, seen, filter_title_depth)
+	if window.focused_sprite != null:
+		var focused_wrapper: Control = native_title_controls.get(window.focused_sprite.get_instance_id(), null)
+		if focused_wrapper != null:
+			var focused_button: TextureButton = focused_wrapper.get_node_or_null("NativeButton")
+			if focused_button != null and focused_button.is_visible_in_tree() and not focused_button.disabled and not focused_button.has_focus():
+				focused_button.grab_focus()
 	for instance_id in native_title_controls.keys():
 		if not seen.has(instance_id):
 			var stale_node: Node = native_title_controls[instance_id]
