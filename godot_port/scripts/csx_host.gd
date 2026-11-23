@@ -1211,6 +1211,8 @@ class HostSprite extends RefCounted:
 	var activation_end_alpha: int = 0
 	var activation_target_alpha: int = 0
 	var activation_fade_enabled: bool = false
+	var activation_action_type: int = 0
+	var activation_durations: Array[float] = []
 	var children: Array[HostSprite] = []
 	var form_resources: HostResourceManager
 	var text_content: String = ""
@@ -1444,24 +1446,47 @@ class HostSprite extends RefCounted:
 		activation_start_alpha = get_blend_degree()
 		activation_elapsed_ms = 0.0
 
-	func begin_activation(duration_ms: int) -> void:
+	func begin_activation(duration: Variant, action_type: int = 0) -> void:
 		activation_start_alpha = get_blend_degree()
 		activation_end_alpha = clampi(activation_target_alpha, 0, 256)
-		activation_duration_ms = float(duration_ms)
+		activation_durations.clear()
+		if duration is Array:
+			for item: Variant in duration:
+				activation_durations.append(maxf(0.0, float(item)))
+		else:
+			activation_durations.append(maxf(0.0, float(duration)))
+		activation_duration_ms = 0.0
+		for item: float in activation_durations:
+			activation_duration_ms += item
+		activation_action_type = action_type
 		activation_elapsed_ms = 0.0
 		is_activating = true
 		_apply_activation_curves(0.0)
-		if duration_ms <= 0 or host == null:
+		if activation_duration_ms <= 0.0 or host == null:
 			flush_activation()
 			return
 		host.active_sprites[get_instance_id()] = weakref(self)
 
 	func advance_activation(delta_ms: float) -> void:
 		activation_elapsed_ms += delta_ms
-		if activation_elapsed_ms >= activation_duration_ms:
+		if activation_action_type == 0 and activation_elapsed_ms >= activation_duration_ms:
 			flush_activation()
 			return
-		var progress := activation_elapsed_ms / activation_duration_ms
+		var local_time := activation_elapsed_ms
+		if activation_action_type == 1:
+			local_time = fposmod(local_time, activation_duration_ms)
+		elif activation_action_type == 2:
+			local_time = fposmod(local_time, activation_duration_ms * 2.0)
+			if local_time > activation_duration_ms:
+				local_time = activation_duration_ms * 2.0 - local_time
+		var progress := 1.0
+		var elapsed := local_time
+		for index in activation_durations.size():
+			var segment_duration := activation_durations[index]
+			if segment_duration > 0.0 and elapsed < segment_duration:
+				progress = (float(index) + elapsed / segment_duration) / float(activation_durations.size())
+				break
+			elapsed -= segment_duration
 		if activation_fade_enabled:
 			set_blend_degree(roundi(lerpf(activation_start_alpha, activation_end_alpha, progress)))
 		_apply_activation_curves(progress)

@@ -85,6 +85,17 @@ func _initialize() -> void:
 	if sprite.transparency != 77:
 		_fail("A movement-only activation must preserve sprite transparency")
 		return
+	vm._dispatch_sprite_method(sprite, "SetBezierCurve", [null, [0.0, 30.0, 60.0, 90.0]])
+	sprite.begin_activation([100, 300], 2)
+	host.advance_sprite_animations(0.1)
+	if not is_equal_approx(sprite.rotation_degrees, 45.0):
+		_fail("Duration arrays must assign equal curve ranges to each timed interval")
+		return
+	host.advance_sprite_animations(0.5)
+	if not sprite.is_activating or not is_equal_approx(sprite.rotation_degrees, 60.0):
+		_fail("Turn-loop activation must reverse after the forward duration")
+		return
+	sprite.flush_activation()
 	print("PASS Sprite activation")
 	quit(0)
 

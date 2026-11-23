@@ -1595,7 +1595,8 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 		"BeginActivation":
 			if args.size() > 0:
 				# Blocking entry points cannot present intermediate frames.
-				spr.begin_activation(0 if is_synchronous_call else _to_int(args[0]))
+				var duration: Variant = args[0] if args[0] is Array else _to_int(args[0])
+				spr.begin_activation(0 if is_synchronous_call else duration, _to_int(args[1]) if args.size() > 1 else 0)
 			return 0
 		"FlushActivation":
 			spr.flush_activation()
