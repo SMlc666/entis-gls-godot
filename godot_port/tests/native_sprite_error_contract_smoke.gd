@@ -8,6 +8,16 @@ func _initialize() -> void:
 	var host := CsxHostClass.new("")
 	var vm := CsxVMReader.new(host)
 	var sprite := CsxHostClass.HostSprite.new(0, host)
+	var parameter := CsxVMReader.CsxInstance.new("SpriteParam")
+	sprite.magnification = Vector2(1.5, 0.75)
+	sprite.rotation_degrees = 30.0
+	if not is_same(vm._dispatch_sprite_method(sprite, "GetParameter", [parameter]), parameter) or parameter.get_field("rHorzUnit") != 1.5 or parameter.get_field("rRevAngle") != 30.0:
+		_fail("Sprite.GetParameter must return and populate the supplied SpriteParam")
+		return
+	var window := CsxHostClass.HostWindow.new(host)
+	if not is_same(vm._dispatch_window_method(window, "GetParameter", [parameter]), parameter):
+		_fail("Window.GetParameter must return the supplied SpriteParam")
+		return
 	if vm._dispatch_sprite_method(sprite, "CreateMessage", [640, 120]) != 0:
 		_fail("Sprite.CreateMessage success must return Entis Error 0")
 		return

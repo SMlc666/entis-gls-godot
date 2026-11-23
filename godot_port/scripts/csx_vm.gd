@@ -1658,7 +1658,8 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 			return 0
 		"GetParameter":
 			var param = args[0] if args.size() > 0 else null
-			return spr.get_parameter(param)
+			spr.get_parameter(param)
+			return param if param is CsxInstance else 0
 		"DrawImage":
 			var src = args[0] if args.size() > 0 else null
 			var param = args[1] if args.size() > 1 else null
@@ -2179,7 +2180,9 @@ func _dispatch_window_method(win: CsxHostClass.HostWindow, method: String, args:
 		"GetDisplaySize":
 			return win.get_display_size()
 		"GetParameter":
-			return win.get_parameter(args[0] if args.size() > 0 else null)
+			var param = args[0] if args.size() > 0 else null
+			win.get_parameter(param)
+			return param if param is CsxInstance else 0
 		"ShowCursor":
 			return win.show_cursor(_to_int(args[0]) if args.size() > 0 else 0)
 		"SetOptionalFuncFlag":
