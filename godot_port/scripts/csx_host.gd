@@ -1882,12 +1882,18 @@ class HostSprite extends RefCounted:
 	func _native_rgb_color(rgb: int) -> Color:
 		return Color(float((rgb >> 16) & 0xff) / 255.0, float((rgb >> 8) & 0xff) / 255.0, float(rgb & 0xff) / 255.0, 1.0)
 
-	func draw_image(src: Variant, param: Variant = null) -> int:
+	func draw_image(src: Variant, param: Variant = null, frame: int = 0, clip: Variant = null) -> int:
 		var src_img: Image = null
-		if src is HostSprite and src.image != null:
-			src_img = src.image
-		elif src is HostResource and src.image != null:
-			src_img = src.image
+		if src is HostSprite:
+			if frame == 0:
+				src_img = src.image
+			elif frame > 0 and frame < src.animation_frames.size():
+				src_img = src.animation_frames[frame]
+		elif src is HostResource:
+			if not src.image_frames.is_empty() and frame >= 0 and frame < src.image_frames.size():
+				src_img = src.image_frames[frame]
+			elif frame == 0:
+				src_img = src.image
 		if src_img != null and image != null:
 			var dst_pos := Vector2i.ZERO
 			if param != null and param.has_method("get_field"):
@@ -1895,6 +1901,12 @@ class HostSprite extends RefCounted:
 				if pt != null and pt.has_method("get_field"):
 					dst_pos = Vector2i(int(pt.get_field("x")), int(pt.get_field("y")))
 			var src_rect := Rect2i(Vector2i.ZERO, src_img.get_size())
+			if clip != null and clip.has_method("get_field"):
+				var left := int(clip.get_field("left"))
+				var top := int(clip.get_field("top"))
+				var right := int(clip.get_field("right"))
+				var bottom := int(clip.get_field("bottom"))
+				src_rect = Rect2i(left, top, maxi(0, right - left), maxi(0, bottom - top)).intersection(src_rect)
 			image.blend_rect(src_img, src_rect, dst_pos)
 			texture = ImageTexture.create_from_image(image)
 			return 1

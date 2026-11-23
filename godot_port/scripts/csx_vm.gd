@@ -1679,7 +1679,9 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 		"DrawImage":
 			var src = args[0] if args.size() > 0 else null
 			var param = args[1] if args.size() > 1 else null
-			return _sprite_error_code(spr.draw_image(src, param), 1)
+			var frame := _to_int(args[2]) if args.size() > 2 else 0
+			var clip = args[3] if args.size() > 3 else null
+			return _sprite_error_code(spr.draw_image(src, param, frame, clip), 1)
 		"GetInfo", "GetImageInfo":
 			var info: CsxInstance = args[0] if (args.size() > 0 and args[0] is CsxInstance) else CsxInstance.new("ImageInfo")
 			var bpos := CsxInstance.new("Point")
