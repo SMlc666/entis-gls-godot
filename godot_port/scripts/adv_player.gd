@@ -2728,7 +2728,7 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 		var pos_key := "scroll_%s_pos" % axis
 		native_scroll.min_value = 0.0
 		native_scroll.max_value = float(maxi(0, int(sprite.fields.get(range_key, 256))))
-		native_scroll.value = float(clampi(int(sprite.fields.get(pos_key, 0)), 0, int(native_scroll.max_value)))
+		native_scroll.set_value_no_signal(float(clampi(int(sprite.fields.get(pos_key, 0)), 0, int(native_scroll.max_value))))
 		native_scroll.editable = sprite.is_visible and sprite.transparency < 256
 		for state_name in ["normal", "focus", "tracking", "disabled"]:
 			var bar_texture := sprite.fields.get("scroll_%s_bar" % state_name) as Texture2D
@@ -2811,6 +2811,9 @@ func _build_native_mesh_warp(sprite: CsxHostClass.HostSprite) -> ArrayMesh:
 func _on_native_scroll_changed(value: float, sprite: CsxHostClass.HostSprite) -> void:
 	var axis := str(sprite.fields.get("scroll_axis", "horz"))
 	sprite.fields["scroll_%s_pos" % axis] = int(round(value))
+	var id := str(sprite.fields.get("form_item_id", ""))
+	if host != null and not id.is_empty():
+		host.command_queue.append({"id": id, "full_id": id, "command": 4, "parameter": int(round(value))})
 
 
 func _apply_native_text_style(label: Control, style: Dictionary, font_bordering: bool = false) -> void:

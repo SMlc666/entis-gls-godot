@@ -2303,10 +2303,12 @@ class HostWindow extends RefCounted:
 			var cmd_id: String = ""
 			var full_id: String = ""
 			var cmd_num: int = 1
+			var parameter: int = 0
 			if event is Dictionary:
 				cmd_id = event.get("id", "")
 				full_id = event.get("full_id", cmd_id)
 				cmd_num = event.get("command", 1)
+				parameter = int(event.get("parameter", 0))
 			elif event is String:
 				cmd_id = event
 				full_id = cmd_id
@@ -2316,10 +2318,14 @@ class HostWindow extends RefCounted:
 					p_cmd.set_field("strID", cmd_id)
 					p_cmd.set_field("strFullID", full_id)
 					p_cmd.set_field("nCommand", cmd_num)
+					p_cmd.set_field("nNotification", cmd_num)
+					p_cmd.set_field("nParameter", parameter)
 				elif "fields" in p_cmd:
 					p_cmd.fields["strID"] = cmd_id
 					p_cmd.fields["strFullID"] = full_id
 					p_cmd.fields["nCommand"] = cmd_num
+					p_cmd.fields["nNotification"] = cmd_num
+					p_cmd.fields["nParameter"] = parameter
 			return 1
 		return 0
 
