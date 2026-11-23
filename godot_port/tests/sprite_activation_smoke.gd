@@ -55,6 +55,17 @@ func _initialize() -> void:
 		_fail("Sprite rotation must follow the native scalar Bezier curve")
 		return
 	sprite.flush_activation()
+	vm._dispatch_sprite_method(sprite, "SetBezierCurve", [null, [0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0]])
+	sprite.begin_activation(200)
+	host.advance_sprite_animations(0.15)
+	if not is_equal_approx(sprite.rotation_degrees, 45.0):
+		_fail("Sprite rotation must evaluate the second segment of a native Bezier curve")
+		return
+	vm._dispatch_sprite_method(sprite, "SetBezierCurve", [null, []])
+	if not sprite.activation_curves[1].is_empty():
+		_fail("An empty native Bezier array must clear the corresponding curve")
+		return
+	sprite.flush_activation()
 	print("PASS Sprite activation")
 	quit(0)
 

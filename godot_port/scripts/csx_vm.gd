@@ -1555,7 +1555,7 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 			for index in mini(args.size(), 3):
 				var curve = args[index]
 				var source: Variant = curve.get_field("parent") if curve is CsxInstance else curve
-				if not source is Array or source.size() != 4:
+				if not source is Array:
 					continue
 				var points: Array = []
 				for point in source:
@@ -1563,8 +1563,7 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 						points.append(float(point))
 					elif point is CsxInstance:
 						points.append(Vector2(_to_float(point.get_field("x")), _to_float(point.get_field("y"))))
-				if points.size() == 4:
-					spr.activation_curves[index] = points
+				spr.activation_curves[index] = points
 			return 0
 		"SetBlendingEnvelope":
 			if args.size() > 0:

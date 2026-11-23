@@ -1438,10 +1438,16 @@ class HostSprite extends RefCounted:
 	func _apply_activation_curves(progress: float) -> void:
 		for index in [0, 1, 2]:
 			var points: Array = activation_curves[index]
-			if points.size() != 4:
+			if points.size() < 4:
 				continue
-			var inverse := 1.0 - progress
-			var value: Variant = points[0] * inverse * inverse * inverse + points[1] * 3.0 * inverse * inverse * progress + points[2] * 3.0 * inverse * progress * progress + points[3] * progress * progress * progress
+			@warning_ignore("integer_division")
+			var segments: int = (points.size() - 1) / 3
+			var segment := mini(segments - 1, int(ceil(progress * segments)) - 1)
+			segment = maxi(0, segment)
+			var local_progress := progress * segments - segment
+			var inverse := 1.0 - local_progress
+			var base := segment * 3
+			var value: Variant = points[base] * inverse * inverse * inverse + points[base + 1] * 3.0 * inverse * inverse * local_progress + points[base + 2] * 3.0 * inverse * local_progress * local_progress + points[base + 3] * local_progress * local_progress * local_progress
 			if index == 0:
 				position = Vector2i(roundi(value.x), roundi(value.y))
 			elif index == 1:
