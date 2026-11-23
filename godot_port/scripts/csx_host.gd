@@ -1210,6 +1210,7 @@ class HostSprite extends RefCounted:
 	var activation_start_alpha: int = 0
 	var activation_end_alpha: int = 0
 	var activation_target_alpha: int = 0
+	var activation_fade_enabled: bool = false
 	var children: Array[HostSprite] = []
 	var form_resources: HostResourceManager
 	var text_content: String = ""
@@ -1414,6 +1415,7 @@ class HostSprite extends RefCounted:
 	func set_blending_envelope(b: int) -> void:
 		_divide_activation()
 		activation_target_alpha = b
+		activation_fade_enabled = true
 		if is_activating:
 			activation_start_alpha = get_blend_degree()
 			activation_end_alpha = clampi(b, 0, 256)
@@ -1460,7 +1462,8 @@ class HostSprite extends RefCounted:
 			flush_activation()
 			return
 		var progress := activation_elapsed_ms / activation_duration_ms
-		set_blend_degree(roundi(lerpf(activation_start_alpha, activation_end_alpha, progress)))
+		if activation_fade_enabled:
+			set_blend_degree(roundi(lerpf(activation_start_alpha, activation_end_alpha, progress)))
 		_apply_activation_curves(progress)
 
 	func _apply_activation_curves(progress: float) -> void:
@@ -1484,10 +1487,12 @@ class HostSprite extends RefCounted:
 				magnification = value
 
 	func flush_activation() -> void:
-		set_blend_degree(activation_end_alpha if is_activating else clampi(activation_target_alpha, 0, 256))
+		if activation_fade_enabled:
+			set_blend_degree(activation_end_alpha if is_activating else clampi(activation_target_alpha, 0, 256))
 		if is_activating:
 			_apply_activation_curves(1.0)
 		activation_curves = [[], [], []]
+		activation_fade_enabled = false
 		is_activating = false
 		if host != null:
 			host.active_sprites.erase(get_instance_id())

@@ -78,6 +78,13 @@ func _initialize() -> void:
 		_fail("A split curve must continue along its remaining segment")
 		return
 	sprite.flush_activation()
+	sprite.set_transparency(77)
+	vm._dispatch_sprite_method(sprite, "SetBezierCurve", [null, [0.0, 30.0, 60.0, 90.0]])
+	sprite.begin_activation(100)
+	host.advance_sprite_animations(0.1)
+	if sprite.transparency != 77:
+		_fail("A movement-only activation must preserve sprite transparency")
+		return
 	print("PASS Sprite activation")
 	quit(0)
 
