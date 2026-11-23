@@ -471,6 +471,22 @@ func create_object(target_class: String) -> Variant:
 			return CsxHostClass.HostResource.new("", "", -1, 0, 0, host)
 		"File":
 			return CsxHostClass.HostFile.new(host)
+		"SpriteParam":
+			var param := CsxInstance.new("SpriteParam")
+			param.set_field("nFlags", 0)
+			param.set_field("ptDstPos", create_object("Point"))
+			param.set_field("ptRevCenter", create_object("Point"))
+			param.set_field("rHorzUnit", 1.0)
+			param.set_field("rVertUnit", 1.0)
+			param.set_field("rRevAngle", 0.0)
+			param.set_field("rCrossingAngle", 90.0)
+			param.set_field("rgbDimColor", 0)
+			param.set_field("rgbLightColor", 0xffffff)
+			param.set_field("nTransparency", 0)
+			param.set_field("rZOrder", 0.0)
+			param.set_field("rgbColorParam1", 0)
+			param.set_field("rZScale", 0.0)
+			return param
 		"Time":
 			var t := CsxInstance.new("Time")
 			t.set_field("nYear", 0)

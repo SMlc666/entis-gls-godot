@@ -8,6 +8,10 @@ func _initialize() -> void:
 	var host := CsxHostClass.new("")
 	var vm := CsxVMReader.new(host)
 	var sprite := CsxHostClass.HostSprite.new(0, host)
+	var default_parameter: Variant = vm.create_object("SpriteParam")
+	if default_parameter.get_field("rHorzUnit") != 1.0 or default_parameter.get_field("rCrossingAngle") != 90.0 or default_parameter.get_field("rgbLightColor") != 0xffffff or default_parameter.get_field("ptDstPos") == null:
+		_fail("SpriteParam must initialize its SDK defaults and Point members")
+		return
 	var parameter := CsxVMReader.CsxInstance.new("SpriteParam")
 	sprite.magnification = Vector2(1.5, 0.75)
 	sprite.rotation_degrees = 30.0
