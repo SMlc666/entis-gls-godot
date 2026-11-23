@@ -430,7 +430,7 @@ func _build_ui() -> void:
 	# 2. Bustup container
 	bustup_container = Control.new()
 	bustup_container.name = "BustupContainer"
-	bustup_container.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	bustup_container.size = Vector2(800, 600)
 	bustup_container.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(bustup_container)
 
@@ -1071,6 +1071,16 @@ func _update_bustups() -> void:
 	_sync_adv_temp_sprites(adv)
 	var base_sprite: Variant = adv.get_field("sprAdvBase")
 	_sync_adv_cg_sprite(adv.get_field("sprCg"))
+	var viewport_size := get_viewport_rect().size
+	var logical_scale := minf(viewport_size.x / 800.0, viewport_size.y / 600.0)
+	var canvas_origin := (viewport_size - Vector2(800, 600) * logical_scale) * 0.5
+	bustup_container.position = canvas_origin
+	bustup_container.scale = Vector2.ONE * logical_scale
+	if base_sprite is CsxHostClass.HostSprite:
+		bustup_container.position += Vector2(base_sprite.position - base_sprite.rev_center) * logical_scale
+		bustup_container.pivot_offset = Vector2(base_sprite.rev_center)
+		bustup_container.scale *= base_sprite.magnification
+		bustup_container.modulate.a = 1.0 - clampf(float(base_sprite.transparency) / 256.0, 0.0, 1.0)
 	var active_tone_filter: CsxHostClass.HostToneFilter = base_sprite.tone_filter if base_sprite is CsxHostClass.HostSprite else null
 	if tone_material != null and active_tone_filter != null:
 		tone_material.set_shader_parameter("tone_lut", active_tone_filter.get_tone_texture())
@@ -1095,6 +1105,8 @@ func _update_bustups() -> void:
 			var ox: float = spr.rev_center.x if spr.rev_center != Vector2i.ZERO else (tex_w / 2.0)
 			var oy: float = spr.rev_center.y if spr.rev_center != Vector2i.ZERO else float(tex_h)
 			b_rect.position = Vector2(spr.position.x - ox, spr.position.y - oy)
+			b_rect.pivot_offset = Vector2(spr.rev_center)
+			b_rect.scale = spr.magnification
 			b_rect.modulate.a = 1.0 - (float(spr.transparency) / 256.0)
 		else:
 			b_rect.visible = false
