@@ -64,6 +64,18 @@ func _run() -> void:
 	if not _require(native_window.focused_sprite == focus_child and native_window.get_focus() == "FOCUS_ROOT\\FOCUS_CHILD", "Native focus lookup must traverse unnamed Sprite containers"): return
 	native_window.detach_sprite(focus_root)
 	if not _require(native_window.focused_sprite == null and native_window.get_focus().is_empty(), "Removing a focused Sprite subtree must clear native focus"): return
+	var focus_start_wrapper: Control = player.native_title_controls.get(start_sprite.get_instance_id(), null)
+	var focus_continue_wrapper: Control = player.native_title_controls.get(continue_sprite.get_instance_id(), null)
+	var focus_start_button: TextureButton = focus_start_wrapper.get_node_or_null("NativeButton") if focus_start_wrapper != null else null
+	var focus_continue_button: TextureButton = focus_continue_wrapper.get_node_or_null("NativeButton") if focus_continue_wrapper != null else null
+	if not _require(focus_start_button != null and focus_continue_button != null, "Original title commands must expose focusable buttons"): return
+	focus_start_button.grab_focus()
+	if not _require(focus_start_button.has_focus() and native_window.focused_sprite == start_sprite, "Godot button focus must update the native window"): return
+	focus_continue_button.grab_focus()
+	if not _require(focus_continue_button.has_focus() and native_window.focused_sprite == continue_sprite, "Moving keyboard focus must update the native window"): return
+	player._sync_native_title_canvas()
+	if not _require(focus_continue_button.has_focus(), "Native focus synchronization must not restore the previously focused button"): return
+	native_window.set_focus("")
 	for command_id: String in ["ID_CONFIG", "ID_EXITGAME"]:
 		if not _require(_find_button_sprite(native_window.root_sprites, command_id) != null, "Native Title() must expose its original %s command" % command_id): return
 	if not _require(player.is_title_mode and player.is_running, "Title() must run asynchronously in title mode"): return
