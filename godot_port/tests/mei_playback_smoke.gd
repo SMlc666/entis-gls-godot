@@ -88,6 +88,9 @@ func _run() -> void:
 		_fail("MovieSprite did not forward SDK NoLoopFilter into native MEI decoding")
 		return
 	player.call("_on_movie_stop_requested")
+	if movie_resource.seek_frame(0) != 1 or movie_resource.get_current_frame() != 0:
+		_fail("MovieSprite could not reset its open stream before testing a new decode mode")
+		return
 	if not player.call("_start_native_mei_movie", GAME_DIR.path_join("opening.mei"), 0x0807):
 		_fail("native MEI player refused SDK UseLoopFilter and no-skip playback mode")
 		return
@@ -109,10 +112,26 @@ func _run() -> void:
 	if movie_resource.seek_frame(4) != 1 or movie_resource.get_current_frame() != 4 or player.get("mei_movie_active"):
 		_fail("MovieSprite could not seek while stopped with the MEI resource still open")
 		return
+	var expected_resume_seconds := float(floori(4.0 * 126000.0 / 2521.0)) / 1000.0
+	if not is_equal_approx(float(player.call("_mei_frame_position_seconds", 4)), expected_resume_seconds):
+		_fail("MEI audio seek time does not match Entis FrameIndexToTime scaling")
+		return
+	if (
+		movie_resource.play_movie(0) != 1
+		or not player.get("mei_movie_active")
+		or player.get("mei_movie_displayed_index") != 4
+		or movie_resource.get_current_frame() != 4
+	):
+		_fail("PlayMovie after StopMovie must resume the stopped movie position")
+		return
+	player.call("_on_movie_stop_requested")
 	if not player.call("_start_native_mei_movie", GAME_DIR.path_join("opening.mei"), 0x02):
 		_fail("native MEI player refused looping playback mode")
 		return
+	var loop_queue: Array = player.get("mei_movie_queue")
+	loop_queue.clear()
 	player.set("mei_movie_anchor_index", player.get("mei_movie_frames").size() - 1)
+	player.set("mei_movie_displayed_index", player.get("mei_movie_frames").size() - 1)
 	player.call("_process_mei_movie", float(player.get("mei_movie_frame_duration")) + 0.01)
 	if not player.get("mei_movie_active") or player.get("mei_movie_anchor_index") != 0 or player.get("mei_movie_displayed_index") != 0:
 		_fail("original PlayMovie loop flag did not restart at the first MEI frame (active=%s anchor=%s display=%s queue=%d)" % [str(player.get("mei_movie_active")), str(player.get("mei_movie_anchor_index")), str(player.get("mei_movie_displayed_index")), (player.get("mei_movie_queue") as Array).size()])
@@ -122,7 +141,7 @@ func _run() -> void:
 	if movie_resource.get_total_frame() != 0 or movie_resource.get_current_frame() != -1 or player.get("mei_movie_codec") != null:
 		_fail("MovieSprite close did not release decoder state and metadata")
 		return
-	print("PASS native MEI playback displays/reorders frames, honors loop/no-skip modes, seek, and lifecycle")
+	print("PASS native MEI playback displays/reorders frames, resumes after stop, honors loop/no-skip modes, seek, and lifecycle")
 	player.queue_free()
 	await process_frame
 	quit(0)

@@ -47,6 +47,9 @@ namespace {
 
 constexpr size_t kMaxCodecInputBytes = 128U * 1024U * 1024U;
 constexpr size_t kMaxCodecOutputBytes = 128U * 1024U * 1024U;
+// Values from Entis ERISADecoder::DecodeFlag in erisaimage.h.
+constexpr uint32_t kMeiPlayNoLoopFilter = 0x0400;
+constexpr uint32_t kMeiPlayUseLoopFilter = 0x0800;
 
 struct SectionRange {
     std::string name;
@@ -568,8 +571,8 @@ bool reconstruct_mei_frame_pixels(size_t width, size_t height,
             }
         }
     }
-    if ((play_mode_flags & 0x0400) == 0) {
-        if ((operation_flags & 0x04) != 0 || (play_mode_flags & 0x0800) != 0) {
+    if ((play_mode_flags & kMeiPlayNoLoopFilter) == 0) {
+        if ((operation_flags & 0x04) != 0 || (play_mode_flags & kMeiPlayUseLoopFilter) != 0) {
             if (reference_rgba)
                 *reference_rgba = rgba;
             mei_filter_421_region(rgba, width, 0, 0, width, height);

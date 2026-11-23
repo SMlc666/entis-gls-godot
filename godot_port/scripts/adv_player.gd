@@ -318,6 +318,12 @@ var auto_timer := 0.0
 var indicator_timer := 0.0
 var steps_per_frame := 3000
 const NATIVE_TITLE_STEPS_PER_FRAME := 600
+# Values from Entis Cotopha stdtype.ch MovieSprite::PlayFlag.
+const MEI_PLAY_FLAG_LOOP := 0x0002
+const MEI_PLAY_FLAG_NO_SKIP_FRAME := 0x0004
+const MEI_PLAY_FLAG_NO_LOOP_FILTER := 0x0400
+const MEI_PLAY_FLAG_USE_LOOP_FILTER := 0x0800
+const MEI_FRAME_LOOP_FILTER_MASK := 0x0c
 
 
 func _ready() -> void:
@@ -1398,45 +1404,70 @@ func _open_native_mei_movie(path: String) -> bool:
 
 
 func _start_native_mei_movie(path: String, play_mode: int = 0) -> bool:
-	if not _open_native_mei_movie(path):
-		return false
+	if mei_movie_open_path != path or mei_movie_codec == null:
+		if not _open_native_mei_movie(path):
+			return false
 	var decoded: Dictionary = mei_movie_decoded
 	var frame_count := int(decoded.get("frame_count", mei_movie_frames.size()))
 	var duration_ms := int(decoded.get("duration_ms", 0))
+	var resume_index := mei_movie_displayed_index
+	if resume_index < 0 and host != null:
+		resume_index = host.movie_current_frame
+	resume_index = clampi(resume_index, 0, maxi(0, mei_movie_frames.size() - 1))
 	if video_player != null:
 		video_player.stop()
 		video_player.visible = false
-	mei_movie_anchor_index = 0
+	mei_movie_active = false
 	mei_movie_queue.clear()
 	mei_movie_elapsed = 0.0
+	mei_movie_loop = (play_mode & MEI_PLAY_FLAG_LOOP) != 0
+	mei_movie_no_skip_frame = (play_mode & MEI_PLAY_FLAG_NO_SKIP_FRAME) != 0
+	mei_movie_decode_flags = play_mode & (MEI_PLAY_FLAG_NO_LOOP_FILTER | MEI_PLAY_FLAG_USE_LOOP_FILTER)
+	var first_frame_flags := int(mei_movie_frames[0].get("operation_flags", 0)) if not mei_movie_frames.is_empty() else 0
+	var first_frame_filter_flags := first_frame_flags & MEI_FRAME_LOOP_FILTER_MASK
+	var suppress_first_frame_filter := (mei_movie_decode_flags & MEI_PLAY_FLAG_NO_LOOP_FILTER) != 0
+	var force_first_frame_filter := (mei_movie_decode_flags & MEI_PLAY_FLAG_USE_LOOP_FILTER) != 0
+	var cached_first_frame_matches_play_mode := (
+		resume_index == 0
+		and (
+			(suppress_first_frame_filter and first_frame_filter_flags == 0)
+			or (not suppress_first_frame_filter and (not force_first_frame_filter or (first_frame_filter_flags & 0x04) != 0))
+		)
+	)
+	if cached_first_frame_matches_play_mode:
+		mei_movie_anchor_index = 0
+		mei_movie_anchor_rgba = mei_movie_first_reference_rgba
+		_show_mei_frame(mei_movie_first_rgba, mei_movie_width, mei_movie_height, 0)
+	else:
+		_on_movie_seek_requested(resume_index)
+		if mei_movie_displayed_index != resume_index:
+			push_error("MEI could not restore frame %d before playback" % resume_index)
+			return false
 	mei_movie_active = true
-	mei_movie_loop = (play_mode & 0x02) != 0
-	mei_movie_no_skip_frame = (play_mode & 0x04) != 0
-	mei_movie_decode_flags = play_mode & 0x0c00
-	var first_frame_result: Variant = mei_movie_codec.call("decode_mei_i_frame", mei_movie_bytes, 0, mei_movie_decode_flags)
-	if not first_frame_result is Dictionary or not first_frame_result.get("ok", false):
-		push_error("MEI initial frame decode failed: %s" % [first_frame_result.get("error", "invalid result") if first_frame_result is Dictionary else "invalid result"])
-		_stop_mei_movie()
-		return false
-	var first_rgba: PackedByteArray = first_frame_result.get("rgba", mei_movie_first_rgba)
-	var first_reference_rgba: PackedByteArray = first_frame_result.get("reference_rgba", first_rgba)
-	mei_movie_first_rgba = first_rgba
-	mei_movie_first_reference_rgba = first_reference_rgba
-	mei_movie_anchor_rgba = first_reference_rgba
-	mei_audio_player.play()
-	_show_mei_frame(first_rgba, mei_movie_width, mei_movie_height, 0)
 	mei_video_backdrop.visible = true
 	mei_video_rect.visible = true
 	mei_video_backdrop.move_to_front()
 	mei_video_rect.move_to_front()
+	if mei_audio_player != null and mei_audio_player.stream != null:
+		mei_audio_player.play(_mei_frame_position_seconds(resume_index))
 	if host != null:
 		host.is_movie_playing = true
 		host.movie_opened = true
 		host.movie_total_frames = frame_count
 		host.movie_total_time_ms = duration_ms
-		host.movie_current_frame = 0
-	print("[AdvPlayer] Native MEI playback started: %s (%d frames at %.3f ms/frame)" % [path, frame_count, mei_movie_frame_duration * 1000.0])
+		host.movie_current_frame = resume_index
+	print("[AdvPlayer] Native MEI playback started: %s at frame %d/%d (%.3f ms/frame)" % [path, resume_index, frame_count, mei_movie_frame_duration * 1000.0])
 	return true
+
+
+func _mei_frame_position_seconds(frame_index: int) -> float:
+	var frame_count := int(mei_movie_decoded.get("frame_count", mei_movie_frames.size()))
+	var duration_ms := int(mei_movie_decoded.get("duration_ms", 0))
+	if frame_count <= 0 or duration_ms <= 0:
+		return maxf(0.0, mei_movie_frame_duration * float(frame_index))
+	# Entis SGLMovieFilePlayer::FrameIndexToTime uses integer frameCount/time scaling.
+	var position_ms := floori(float(frame_index) * float(duration_ms) / float(frame_count))
+	return float(position_ms) / 1000.0
 
 
 func _process_mei_movie(delta: float) -> void:
@@ -1509,7 +1540,7 @@ func _on_movie_seek_requested(frame_index: int) -> void:
 			mei_movie_queue.clear()
 	if was_playing and mei_audio_player != null and mei_audio_player.stream != null:
 		mei_audio_player.stop()
-		mei_audio_player.play(float(mei_movie_frame_duration * frame_index))
+		mei_audio_player.play(_mei_frame_position_seconds(frame_index))
 
 
 func _prepare_next_mei_group() -> bool:

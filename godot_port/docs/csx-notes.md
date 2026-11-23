@@ -46,9 +46,10 @@
 
 7. **原生 MEI 视频播放（Movie Playback）**：
    - `tools/yzk_codec.cc` 在进程内解码 Entis MEI 音频及 ERI 图像帧，按 I/P/B 参考关系解码并重排显示；原始 `.mei` 文件只读。原版 `opening.mei` 的 `ImageInf` 为 DCT、RGB、32 位输出、4:1:1 采样、负高度；`Stream` 有 2520 条视频记录（582 I、259 P、1679 B），`FileHdr` 声明 2521 帧、126 秒，音轨为 44.1 kHz 立体声 16 位 PCM。当前实现针对这条已验证的 DCT/ERINA 视频路径；其他 MEI 变换类型尚未确认。
-   - `MovieSprite` 已实现打开并查询帧数/时长、播放、随机 seek、停止后保留解码资源、关闭释放资源；播放模式支持 SDK 的 loop、no-skip-frame 与 no-loop-filter 标志。正常模式按游戏帧时钟跳过过期显示帧，no-skip-frame 模式每次只显示一帧并保留积压。
+   - 帧到毫秒的换算对齐 Entis SDK `SGLMovieFilePlayer::FrameIndexToTime`：音频 seek 使用 `frameIndex * dwAllFrameTime / dwFrameCount` 的整数结果，显示周期按相同总时长和帧数计算。SDK 虽读取 `Sequence` 记录，但该播放器的时间换算不使用它。
+   - `MovieSprite` 已实现打开并查询帧数/时长、播放、随机 seek、停止后保留解码资源、关闭释放资源；停止或 seek 后再次播放会从当前帧恢复，并按同一帧时间恢复音频。播放模式支持 SDK 的 loop、no-skip-frame 与 no-loop-filter 标志。正常模式按游戏帧时钟跳过过期显示帧，no-skip-frame 模式每次只显示一帧并保留积压。
    - 对照 Entis SDK 的 `eriImageFilterLoop421` 移植了 operation-table `0x08` 的局部滤波、`0x04` 的全帧滤波，以及 `UseLoopFilter` 强制全帧滤波和 `NoLoopFilter` 优先关闭的播放标志。滤波后显示像素存于独立结果，P/B 预测继续使用未滤波参考帧。原版 `opening.mei` 的 operation table 为 0、1、3，游戏调用带 `NoLoopFilter`，因此原片保持未滤波结果。
-   - `mei_fullstream_smoke.gd` 已对原片逐条解码全部 2520 帧并核对显示顺序，当前 headless 用时 52.86 秒；`mei_playback_smoke.gd` 覆盖首两组 I/P/B、寻帧、播放模式和资源生命周期，启动音视频解码约 0.93 秒。现有像素断言验证结构、滤镜差异和参考帧保持，尚未与官方 SDK 导出的帧做逐像素差分，因此不能据此宣称跨所有 MEI 变体完全一致。
+   - `mei_fullstream_smoke.gd` 已对原片逐条解码全部 2520 帧并核对显示顺序，历史 headless 用时 52.86 秒；`mei_playback_smoke.gd` 覆盖首两组 I/P/B、寻帧、停止后续播、播放模式和资源生命周期，本次回归中开场音视频解码约 0.91 秒。现有像素断言验证结构、滤镜差异和参考帧保持，尚未与官方 SDK 导出的帧做逐像素差分，因此不能据此宣称跨所有 MEI 变体完全一致。
    - 若找不到原生 `.mei`，仍尝试 `VideoStreamPlayer` 播放 `.ogv`；没有可用视频时安全跳过。`mei_codec_smoke.gd`、`mei_playback_smoke.gd`、`mei_fullstream_smoke.gd` 和 `bustup_smoke.gd` 使用真实游戏资源验证解码、帧序、模式和生命周期；集成测试会核对 CSX/NOA 原始文件未改变。
 
 8. **CG 鉴赏与全屏差分查看器（Appreciation / Gallery）**：
