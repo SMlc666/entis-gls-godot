@@ -2536,7 +2536,13 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 	var form_page_id := str(sprite.fields.get("form_page_id", ""))
 	var is_native_form_page := form_page_id.begins_with("ID_PAGE_")
 	var is_native_confirm_window := _native_sprite_contains_button(sprite, "ID_YES") and _native_sprite_contains_button(sprite, "ID_NO")
-	if parent == native_title_canvas and ((filter_title_depth and sprite.z_order < 52000 and not is_native_form_page and not is_native_confirm_window)
+	var is_native_save_load_window := (
+		_native_stack_contains("LoadSaveWindow::run")
+		and sprite.size.x >= 600 and sprite.size.x <= 800
+		and sprite.size.y >= 500 and sprite.size.y <= 600
+		and _native_sprite_contains_button(sprite, "ID_QSAVE")
+	)
+	if parent == native_title_canvas and ((filter_title_depth and sprite.z_order < 52000 and not is_native_form_page and not is_native_confirm_window and not is_native_save_load_window)
 			or (native_appreciation_mode and sprite.z_order >= 52000)):
 		wrapper.visible = false
 	else:
@@ -2768,6 +2774,15 @@ func _native_sprite_contains_button(sprite: CsxHostClass.HostSprite, button_id: 
 	return false
 
 
+func _native_stack_contains(function_name: String) -> bool:
+	if vm == null:
+		return false
+	for frame: Variant in vm.call_stack:
+		if frame.name == function_name:
+			return true
+	return false
+
+
 func _build_native_mesh_warp(sprite: CsxHostClass.HostSprite) -> ArrayMesh:
 	var frames: Array = sprite.fields.get("effect_mesh_frames", [])
 	var base: PackedVector2Array = sprite.fields.get("effect_mesh_base", PackedVector2Array())
@@ -2890,9 +2905,6 @@ func _on_native_title_button_pressed(sprite: CsxHostClass.HostSprite) -> void:
 		match sprite.btn_id:
 			"ID_APPRECIATION", "ID_APPLICIATION":
 				_start_native_appreciation_script()
-				return
-			"ID_CONTINUE":
-				_open_save_load_modal()
 				return
 			"ID_EXITGAME":
 				get_tree().quit(0)

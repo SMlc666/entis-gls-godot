@@ -461,8 +461,6 @@ class HostInputFilter extends RefCounted:
 
 	func _init(p_host: CsxHost) -> void:
 		host = p_host
-		if host != null:
-			host.active_input_filter_ref = weakref(self)
 
 	func load_input_filter(filename: String) -> int:
 		filter_file = filename
@@ -565,10 +563,15 @@ class HostInputFilter extends RefCounted:
 	func open_filter(_mode: int = 0, win: Variant = null) -> int:
 		is_open = true
 		window_ref = win
+		if host != null:
+			host.active_input_filter_ref = weakref(self)
 		return 0
 
 	func close_filter() -> int:
 		is_open = false
+		if (host != null and host.active_input_filter_ref != null
+			and host.active_input_filter_ref.get_ref() == self):
+			host.active_input_filter_ref = null
 		return 0
 
 	func get_input_event(_event_ref: Variant, _timeout: int = 0) -> int:
@@ -596,7 +599,9 @@ class HostInputFilter extends RefCounted:
 		var pressed := _is_button_pressed(key)
 		var was_pressed := bool(joy_buttons.get(key, false))
 		joy_buttons[key] = pressed
-		return -1 if pressed and not was_pressed else 0
+		# Entis exposes a press count here, not a CSX Boolean. Original code
+		# compares GetJoyButtonPushed(...) > 0, so a pressed edge must be positive.
+		return 1 if pressed and not was_pressed else 0
 
 	func flush_joy_button_pushed(_dev: int = 0, _key: int = -1) -> int:
 		if host != null:
@@ -1853,6 +1858,96 @@ class HostSprite extends RefCounted:
 			if child.btn_id == item_id or child.fields.get("form_item_id") == item_id:
 				return child
 		return null
+
+	func find_sprite_item(item_path: String) -> HostSprite:
+		if item_path.is_empty():
+			return self
+		var current: HostSprite = self
+		for item_id in item_path.split("\\", false):
+			current = current.find_form_item(str(item_id)) if current != null else null
+			if current == null:
+				return null
+		return current
+
+	func send_command(item_path: String, command_xml: String) -> int:
+		var target := find_sprite_item(item_path)
+		if target == null:
+			return 0
+		var parser := XMLParser.new()
+		if parser.open_buffer(command_xml.to_utf8_buffer()) != OK:
+			if host != null:
+				host.report_unsupported("HostSprite.SendCommand XML")
+			return 0
+		var root: Dictionary = {}
+		var stack: Array[Dictionary] = []
+		while parser.read() == OK:
+			match parser.get_node_type():
+				XMLParser.NODE_ELEMENT:
+					var attrs: Dictionary = {}
+					for index in range(parser.get_attribute_count()):
+						attrs[parser.get_attribute_name(index)] = parser.get_attribute_value(index)
+					var node: Dictionary = {"tag": parser.get_node_name(), "attributes": attrs, "children": []}
+					if stack.is_empty():
+						root = node
+					else:
+						var parent: Dictionary = stack.back()
+						var parent_children: Array = parent.get("children", [])
+						parent_children.append(node)
+						parent["children"] = parent_children
+					if not parser.is_empty():
+						stack.append(node)
+				XMLParser.NODE_ELEMENT_END:
+					if not stack.is_empty():
+						stack.pop_back()
+		if root.is_empty():
+			return 0
+		target.fields["last_command"] = command_xml
+		target._apply_send_command_node(root)
+		return 0
+
+	func _apply_send_command_node(node: Dictionary) -> void:
+		var tag := str(node.get("tag", ""))
+		var attrs: Dictionary = node.get("attributes", {})
+		var handled := true
+		match tag:
+			"command":
+				for child: Dictionary in node.get("children", []):
+					_apply_send_command_node(child)
+			"basic_flag":
+				for key in ["hit_transparency", "modal_first", "modal_end"]:
+					if attrs.has(key):
+						fields[key] = str(attrs[key]).to_lower() == "true"
+			"input":
+				for key in ["key", "wheel"]:
+					if attrs.has(key):
+						fields["input_%s_enabled" % key] = str(attrs[key]).to_lower() == "true"
+			"bar":
+				if fields.get("control_type", "") == "scroll_bar":
+					var axis := str(fields.get("scroll_axis", "horz"))
+					var range_key := "scroll_%s_range" % axis
+					var position_key := "scroll_%s_pos" % axis
+					if attrs.has("range"):
+						fields[range_key] = maxi(0, int(str(attrs["range"])))
+					if attrs.has("pos"):
+						fields[position_key] = clampi(int(str(attrs["pos"])), 0, maxi(0, int(fields.get(range_key, 256))))
+			"style":
+				var updated_style := message_style.duplicate(true)
+				for child: Dictionary in node.get("children", []):
+					updated_style[str(child.get("tag", ""))] = child.get("attributes", {}).duplicate(true)
+				message_style = updated_style
+			"status_reflection":
+				fields["button_status_reflection"] = attrs.duplicate(true)
+			"status_notification":
+				fields["button_status_notification"] = int(str(attrs.get("parameter", "1")))
+			"right_click":
+				fields["button_right_click_parameter"] = int(str(attrs.get("parameter", "2")))
+			"push_repeat":
+				fields["button_repeat_before_ms"] = int(str(attrs.get("before_repeat", "0")))
+				fields["button_repeat_interval_ms"] = int(str(attrs.get("interval", "0")))
+			_:
+				handled = false
+		if not handled and host != null:
+			host.report_unsupported("HostSprite.SendCommand <%s>" % tag)
 
 	func set_form_image(item_id: String, resource_id: String) -> bool:
 		var item := find_form_item(item_id)

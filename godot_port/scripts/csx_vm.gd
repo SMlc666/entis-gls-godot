@@ -1547,6 +1547,10 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 					button.fields["checked"] = is_truthy(args[1])
 					button.set_button_state("pushed" if button.fields["checked"] else "normal")
 			return 0
+		"SendCommand":
+			var item_path := str(args[0]) if args.size() > 0 else ""
+			var command_xml := str(args[1]) if args.size() > 1 else ""
+			return spr.send_command(item_path, command_xml)
 		"SetSpriteImage":
 			if args.size() >= 2:
 				return 0 if spr.set_form_image(str(args[0]), str(args[1])) else 1

@@ -260,6 +260,60 @@ func _run() -> void:
 		config_wait_frames += 1
 	if not _require(_find_form_page(native_window.root_sprites, "ID_PAGE_CONFIG") == null and player.is_title_mode, "The original ID_TITLE command must close ConfigWindow and return to Title()"): return
 	if not _require(player.vm.last_error.is_empty(), "Native ConfigWindow must complete without a VM error"): return
+	var native_continue_wrapper: Control = player.native_title_controls.get(continue_sprite.get_instance_id(), null)
+	var native_continue_button: TextureButton = native_continue_wrapper.get_node_or_null("NativeButton") if native_continue_wrapper != null else null
+	if not _require(native_continue_button != null and native_continue_button.is_visible_in_tree(), "Native Title() Continue must remain interactive after ConfigWindow"): return
+	native_continue_button.emit_signal("pressed")
+	var native_save_load_root: CsxHostClass.HostSprite = null
+	config_wait_frames = 0
+	while config_wait_frames < 180:
+		await process_frame
+		config_wait_frames += 1
+		if _native_stack_has(player.vm.call_stack, "LoadSaveWindow::run"):
+			for candidate: CsxHostClass.HostSprite in native_window.root_sprites:
+				if (
+					candidate.size.x >= 600 and candidate.size.x <= 800
+					and candidate.size.y >= 500 and candidate.size.y <= 600
+					and _find_button_sprite(candidate.children, "ID_QSAVE") != null
+				):
+					native_save_load_root = candidate
+					break
+		if native_save_load_root != null:
+			break
+	var native_save_load_wrapper: Control = player.native_title_controls.get(native_save_load_root.get_instance_id(), null) if native_save_load_root != null else null
+	if not _require(native_save_load_root != null and native_save_load_wrapper != null and native_save_load_wrapper.is_visible_in_tree(), "Title Continue must display the original LoadSaveWindow above the title screen"): return
+	if not _require(native_save_load_root.size == Vector2i(690, 574) and native_save_load_root.position == Vector2i(400, 300), "The original LoadSaveWindow must preserve its 690x574 centered geometry"): return
+	var native_quick_save_sprite: CsxHostClass.HostSprite = _find_button_sprite(native_save_load_root.children, "ID_QSAVE")
+	if not _require(native_quick_save_sprite != null and not native_quick_save_sprite.is_enabled, "An empty original save store must show the disabled quick-load control"): return
+	var native_input_filter: Variant = null
+	for input_var_index: int in player.vm.data_vars.size():
+		var input_var: Dictionary = player.vm.data_vars[input_var_index]
+		if input_var.get("name", "") == "input":
+			native_input_filter = input_var.get("value", null)
+			break
+	if not _require(
+		native_input_filter is CsxHostClass.HostInputFilter
+		and native_input_filter.is_open
+		and native_input_filter.filter_file == "input.xml"
+		and native_input_filter.input_assignments.get("button:5", []).size() > 0,
+		"The original input.xml Q-to-button-5 mapping must be active for LoadSaveWindow"
+	): return
+	if not _require(player.host.active_input_filter_ref != null and player.host.active_input_filter_ref.get_ref() == native_input_filter, "The main opened CSX InputFilter must remain active after the unused inputE object is created"): return
+	var quit_load_event := InputEventKey.new()
+	quit_load_event.keycode = KEY_Q
+	quit_load_event.unicode = KEY_Q
+	quit_load_event.pressed = true
+	Input.parse_input_event(quit_load_event)
+	config_wait_frames = 0
+	while config_wait_frames < 180 and _native_stack_has(player.vm.call_stack, "LoadSaveWindow::run"):
+		await process_frame
+		config_wait_frames += 1
+	var release_load_event := InputEventKey.new()
+	release_load_event.keycode = KEY_Q
+	release_load_event.unicode = KEY_Q
+	release_load_event.pressed = false
+	Input.parse_input_event(release_load_event)
+	if not _require(not _native_stack_has(player.vm.call_stack, "LoadSaveWindow::run") and player.is_title_mode, "The original input.xml Q command must return from LoadSaveWindow to Title()"): return
 	var exit_requested := OS.get_cmdline_user_args().has("--verify-exit")
 	if exit_requested:
 		var exit_sprite = _find_button_sprite(native_window.root_sprites, "ID_EXITGAME")
