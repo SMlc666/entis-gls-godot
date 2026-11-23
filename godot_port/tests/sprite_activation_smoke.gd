@@ -1,6 +1,7 @@
 extends SceneTree
 
 const CsxHostClass = preload("res://scripts/csx_host.gd")
+const CsxVMClass = preload("res://scripts/csx_vm.gd")
 
 
 func _initialize() -> void:
@@ -46,6 +47,14 @@ func _initialize() -> void:
 	if sprite.blending != 256 or sprite.transparency != 32:
 		_fail("Flushing a masked fade must preserve independent transparency")
 		return
+	var vm := CsxVMClass.new(host)
+	vm._dispatch_sprite_method(sprite, "SetBezierCurve", [null, [0.0, 30.0, 60.0, 90.0]])
+	sprite.begin_activation(200)
+	host.advance_sprite_animations(0.1)
+	if not is_equal_approx(sprite.rotation_degrees, 45.0):
+		_fail("Sprite rotation must follow the native scalar Bezier curve")
+		return
+	sprite.flush_activation()
 	print("PASS Sprite activation")
 	quit(0)
 

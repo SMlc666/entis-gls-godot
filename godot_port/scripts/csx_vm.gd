@@ -1552,17 +1552,16 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 				return 0 if spr.set_form_image(str(args[0]), str(args[1])) else 1
 			return 1
 		"SetBezierCurve":
-			spr.activation_curves = [[], [], []]
 			for index in mini(args.size(), 3):
 				var curve = args[index]
-				if not curve is CsxInstance:
-					continue
-				var source = curve.get_field("parent")
+				var source: Variant = curve.get_field("parent") if curve is CsxInstance else curve
 				if not source is Array or source.size() != 4:
 					continue
-				var points: Array[Vector2] = []
+				var points: Array = []
 				for point in source:
-					if point is CsxInstance:
+					if index == 1 and (point is int or point is float):
+						points.append(float(point))
+					elif point is CsxInstance:
 						points.append(Vector2(_to_float(point.get_field("x")), _to_float(point.get_field("y"))))
 				if points.size() == 4:
 					spr.activation_curves[index] = points
