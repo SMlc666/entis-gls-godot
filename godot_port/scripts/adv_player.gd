@@ -2463,6 +2463,7 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 			button.focus_mode = Control.FOCUS_ALL
 			button.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 			button.pressed.connect(_on_native_title_button_pressed.bind(sprite))
+			button.focus_entered.connect(_on_native_title_focus_entered.bind(sprite))
 			wrapper.add_child(button)
 		elif sprite.fields.get("control_type", "") == "scroll_bar":
 			var scroll_control: Range = VSlider.new() if str(sprite.fields.get("scroll_axis", "horz")) == "vert" else HSlider.new()
@@ -2844,6 +2845,14 @@ func _native_text_color(attributes: Dictionary) -> Color:
 	var color := Color.hex(((value.hex_to_int() & 0xffffff) << 8) | 0xff)
 	color.a = 1.0 - clampf(float(attributes.get("transparency", 0)) / 256.0, 0.0, 1.0)
 	return color
+
+
+func _on_native_title_focus_entered(sprite: CsxHostClass.HostSprite) -> void:
+	if vm == null or vm.data_vars.size() <= 4:
+		return
+	var window: Variant = vm.data_vars[4].get("value", null)
+	if window is CsxHostClass.HostWindow:
+		window.focus_sprite(sprite)
 
 
 func _on_native_title_button_pressed(sprite: CsxHostClass.HostSprite) -> void:

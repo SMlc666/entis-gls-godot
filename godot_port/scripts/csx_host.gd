@@ -2036,6 +2036,24 @@ class HostWindow extends RefCounted:
 	func get_focus() -> String:
 		return focused_path
 
+	func focus_sprite(sprite: HostSprite) -> void:
+		var path := _find_focus_path(root_sprites, sprite, "")
+		if not path.is_empty():
+			set_focus(path)
+
+	func _find_focus_path(sprites: Array, target: HostSprite, prefix: String) -> String:
+		for sprite: HostSprite in sprites:
+			var id := sprite.btn_id if not sprite.btn_id.is_empty() else str(sprite.fields.get("form_item_id", ""))
+			var path := prefix
+			if not id.is_empty():
+				path += ("\\" if not path.is_empty() else "") + id
+			if sprite == target:
+				return path
+			var child_path := _find_focus_path(sprite.children, target, path)
+			if not child_path.is_empty():
+				return child_path
+		return ""
+
 	func get_display_size() -> Vector2i:
 		return viewport_size
 
