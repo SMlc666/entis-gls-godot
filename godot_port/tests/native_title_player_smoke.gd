@@ -51,6 +51,19 @@ func _run() -> void:
 				break
 	if not _require(native_window is CsxHostClass.HostWindow, "Native Title() must create its HostWindow"): return
 	if not _require(start_sprite != null and continue_sprite != null, "Native Title() must expose its original Start and Continue commands"): return
+	var focus_root := CsxHostClass.HostSprite.new(9100, player.host)
+	var unnamed := CsxHostClass.HostSprite.new(9101, player.host)
+	var focus_child := CsxHostClass.HostSprite.new(9102, player.host)
+	focus_root.fields["form_item_id"] = "FOCUS_ROOT"
+	focus_child.btn_id = "FOCUS_CHILD"
+	focus_child.is_button = true
+	focus_root.children.append(unnamed)
+	unnamed.children.append(focus_child)
+	native_window.add_sprite(0, focus_root)
+	native_window.set_focus("FOCUS_ROOT\\FOCUS_CHILD")
+	if not _require(native_window.focused_sprite == focus_child and native_window.get_focus() == "FOCUS_ROOT\\FOCUS_CHILD", "Native focus lookup must traverse unnamed Sprite containers"): return
+	native_window.detach_sprite(focus_root)
+	if not _require(native_window.focused_sprite == null and native_window.get_focus().is_empty(), "Removing a focused Sprite subtree must clear native focus"): return
 	for command_id: String in ["ID_CONFIG", "ID_EXITGAME"]:
 		if not _require(_find_button_sprite(native_window.root_sprites, command_id) != null, "Native Title() must expose its original %s command" % command_id): return
 	if not _require(player.is_title_mode and player.is_running, "Title() must run asynchronously in title mode"): return
