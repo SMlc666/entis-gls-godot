@@ -1552,6 +1552,7 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 				return 0 if spr.set_form_image(str(args[0]), str(args[1])) else 1
 			return 1
 		"SetBezierCurve":
+			spr._divide_activation()
 			for index in mini(args.size(), 3):
 				var curve = args[index]
 				var source: Variant = curve.get_field("parent") if curve is CsxInstance else curve

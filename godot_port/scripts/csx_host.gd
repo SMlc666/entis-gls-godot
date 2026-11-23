@@ -1412,7 +1412,35 @@ class HostSprite extends RefCounted:
 		return blending if alpha_resource != null and alpha_range < 256 else transparency
 
 	func set_blending_envelope(b: int) -> void:
+		_divide_activation()
 		activation_target_alpha = b
+		if is_activating:
+			activation_start_alpha = get_blend_degree()
+			activation_end_alpha = clampi(b, 0, 256)
+
+	func _divide_activation() -> void:
+		if not is_activating or activation_elapsed_ms <= 0.0 or activation_duration_ms <= 0.0:
+			return
+		var progress := clampf(activation_elapsed_ms / activation_duration_ms, 0.0, 1.0)
+		for index in activation_curves.size():
+			var points: Array = activation_curves[index]
+			if points.size() < 4:
+				continue
+			@warning_ignore("integer_division")
+			var segments: int = (points.size() - 1) / 3
+			var segment := maxi(0, mini(segments - 1, ceili(progress * segments) - 1))
+			var t := progress * segments - segment
+			var base := segment * 3
+			var p: Variant = points[base] * (1.0 - t) + points[base + 1] * t
+			var q: Variant = points[base + 1] * (1.0 - t) + points[base + 2] * t
+			var r: Variant = points[base + 2] * (1.0 - t) + points[base + 3] * t
+			var s: Variant = p * (1.0 - t) + q * t
+			var u: Variant = q * (1.0 - t) + r * t
+			var remaining: Array = [s * (1.0 - t) + u * t, u, r]
+			remaining.append_array(points.slice(base + 3))
+			activation_curves[index] = remaining
+		activation_start_alpha = get_blend_degree()
+		activation_elapsed_ms = 0.0
 
 	func begin_activation(duration_ms: int) -> void:
 		activation_start_alpha = get_blend_degree()

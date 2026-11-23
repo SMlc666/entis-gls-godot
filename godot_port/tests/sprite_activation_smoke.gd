@@ -66,6 +66,18 @@ func _initialize() -> void:
 		_fail("An empty native Bezier array must clear the corresponding curve")
 		return
 	sprite.flush_activation()
+	vm._dispatch_sprite_method(sprite, "SetBezierCurve", [null, [0.0, 30.0, 60.0, 90.0]])
+	sprite.begin_activation(200)
+	host.advance_sprite_animations(0.1)
+	vm._dispatch_sprite_method(sprite, "SetBezierCurve", [null, null, []])
+	if not is_equal_approx(sprite.rotation_degrees, 45.0) or not is_zero_approx(sprite.activation_elapsed_ms):
+		_fail("Replacing an unrelated curve must split the active rotation at its current value")
+		return
+	host.advance_sprite_animations(0.1)
+	if not is_equal_approx(sprite.rotation_degrees, 67.5):
+		_fail("A split curve must continue along its remaining segment")
+		return
+	sprite.flush_activation()
 	print("PASS Sprite activation")
 	quit(0)
 
