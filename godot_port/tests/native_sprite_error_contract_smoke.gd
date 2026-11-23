@@ -20,6 +20,9 @@ func _initialize() -> void:
 	if vm._dispatch_sprite_method(sprite, "SetSpriteText", ["", "sprite text"]) != 0:
 		_fail("Sprite.SetSpriteText success must return Entis Error 0")
 		return
+	if vm._dispatch_sprite_method(sprite, "SetBackColor", [0x123456, -1]) != 0 or sprite.back_color != 0x123456 or not sprite.fill_back_color:
+		_fail("Sprite.SetBackColor must preserve RGB and enable flags")
+		return
 	if vm._dispatch_sprite_method(sprite, "SetHorzScrollRange", [400, "ID_LIST"]) != 0:
 		_fail("Sprite.SetHorzScrollRange success must return Entis Error 0")
 		return

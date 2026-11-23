@@ -2431,6 +2431,11 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 		wrapper.z_as_relative = true
 		wrapper.set_meta("native_sprite_id", instance_id)
 		native_title_controls[instance_id] = wrapper
+		var back_color_rect := ColorRect.new()
+		back_color_rect.name = "NativeBackColor"
+		back_color_rect.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		back_color_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		wrapper.add_child(back_color_rect)
 		if sprite.is_button:
 			var button := TextureButton.new()
 			button.name = "NativeButton"
@@ -2497,6 +2502,10 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 	if sprite.fields.get("control_type", "") == "scroll_bar" and sprite.size.x > 0:
 		if sprite.size.y <= 0:
 			wrapper.size.y = 18
+	var native_back_color: ColorRect = wrapper.get_node_or_null("NativeBackColor")
+	if native_back_color != null:
+		native_back_color.visible = sprite.fill_back_color and not sprite.children.is_empty()
+		native_back_color.color = Color(float((sprite.back_color >> 16) & 0xff) / 255.0, float((sprite.back_color >> 8) & 0xff) / 255.0, float(sprite.back_color & 0xff) / 255.0, 1.0)
 	if parent == native_title_canvas and ((filter_title_depth and sprite.z_order < 52000)
 			or (native_appreciation_mode and sprite.z_order >= 52000)):
 		wrapper.visible = false

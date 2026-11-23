@@ -12,7 +12,7 @@ const AUDITED_METHODS := [
 	"GetPixel", "GetPixelRect", "SetPixelRect", "GetInfo", "GetImageInfo",
 	"Enable", "IsEnabled", "SetFontBordering", "GetCursorPos", "MoveCursorPos", "Refresh",
 	"DeleteContents", "LoadResource", "CreateFormPage",
-	"SetEffectParameter", "SetMeshWarpEffect", "SetAlphaImage", "GetBlendDegree", "SetBlendDegree", "OpenMovie", "PlayMovie",
+	"SetEffectParameter", "SetMeshWarpEffect", "SetBackColor", "SetParameter", "SetAlphaImage", "GetBlendDegree", "SetBlendDegree", "OpenMovie", "PlayMovie",
 	"IsMoviePlaying", "StopMovie", "CloseMovie",
 ]
 
@@ -42,6 +42,7 @@ func _initialize() -> void:
 	var volume_callsites: Dictionary = {}
 	var movie_callsites: Dictionary = {}
 	var alpha_callsites: Dictionary = {}
+	var sprite_state_callsites: Dictionary = {}
 	var effect_literals: Dictionary = {}
 	var cursor := 0
 	while cursor < vm.image.size():
@@ -75,6 +76,8 @@ func _initialize() -> void:
 				movie_callsites[int(instruction["address"])] = "%s mode=%d" % [_function_owner(vm.functions, int(instruction["address"])), mode]
 			if method_name in ["SetAlphaImage", "GetBlendDegree", "SetBlendDegree"]:
 				alpha_callsites[int(instruction["address"])] = "%s mode=%d" % [_function_owner(vm.functions, int(instruction["address"])), mode]
+			if method_name in ["SetBackColor", "SetParameter"]:
+				sprite_state_callsites[int(instruction["address"])] = "%s %s mode=%d" % [method_name, _function_owner(vm.functions, int(instruction["address"])), mode]
 		cursor = int(batch.get("next_address", cursor))
 		if cursor <= 0:
 			push_error("CSX decoder failed to advance")
@@ -117,6 +120,11 @@ func _initialize() -> void:
 	print("Alpha mask callsites:")
 	for address in alpha_addresses:
 		print("  0x%X %s" % [address, alpha_callsites[address]])
+	var sprite_state_addresses: Array = sprite_state_callsites.keys()
+	sprite_state_addresses.sort()
+	print("Sprite state callsites:")
+	for address in sprite_state_addresses:
+		print("  0x%X %s" % [address, sprite_state_callsites[address]])
 	quit(0)
 
 

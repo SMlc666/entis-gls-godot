@@ -102,6 +102,16 @@ func _run() -> void:
 	if not _require(transition_material != null and transition_material.get_shader_parameter("alpha_mask_ready") == true and transition_material.get_shader_parameter("alpha_mask_texture") == masked_sprite.alpha_texture, "AdvScreen temporary sprites must apply the native alpha mask texture"): return
 	adv_instance.set_field("sprTemp", {})
 	player._sync_adv_temp_sprites(adv_instance)
+	var back_color_sprite := CsxHostClass.HostSprite.new(9003, player.host)
+	back_color_sprite.is_visible = true
+	back_color_sprite.size = Vector2i(16, 16)
+	back_color_sprite.set_back_color(0x123456, true)
+	back_color_sprite.children.append(CsxHostClass.HostSprite.new(9004, player.host))
+	var back_color_seen: Dictionary = {}
+	player._sync_native_title_sprite(back_color_sprite, player.native_title_canvas, back_color_seen, false)
+	var back_color_wrapper: Control = player.native_title_controls.get(back_color_sprite.get_instance_id(), null)
+	var back_color_node: ColorRect = back_color_wrapper.get_node_or_null("NativeBackColor") if back_color_wrapper != null else null
+	if not _require(back_color_node != null and back_color_node.visible and back_color_node.color.to_html(false) == "123456", "Native sprite containers must fill their configured Entis back color before child sprites (node=%s visible=%s color=%s children=%d)" % [str(back_color_node != null), str(back_color_node.visible if back_color_node != null else false), back_color_node.color.to_html(false) if back_color_node != null else "missing", back_color_sprite.children.size()]): return
 	player.is_title_mode = true
 	var mesh_values: Array = [
 		0.0, 0.0, 64.0, 0.0, 0.0, 64.0, 64.0, 64.0,

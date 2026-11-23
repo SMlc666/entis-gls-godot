@@ -1188,6 +1188,8 @@ class HostSprite extends RefCounted:
 	var alpha_image: Image = null
 	var alpha_texture: ImageTexture = null
 	var alpha_range: int = 256
+	var back_color: int = 0
+	var fill_back_color: bool = true
 	var animation_frames: Array[Image] = []
 	var animation_sequence: Array[int] = []
 	var animation_total_time_ms: int = 0
@@ -1819,7 +1821,9 @@ class HostSprite extends RefCounted:
 		size = Vector2i(cw, ch)
 		return 0
 
-	func set_back_color(_rgb: int, _enable: bool) -> int:
+	func set_back_color(rgb: int, enable: bool) -> int:
+		back_color = rgb & 0xffffff
+		fill_back_color = enable
 		return 0
 
 	func set_alpha_image(alpha_res: Variant, alpha_range_value: int = 256) -> int:
@@ -1866,11 +1870,14 @@ class HostSprite extends RefCounted:
 				if rw > 0 and rh > 0:
 					r = Rect2i(rx, ry, rw, rh)
 			var a := 1.0 - (float(trans) / 256.0) if trans > 0 else 1.0
-			var c := Color.hex(color)
+			var c := _native_rgb_color(color)
 			c.a = a
 			image.fill_rect(r, c)
 			texture = ImageTexture.create_from_image(image)
 		return 0
+
+	func _native_rgb_color(rgb: int) -> Color:
+		return Color(float((rgb >> 16) & 0xff) / 255.0, float((rgb >> 8) & 0xff) / 255.0, float(rgb & 0xff) / 255.0, 1.0)
 
 	func draw_image(src: Variant, param: Variant = null) -> int:
 		var src_img: Image = null
@@ -3386,6 +3393,8 @@ static func _serialize_value_checked(val: Variant, active_stack: Array, depth: i
 				"z_order": sprite.z_order,
 				"is_visible": sprite.is_visible,
 				"transparency": sprite.transparency,
+				"back_color": sprite.back_color,
+				"fill_back_color": sprite.fill_back_color,
 				"btn_id": sprite.btn_id,
 				"is_button": sprite.is_button,
 				"btn_state": sprite.btn_state,
@@ -3487,6 +3496,8 @@ static func deserialize_into(target: Variant, data: Variant, vm: RefCounted = nu
 			sprite.z_order = int(data.get("z_order", 0))
 			sprite.is_visible = bool(data.get("is_visible", false))
 			sprite.transparency = int(data.get("transparency", 0))
+			sprite.back_color = int(data.get("back_color", 0)) & 0xffffff
+			sprite.fill_back_color = bool(data.get("fill_back_color", true))
 			sprite.btn_id = str(data.get("btn_id", ""))
 			sprite.is_button = bool(data.get("is_button", false))
 			sprite.btn_state = str(data.get("btn_state", "normal"))
