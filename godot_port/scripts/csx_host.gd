@@ -1899,6 +1899,8 @@ class HostSprite extends RefCounted:
 
 	func get_parameter(param: Variant) -> int:
 		if param != null and param.has_method("set_field"):
+			param.set_field("rHorzUnit", magnification.x)
+			param.set_field("rVertUnit", magnification.y)
 			param.set_field("nImageWidth", size.x)
 			param.set_field("nImageHeight", size.y)
 			param.set_field("nTransparency", transparency)
@@ -1912,6 +1914,12 @@ class HostSprite extends RefCounted:
 
 	func set_parameter(param: Variant) -> int:
 		if param != null and param.has_method("get_field"):
+			var horz = param.get_field("rHorzUnit")
+			var vert = param.get_field("rVertUnit")
+			if horz != null:
+				magnification.x = float(horz)
+			if vert != null:
+				magnification.y = float(vert)
 			var w = param.get_field("nImageWidth")
 			var h = param.get_field("nImageHeight")
 			if w != null and h != null:
