@@ -101,6 +101,14 @@ func _initialize() -> void:
 		_fail("Replacing a curve during turn-loop activation must not divide or reset other curves")
 		return
 	sprite.flush_activation()
+	vm._dispatch_sprite_method(sprite, "SetBezierCurve", [null, [0.0, 30.0, 60.0, 90.0]])
+	sprite.begin_activation(1000)
+	host.sprite_animation_flags &= ~2
+	host.advance_sprite_animations(0.01)
+	if sprite.is_activating or not is_equal_approx(sprite.rotation_degrees, 90.0):
+		_fail("Disabling animeAction must finish a normal activation at its endpoint")
+		return
+	host.sprite_animation_flags |= 2
 	print("PASS Sprite activation")
 	quit(0)
 

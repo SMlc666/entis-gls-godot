@@ -1469,6 +1469,14 @@ class HostSprite extends RefCounted:
 
 	func advance_activation(delta_ms: float) -> void:
 		activation_elapsed_ms += delta_ms
+		if host != null and (host.sprite_animation_flags & 2) == 0:
+			if activation_action_type == 0:
+				flush_activation()
+			else:
+				if activation_fade_enabled:
+					set_blend_degree(activation_end_alpha)
+				_apply_activation_curves(1.0)
+			return
 		if activation_action_type == 0 and activation_elapsed_ms >= activation_duration_ms:
 			flush_activation()
 			return
