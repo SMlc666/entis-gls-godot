@@ -14,6 +14,14 @@ func _initialize() -> void:
 	if not is_same(vm._dispatch_sprite_method(sprite, "GetParameter", [parameter]), parameter) or parameter.get_field("rHorzUnit") != 1.5 or parameter.get_field("rRevAngle") != 30.0:
 		_fail("Sprite.GetParameter must return and populate the supplied SpriteParam")
 		return
+	parameter.set_field("rCrossingAngle", 67.0)
+	parameter.set_field("rgbLightColor", 0x123456)
+	sprite.set_parameter(parameter)
+	var parameter_copy := CsxVMReader.CsxInstance.new("SpriteParam")
+	sprite.get_parameter(parameter_copy)
+	if parameter_copy.get_field("rCrossingAngle") != 67.0 or parameter_copy.get_field("rgbLightColor") != 0x123456:
+		_fail("SpriteParam fields must survive SetParameter and GetParameter")
+		return
 	var window := CsxHostClass.HostWindow.new(host)
 	if not is_same(vm._dispatch_window_method(window, "GetParameter", [parameter]), parameter):
 		_fail("Window.GetParameter must return the supplied SpriteParam")
