@@ -1896,10 +1896,19 @@ class HostSprite extends RefCounted:
 				src_img = src.image
 		if src_img != null and image != null:
 			var dst_pos := Vector2i.ZERO
+			var center := Vector2i.ZERO
+			var scale := Vector2.ONE
 			if param != null and param.has_method("get_field"):
 				var pt = param.get_field("ptDstPos")
 				if pt != null and pt.has_method("get_field"):
 					dst_pos = Vector2i(int(pt.get_field("x")), int(pt.get_field("y")))
+				var pivot = param.get_field("ptRevCenter")
+				if pivot != null and pivot.has_method("get_field"):
+					center = Vector2i(int(pivot.get_field("x")), int(pivot.get_field("y")))
+				var horz = param.get_field("rHorzUnit")
+				var vert = param.get_field("rVertUnit")
+				if horz != null: scale.x = float(horz)
+				if vert != null: scale.y = float(vert)
 			var src_rect := Rect2i(Vector2i.ZERO, src_img.get_size())
 			if clip != null and clip.has_method("get_field"):
 				var left := int(clip.get_field("left"))
@@ -1907,7 +1916,13 @@ class HostSprite extends RefCounted:
 				var right := int(clip.get_field("right"))
 				var bottom := int(clip.get_field("bottom"))
 				src_rect = Rect2i(left, top, maxi(0, right - left), maxi(0, bottom - top)).intersection(src_rect)
-			image.blend_rect(src_img, src_rect, dst_pos)
+			if scale.x <= 0.0 or scale.y <= 0.0 or src_rect.size.x <= 0 or src_rect.size.y <= 0:
+				return 1
+			var source_view := src_img.get_region(src_rect)
+			var scaled_size := Vector2i(maxi(1, roundi(src_rect.size.x * scale.x)), maxi(1, roundi(src_rect.size.y * scale.y)))
+			if scaled_size != src_rect.size:
+				source_view.resize(scaled_size.x, scaled_size.y, Image.INTERPOLATE_BILINEAR)
+			image.blend_rect(source_view, Rect2i(Vector2i.ZERO, scaled_size), dst_pos - Vector2i(Vector2(center) * scale))
 			texture = ImageTexture.create_from_image(image)
 			return 1
 		return 0

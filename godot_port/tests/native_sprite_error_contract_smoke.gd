@@ -30,6 +30,19 @@ func _initialize() -> void:
 	if not is_same(vm._dispatch_window_method(window, "GetParameter", [parameter]), parameter):
 		_fail("Window.GetParameter must return the supplied SpriteParam")
 		return
+	var source := CsxHostClass.HostResource.new("", "", -1, 0, 0, host)
+	source.image = Image.create(2, 2, false, Image.FORMAT_RGBA8)
+	source.image.fill(Color.RED)
+	var destination := CsxHostClass.HostSprite.new(0, host)
+	destination.create_sprite(0, 8, 8)
+	var draw_param: Variant = vm.create_object("SpriteParam")
+	draw_param.get_field("ptDstPos").set_field("x", 2)
+	draw_param.get_field("ptDstPos").set_field("y", 1)
+	draw_param.set_field("rHorzUnit", 2.0)
+	draw_param.set_field("rVertUnit", 2.0)
+	if vm._dispatch_sprite_method(destination, "DrawImage", [source, draw_param]) != 0 or destination.image.get_pixel(5, 4).r < 0.9 or destination.image.get_pixel(6, 4).a > 0.1:
+		_fail("DrawImage must scale source pixels at the requested destination")
+		return
 	if vm._dispatch_sprite_method(sprite, "CreateMessage", [640, 120]) != 0:
 		_fail("Sprite.CreateMessage success must return Entis Error 0")
 		return
