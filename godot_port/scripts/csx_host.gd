@@ -1175,6 +1175,7 @@ class HostSprite extends RefCounted:
 	var blending: int = 0
 	var position: Vector2i = Vector2i.ZERO
 	var magnification: Vector2 = Vector2.ONE
+	var rotation_degrees: float = 0.0
 	var activation_curves: Array = [[], [], []]
 	var rev_center: Vector2i = Vector2i.ZERO
 	var size: Vector2i = Vector2i.ZERO
@@ -1901,6 +1902,7 @@ class HostSprite extends RefCounted:
 		if param != null and param.has_method("set_field"):
 			param.set_field("rHorzUnit", magnification.x)
 			param.set_field("rVertUnit", magnification.y)
+			param.set_field("rRevAngle", rotation_degrees)
 			param.set_field("nImageWidth", size.x)
 			param.set_field("nImageHeight", size.y)
 			param.set_field("nTransparency", transparency)
@@ -1920,6 +1922,9 @@ class HostSprite extends RefCounted:
 				magnification.x = float(horz)
 			if vert != null:
 				magnification.y = float(vert)
+			var angle = param.get_field("rRevAngle")
+			if angle != null:
+				rotation_degrees = float(angle)
 			var w = param.get_field("nImageWidth")
 			var h = param.get_field("nImageHeight")
 			if w != null and h != null:
@@ -3460,6 +3465,7 @@ static func _serialize_value_checked(val: Variant, active_stack: Array, depth: i
 				"position": [sprite.position.x, sprite.position.y],
 				"rev_center": [sprite.rev_center.x, sprite.rev_center.y],
 				"magnification": [sprite.magnification.x, sprite.magnification.y],
+				"rotation_degrees": sprite.rotation_degrees,
 				"message_style": _serialize_value_checked(sprite.message_style, active_stack, depth + 1, state),
 				"size": [sprite.size.x, sprite.size.y],
 				"z_order": sprite.z_order,
@@ -3559,6 +3565,7 @@ static func deserialize_into(target: Variant, data: Variant, vm: RefCounted = nu
 			sprite.rev_center = Vector2i(int(center[0]), int(center[1])) if center.size() >= 2 else Vector2i.ZERO
 			var magnification: Array = data.get("magnification", [1.0, 1.0])
 			sprite.magnification = Vector2(float(magnification[0]), float(magnification[1])) if magnification.size() >= 2 else Vector2.ONE
+			sprite.rotation_degrees = float(data.get("rotation_degrees", 0.0))
 			if data.has("message_style"):
 				var style = deserialize_value(data["message_style"], vm, context)
 				if style is Dictionary:

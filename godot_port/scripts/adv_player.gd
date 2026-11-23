@@ -1107,6 +1107,7 @@ func _update_bustups() -> void:
 			b_rect.position = Vector2(spr.position.x - ox, spr.position.y - oy)
 			b_rect.pivot_offset = Vector2(spr.rev_center)
 			b_rect.scale = spr.magnification
+			b_rect.rotation_degrees = spr.rotation_degrees
 			b_rect.modulate.a = 1.0 - (float(spr.transparency) / 256.0)
 		else:
 			b_rect.visible = false
@@ -1147,6 +1148,7 @@ func _sync_adv_temp_sprites(adv: CsxVMReader.CsxInstance) -> void:
 			node.position = Vector2(sprite.position - sprite.rev_center)
 			node.pivot_offset = Vector2(sprite.rev_center)
 			node.scale = sprite.magnification
+			node.rotation_degrees = sprite.rotation_degrees
 			node.modulate.a = 1.0 - clampf(float(sprite.transparency) / 256.0, 0.0, 1.0)
 			node.z_index = clampi(sprite.z_order, RenderingServer.CANVAS_ITEM_Z_MIN, RenderingServer.CANVAS_ITEM_Z_MAX)
 			var material: ShaderMaterial = adv_temp_materials.get(id, null)
@@ -1192,6 +1194,7 @@ func _sync_adv_cg_sprite(sprite: Variant) -> void:
 	adv_cg_rect.position = Vector2(native_sprite.position - native_sprite.rev_center)
 	adv_cg_rect.pivot_offset = Vector2(native_sprite.rev_center)
 	adv_cg_rect.scale = native_sprite.magnification
+	adv_cg_rect.rotation_degrees = native_sprite.rotation_degrees
 	adv_cg_rect.modulate.a = 1.0 - clampf(float(native_sprite.transparency) / 256.0, 0.0, 1.0)
 	if adv_cg_material == null:
 		adv_cg_material = ShaderMaterial.new()
@@ -2508,6 +2511,7 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 	wrapper.position = Vector2(sprite.position - sprite.rev_center)
 	wrapper.pivot_offset = Vector2(sprite.rev_center)
 	wrapper.scale = sprite.magnification
+	wrapper.rotation_degrees = sprite.rotation_degrees
 	var display_text := sprite.display_text()
 	var fallback_size := Vector2(72, 22) if not display_text.is_empty() else Vector2.ZERO
 	if sprite.is_button:
