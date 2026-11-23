@@ -2533,7 +2533,10 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 	if native_back_color != null:
 		native_back_color.visible = sprite.fill_back_color and not sprite.children.is_empty()
 		native_back_color.color = Color(float((sprite.back_color >> 16) & 0xff) / 255.0, float((sprite.back_color >> 8) & 0xff) / 255.0, float(sprite.back_color & 0xff) / 255.0, 1.0)
-	if parent == native_title_canvas and ((filter_title_depth and sprite.z_order < 52000)
+	var form_page_id := str(sprite.fields.get("form_page_id", ""))
+	var is_native_form_page := form_page_id.begins_with("ID_PAGE_")
+	var is_native_confirm_window := _native_sprite_contains_button(sprite, "ID_YES") and _native_sprite_contains_button(sprite, "ID_NO")
+	if parent == native_title_canvas and ((filter_title_depth and sprite.z_order < 52000 and not is_native_form_page and not is_native_confirm_window)
 			or (native_appreciation_mode and sprite.z_order >= 52000)):
 		wrapper.visible = false
 	else:
@@ -2756,6 +2759,15 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 		_sync_native_sprite_children(sprite.children, wrapper, seen, filter_title_depth)
 
 
+func _native_sprite_contains_button(sprite: CsxHostClass.HostSprite, button_id: String) -> bool:
+	if sprite.btn_id == button_id:
+		return true
+	for child: CsxHostClass.HostSprite in sprite.children:
+		if _native_sprite_contains_button(child, button_id):
+			return true
+	return false
+
+
 func _build_native_mesh_warp(sprite: CsxHostClass.HostSprite) -> ArrayMesh:
 	var frames: Array = sprite.fields.get("effect_mesh_frames", [])
 	var base: PackedVector2Array = sprite.fields.get("effect_mesh_base", PackedVector2Array())
@@ -2813,7 +2825,7 @@ func _on_native_scroll_changed(value: float, sprite: CsxHostClass.HostSprite) ->
 	sprite.fields["scroll_%s_pos" % axis] = int(round(value))
 	var id := str(sprite.fields.get("form_item_id", ""))
 	if host != null and not id.is_empty():
-		host.command_queue.append({"id": id, "full_id": id, "command": 4, "parameter": int(round(value))})
+		host.push_command(id, id, 4, int(round(value)))
 
 
 func _apply_native_text_style(label: Control, style: Dictionary, font_bordering: bool = false) -> void:
@@ -2876,9 +2888,6 @@ func _on_native_title_button_pressed(sprite: CsxHostClass.HostSprite) -> void:
 		return
 	if is_title_mode and not native_appreciation_mode:
 		match sprite.btn_id:
-			"ID_CONFIG":
-				_open_config_modal()
-				return
 			"ID_APPRECIATION", "ID_APPLICIATION":
 				_start_native_appreciation_script()
 				return

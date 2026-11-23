@@ -2302,29 +2302,26 @@ class HostWindow extends RefCounted:
 			var event = host.command_queue.pop_front()
 			var cmd_id: String = ""
 			var full_id: String = ""
-			var cmd_num: int = 1
+			var notification: int = 0
 			var parameter: int = 0
 			if event is Dictionary:
 				cmd_id = event.get("id", "")
 				full_id = event.get("full_id", cmd_id)
-				cmd_num = event.get("command", 1)
+				notification = int(event.get("notification", event.get("command", 0)))
 				parameter = int(event.get("parameter", 0))
 			elif event is String:
 				cmd_id = event
 				full_id = cmd_id
-				cmd_num = 1
 			if p_cmd != null:
 				if p_cmd.has_method("set_field"):
 					p_cmd.set_field("strID", cmd_id)
 					p_cmd.set_field("strFullID", full_id)
-					p_cmd.set_field("nCommand", cmd_num)
-					p_cmd.set_field("nNotification", cmd_num)
+					p_cmd.set_field("nNotification", notification)
 					p_cmd.set_field("nParameter", parameter)
 				elif "fields" in p_cmd:
 					p_cmd.fields["strID"] = cmd_id
 					p_cmd.fields["strFullID"] = full_id
-					p_cmd.fields["nCommand"] = cmd_num
-					p_cmd.fields["nNotification"] = cmd_num
+					p_cmd.fields["nNotification"] = notification
 					p_cmd.fields["nParameter"] = parameter
 			return 1
 		return 0
@@ -2479,11 +2476,13 @@ func advance_audio_envelopes(delta: float) -> void:
 			resource.advance_volume_envelope(delta * 1000.0)
 
 
-func push_command(cmd: String, full_id: String = "") -> void:
-	if full_id.is_empty() or full_id == cmd:
-		command_queue.append(cmd)
-	else:
-		command_queue.append({"id": cmd, "full_id": full_id, "command": 1})
+func push_command(cmd: String, full_id: String = "", notification: int = 0, parameter: int = 0) -> void:
+	command_queue.append({
+		"id": cmd,
+		"full_id": full_id if not full_id.is_empty() else cmd,
+		"notification": notification,
+		"parameter": parameter,
+	})
 
 
 func set_tone_filter(type_name: String) -> void:

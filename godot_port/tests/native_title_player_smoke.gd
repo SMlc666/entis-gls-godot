@@ -214,25 +214,52 @@ func _run() -> void:
 	var config_button: TextureButton = config_wrapper.get_node_or_null("NativeButton") if config_wrapper != null else null
 	if not _require(config_button != null, "Native Title() must expose an interactive ID_CONFIG"): return
 	config_button.emit_signal("pressed")
-	await process_frame
-	var config_box: Control = player.config_panel.find_child("ConfigWindowBox", true, false)
-	var config_bg: TextureRect = config_box.find_child("ConfigBg", true, false)
-	var config_return_button: TextureButton = config_box.find_child("ID_TITLE", true, false)
-	if not _require(player.is_config_open and config_bg.is_visible_in_tree() and config_bg.texture != null, "Title Config must show its skinned panel"): return
-	if not _require(config_box.get_global_rect().get_center().is_equal_approx(root.get_visible_rect().get_center()), "Title Config panel must be centered"): return
-	if not _require(config_return_button.is_visible_in_tree() and config_box.get_global_rect().encloses(config_return_button.get_global_rect()), "Title Config close button must be inside the panel"): return
-	player.cfg_slider_bgm.value = 0.5
-	if not _require(is_equal_approx(player.settings_state.audio_volume("bgm"), 0.5), "Title Config must update player settings"): return
+	var native_config: CsxHostClass.HostSprite = null
+	var config_wait_frames := 0
+	while config_wait_frames < 180:
+		await process_frame
+		config_wait_frames += 1
+		native_config = _find_form_page(native_window.root_sprites, "ID_PAGE_CONFIG")
+		var config_wrapper_candidate: Control = player.native_title_controls.get(native_config.get_instance_id(), null) if native_config != null else null
+		if native_config != null and config_wrapper_candidate != null and config_wrapper_candidate.is_visible_in_tree():
+			break
+	var native_config_wrapper: Control = player.native_title_controls.get(native_config.get_instance_id(), null) if native_config != null else null
+	if not _require(native_config != null and _native_stack_has(player.vm.call_stack, "ConfigWindow::run"), "ID_CONFIG must enter the original CSX ConfigWindow"): return
+	if not _require(native_config_wrapper != null and native_config_wrapper.is_visible_in_tree(), "The original ID_PAGE_CONFIG must render above the title screen"): return
+	if not _require(native_config_wrapper.position.is_equal_approx(Vector2(134, 24)) and native_config_wrapper.size.is_equal_approx(Vector2(532, 552)), "The original 532x552 settings page must retain its centered 800x600 coordinates"): return
+	var native_bgm_scroll: CsxHostClass.HostSprite = _find_form_item(native_config.children, "ID_VOL_BGM")
+	var native_bgm_control: Range = player.native_title_controls[native_bgm_scroll.get_instance_id()].get_node_or_null("NativeScroll") if native_bgm_scroll != null else null
+	if not _require(native_bgm_control != null and native_bgm_control.editable, "The original BGM scrollbar must be interactive"): return
+	var scroll_test_value := int(native_bgm_control.value) + 1
+	if scroll_test_value > int(native_bgm_control.max_value):
+		scroll_test_value = int(native_bgm_control.value) - 1
+	native_bgm_control.value = scroll_test_value
+	if not _require(not player.host.command_queue.is_empty(), "Changing the native BGM scrollbar must queue an Entis notification"): return
+	var scroll_event: Dictionary = player.host.command_queue.back()
+	if not _require(scroll_event.get("id") == "ID_VOL_BGM" and scroll_event.get("notification") == 4 and scroll_event.get("parameter") == scroll_test_value, "Native scrollbar tracking must send notification 4 with its position"): return
+	var config_return_sprite: CsxHostClass.HostSprite = _find_button_sprite(native_config.children, "ID_TITLE")
+	var config_return_wrapper: Control = player.native_title_controls.get(config_return_sprite.get_instance_id(), null) if config_return_sprite != null else null
+	var config_return_button: TextureButton = config_return_wrapper.get_node_or_null("NativeButton") if config_return_wrapper != null else null
+	if not _require(config_return_button != null and config_return_button.is_visible_in_tree(), "The original ID_TITLE button must be available on ConfigWindow"): return
 	config_return_button.emit_signal("pressed")
-	if not _require(not player.is_config_open, "Title Config close button must close the panel"): return
-
-	config_button.emit_signal("pressed")
-	var escape_event := InputEventKey.new()
-	escape_event.keycode = KEY_ESCAPE
-	escape_event.pressed = true
-	player._unhandled_input(escape_event)
-	await process_frame
-	if not _require(player.is_title_mode and not player.is_config_open and config_button.is_visible_in_tree(), "Escape must return from Config to the title menu"): return
+	config_wait_frames = 0
+	var native_yes_sprite: CsxHostClass.HostSprite = null
+	while config_wait_frames < 180:
+		await process_frame
+		config_wait_frames += 1
+		native_yes_sprite = _find_button_sprite(native_window.root_sprites, "ID_YES")
+		if native_yes_sprite != null and _native_stack_has(player.vm.call_stack, "Confirm"):
+			break
+	var native_yes_wrapper: Control = player.native_title_controls.get(native_yes_sprite.get_instance_id(), null) if native_yes_sprite != null else null
+	var native_yes_button: TextureButton = native_yes_wrapper.get_node_or_null("NativeButton") if native_yes_wrapper != null else null
+	if not _require(native_yes_button != null and native_yes_button.is_visible_in_tree(), "The original confirmation page must be visible and interactive"): return
+	native_yes_button.emit_signal("pressed")
+	config_wait_frames = 0
+	while config_wait_frames < 180 and _find_form_page(native_window.root_sprites, "ID_PAGE_CONFIG") != null:
+		await process_frame
+		config_wait_frames += 1
+	if not _require(_find_form_page(native_window.root_sprites, "ID_PAGE_CONFIG") == null and player.is_title_mode, "The original ID_TITLE command must close ConfigWindow and return to Title()"): return
+	if not _require(player.vm.last_error.is_empty(), "Native ConfigWindow must complete without a VM error"): return
 	var exit_requested := OS.get_cmdline_user_args().has("--verify-exit")
 	if exit_requested:
 		var exit_sprite = _find_button_sprite(native_window.root_sprites, "ID_EXITGAME")
@@ -334,6 +361,9 @@ func _run() -> void:
 	var native_close_wrapper: Control = player.native_title_controls.get(native_close_sprite.get_instance_id(), null)
 	var native_close_button: TextureButton = native_close_wrapper.get_node_or_null("NativeButton") if native_close_wrapper != null else null
 	if not _require(native_close_button != null, "Native Appreciation close command must be interactive"): return
+	var escape_event := InputEventKey.new()
+	escape_event.keycode = KEY_ESCAPE
+	escape_event.pressed = true
 	root.push_input(escape_event, true)
 	if not _require(player.is_title_mode and not player.native_appreciation_mode and not player.vm.is_halted, "Closing native Appreciation() must return to Title()"): return
 
@@ -399,6 +429,25 @@ func _find_button_sprite(sprites: Array, button_id: String):
 			var child_match = _find_button_sprite(sprite.children, button_id)
 			if child_match != null:
 				return child_match
+	return null
+
+
+func _find_form_item(sprites: Array, item_id: String):
+	for sprite in sprites:
+		if sprite is CsxHostClass.HostSprite:
+			if str(sprite.fields.get("form_item_id", "")) == item_id:
+				return sprite
+			var child_match = _find_form_item(sprite.children, item_id)
+			if child_match != null:
+				return child_match
+	return null
+
+
+func _find_form_page(sprites: Array, page_id: String):
+	for sprite in sprites:
+		if sprite is CsxHostClass.HostSprite:
+			if str(sprite.fields.get("form_page_id", "")) == page_id:
+				return sprite
 	return null
 
 

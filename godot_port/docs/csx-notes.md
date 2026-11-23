@@ -37,7 +37,7 @@
    - 原版标题画面入口 `Title()`（@ 0x025EEB），使用 `titleSkin` 挂载 `system/title.noa`。
    - 画面资源包含 800x600 背景 `FRM_0611.eri`、Logo `FRM_0612.eri`（坐标 223, 95）、副标题 `FRM_0613.eri`（坐标 511, 171）及原版标题曲 `BGM07.mio`。
    - 播放器在 `--title` 冷启动或游戏中返回标题时，逐帧运行原版 `Title()`；Godot 将 `HostWindow.root_sprites` 递归映射到 800x600 参考画布，保留原始位置、尺寸、纹理、透明度和层级，按钮按原 `ID_*` 命令回送给 `GetCommand`。
-   - headless smoke 已验证新档 `Title()` 的四个原版命令（`ID_START`、`ID_CONTINUE`、`ID_CONFIG`、`ID_EXITGAME`）、`ID_START` 进入 `ScenarioLoop("00_Z000")`，以及 `ID_CONFIG` 打开原版 `ConfigWindow` 后可返回标题。皮肤还定义五项的 `ID_PAGE_MENU_FULL`，但当前新档实际使用 `ID_PAGE_MENU`；完整菜单/鉴赏解锁条件尚未验证。原版 `Appreciation()` 作为独立 CSX 界面可启动，回想标签、CG 项与 BGM 曲目按钮会回送到 CSX 循环；点选 `ID_BGM21` 已验证原版逻辑切换至 `BGM02_S.mio`。设置控件、CG 打开/差分、跨页及回想播放仍需逐项回归。
+   - headless smoke 已验证新档 `Title()` 的四个原版命令（`ID_START`、`ID_CONTINUE`、`ID_CONFIG`、`ID_EXITGAME`）、`ID_START` 进入 `ScenarioLoop("00_Z000")`，以及 `ID_CONFIG` 打开原版 `ConfigWindow`、显示 532x552 原生页、回送 BGM 滚动条的 `ncTracking` 值，并通过原版确认窗返回标题。皮肤还定义五项的 `ID_PAGE_MENU_FULL`，但当前新档实际使用 `ID_PAGE_MENU`；完整菜单/鉴赏解锁条件尚未验证。原版 `Appreciation()` 作为独立 CSX 界面可启动，回想标签、CG 项与 BGM 曲目按钮会回送到 CSX 循环；点选 `ID_BGM21` 已验证原版逻辑切换至 `BGM02_S.mio`。静音切换、配置值持久化、角色语音细节、CG 打开/差分、跨页及回想播放仍需逐项回归。
 
 6. **色调滤镜着色器（ToneFilter Shaders）**：
    - 游戏脚本调用 `AdvScreen::setToneFilter` 或 `HostToneFilter` 设置画面色调。

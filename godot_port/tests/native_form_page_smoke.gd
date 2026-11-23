@@ -126,6 +126,14 @@ func _run() -> void:
 
 	var screen_win = vm.data_vars[4]["value"] as CsxHostClass.HostWindow
 	expect(screen_win != null, "data_vars[4] must be HostWindow")
+	var command := CsxVMReader.CsxInstance.new("WndSpriteCmd")
+	host.push_command("ID_CONFIG")
+	expect(screen_win.get_command(command) == 1, "GetCommand must dequeue a queued native button click")
+	expect(command.get_field("strID") == "ID_CONFIG" and command.get_field("strFullID") == "ID_CONFIG", "A native button click must preserve its item IDs")
+	expect(command.get_field("nNotification") == 0 and command.get_field("nParameter") == 0, "Native QueueCommand defaults must match Entis notification and parameter defaults")
+	host.push_command("ID_VOL_BGM", "ID_VOL_BGM", 4, 128)
+	expect(screen_win.get_command(command) == 1, "GetCommand must dequeue a native scrollbar tracking event")
+	expect(command.get_field("nNotification") == 4 and command.get_field("nParameter") == 128, "Native scrollbar tracking must preserve ncTracking and its position")
 	expect(screen_win.root_sprites.size() == 4, "HostWindow must contain 4 root sprites in Title mode")
 	var title_menu: CsxHostClass.HostSprite = screen_win.root_sprites[2]
 	var title_commands := ["ID_START", "ID_CONTINUE", "ID_CONFIG", "ID_EXITGAME"]
