@@ -1209,6 +1209,7 @@ class HostSprite extends RefCounted:
 	var activation_elapsed_ms: float = 0.0
 	var activation_start_alpha: int = 0
 	var activation_end_alpha: int = 0
+	var activation_target_alpha: int = 0
 	var children: Array[HostSprite] = []
 	var form_resources: HostResourceManager
 	var text_content: String = ""
@@ -1411,11 +1412,11 @@ class HostSprite extends RefCounted:
 		return blending if alpha_resource != null and alpha_range < 256 else transparency
 
 	func set_blending_envelope(b: int) -> void:
-		blending = b
+		activation_target_alpha = b
 
 	func begin_activation(duration_ms: int) -> void:
-		activation_start_alpha = transparency
-		activation_end_alpha = clampi(blending, 0, 256)
+		activation_start_alpha = get_blend_degree()
+		activation_end_alpha = clampi(activation_target_alpha, 0, 256)
 		activation_duration_ms = float(duration_ms)
 		activation_elapsed_ms = 0.0
 		is_activating = true
@@ -1431,7 +1432,7 @@ class HostSprite extends RefCounted:
 			flush_activation()
 			return
 		var progress := activation_elapsed_ms / activation_duration_ms
-		transparency = roundi(lerpf(activation_start_alpha, activation_end_alpha, progress))
+		set_blend_degree(roundi(lerpf(activation_start_alpha, activation_end_alpha, progress)))
 		_apply_activation_curves(progress)
 
 	func _apply_activation_curves(progress: float) -> void:
@@ -1447,7 +1448,7 @@ class HostSprite extends RefCounted:
 				magnification = value
 
 	func flush_activation() -> void:
-		transparency = activation_end_alpha if is_activating else clampi(blending, 0, 256)
+		set_blend_degree(activation_end_alpha if is_activating else clampi(activation_target_alpha, 0, 256))
 		if is_activating:
 			_apply_activation_curves(1.0)
 		activation_curves = [[], [], []]

@@ -31,6 +31,21 @@ func _initialize() -> void:
 	if sprite.transparency != 256 or sprite.is_activation() != 0 or not host.active_sprites.is_empty():
 		_fail("Flushing must finish an activation without waiting for another frame")
 		return
+	var mask := CsxHostClass.HostResource.new("", "", -1, 0, 0, host)
+	mask.image = Image.create(1, 1, false, Image.FORMAT_RGBA8)
+	sprite.set_alpha_image(mask, 8)
+	sprite.set_transparency(32)
+	sprite.set_blend_degree(0)
+	sprite.set_blending_envelope(256)
+	sprite.begin_activation(200)
+	host.advance_sprite_animations(0.1)
+	if sprite.blending != 128 or sprite.transparency != 32:
+		_fail("Masked fading must animate blend degree without changing sprite transparency")
+		return
+	sprite.flush_activation()
+	if sprite.blending != 256 or sprite.transparency != 32:
+		_fail("Flushing a masked fade must preserve independent transparency")
+		return
 	print("PASS Sprite activation")
 	quit(0)
 
