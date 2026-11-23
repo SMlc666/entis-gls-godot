@@ -2017,21 +2017,30 @@ class HostWindow extends RefCounted:
 		var target: HostSprite = null
 		var parts := path.split("\\", false)
 		for part: String in parts:
-			target = null
-			for sprite: HostSprite in current:
-				if sprite.btn_id == part or str(sprite.fields.get("form_item_id", "")) == part:
-					target = sprite
-					break
+			target = _find_focus_item(current, part)
 			if target == null:
 				break
 			current = target.children
+		_apply_focus(target, path if target != null else "")
+		return 0
+
+	func _find_focus_item(sprites: Array, id: String) -> HostSprite:
+		for sprite: HostSprite in sprites:
+			if sprite.btn_id == id or str(sprite.fields.get("form_item_id", "")) == id:
+				return sprite
+		for sprite: HostSprite in sprites:
+			var found := _find_focus_item(sprite.children, id)
+			if found != null:
+				return found
+		return null
+
+	func _apply_focus(target: HostSprite, path: String) -> void:
 		if focused_sprite != null and focused_sprite.is_button and focused_sprite.btn_state == "focus":
 			focused_sprite.set_button_state("normal")
 		focused_sprite = target
-		focused_path = path if target != null else ""
+		focused_path = path
 		if target != null and target.is_button:
 			target.set_button_state("focus")
-		return 0
 
 	func get_focus() -> String:
 		return focused_path
@@ -2039,7 +2048,7 @@ class HostWindow extends RefCounted:
 	func focus_sprite(sprite: HostSprite) -> void:
 		var path := _find_focus_path(root_sprites, sprite, "")
 		if not path.is_empty():
-			set_focus(path)
+			_apply_focus(sprite, path)
 
 	func _find_focus_path(sprites: Array, target: HostSprite, prefix: String) -> String:
 		for sprite: HostSprite in sprites:
