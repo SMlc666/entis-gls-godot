@@ -1982,6 +1982,8 @@ class HostWindow extends RefCounted:
 	var viewport_size: Vector2i = Vector2i(800, 600)
 	var root_sprites: Array[HostSprite] = []
 	var fields: Dictionary = {}
+	var focused_sprite: HostSprite = null
+	var focused_path: String = ""
 
 	func _init(p_host: CsxHost) -> void:
 		host = p_host
@@ -1995,9 +1997,36 @@ class HostWindow extends RefCounted:
 	func detach_sprite(spr: Variant) -> void:
 		if spr is HostSprite:
 			root_sprites.erase(spr)
+			if focused_sprite == spr:
+				set_focus("")
 
 	func detach_all_sprites() -> void:
 		root_sprites.clear()
+		set_focus("")
+
+	func set_focus(path: String) -> int:
+		var current: Array = root_sprites
+		var target: HostSprite = null
+		var parts := path.split("\\", false)
+		for part: String in parts:
+			target = null
+			for sprite: HostSprite in current:
+				if sprite.btn_id == part or str(sprite.fields.get("form_item_id", "")) == part:
+					target = sprite
+					break
+			if target == null:
+				break
+			current = target.children
+		if focused_sprite != null and focused_sprite.is_button and focused_sprite.btn_state == "focus":
+			focused_sprite.set_button_state("normal")
+		focused_sprite = target
+		focused_path = path if target != null else ""
+		if target != null and target.is_button:
+			target.set_button_state("focus")
+		return 0
+
+	func get_focus() -> String:
+		return focused_path
 
 	func get_display_size() -> Vector2i:
 		return viewport_size

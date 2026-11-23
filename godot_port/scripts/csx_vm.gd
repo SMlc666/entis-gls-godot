@@ -2159,6 +2159,12 @@ func _dispatch_file_method(file: CsxHostClass.HostFile, method: String, args: Ar
 
 func _dispatch_window_method(win: CsxHostClass.HostWindow, method: String, args: Array) -> Variant:
 	match method:
+		"SetFocus":
+			return win.set_focus(str(args[0]) if not args.is_empty() and args[0] != null else "")
+		"GetFocus":
+			return win.get_focus()
+		"KillFocus":
+			return win.set_focus("")
 		"AddSprite":
 			if args.size() >= 2:
 				win.add_sprite(_to_int(args[0]), args[1])
