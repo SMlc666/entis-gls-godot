@@ -1899,6 +1899,8 @@ class HostSprite extends RefCounted:
 			var center := Vector2i.ZERO
 			var scale := Vector2.ONE
 			var draw_transparency := 0
+			var angle_degrees := 0.0
+			var crossing_degrees := 90.0
 			if param != null and param.has_method("get_field"):
 				var pt = param.get_field("ptDstPos")
 				if pt != null and pt.has_method("get_field"):
@@ -1912,6 +1914,10 @@ class HostSprite extends RefCounted:
 				if vert != null: scale.y = float(vert)
 				var alpha = param.get_field("nTransparency")
 				if alpha != null: draw_transparency = clampi(int(alpha), 0, 256)
+				var angle = param.get_field("rRevAngle")
+				var crossing = param.get_field("rCrossingAngle")
+				if angle != null: angle_degrees = float(angle)
+				if crossing != null: crossing_degrees = float(crossing)
 			var src_rect := Rect2i(Vector2i.ZERO, src_img.get_size())
 			if clip != null and clip.has_method("get_field"):
 				var left := int(clip.get_field("left"))
@@ -1922,6 +1928,10 @@ class HostSprite extends RefCounted:
 			if is_zero_approx(scale.x) or is_zero_approx(scale.y) or src_rect.size.x <= 0 or src_rect.size.y <= 0 or draw_transparency >= 256:
 				return 1
 			var source_view := src_img.get_region(src_rect)
+			if not is_zero_approx(fposmod(angle_degrees, 360.0)) or not is_equal_approx(crossing_degrees, 90.0):
+				_draw_transformed_image(source_view, dst_pos, center, scale, angle_degrees, crossing_degrees, draw_transparency)
+				texture = ImageTexture.create_from_image(image)
+				return 1
 			var scaled_size := Vector2i(maxi(1, roundi(src_rect.size.x * absf(scale.x))), maxi(1, roundi(src_rect.size.y * absf(scale.y))))
 			if scaled_size != src_rect.size:
 				source_view.resize(scaled_size.x, scaled_size.y, Image.INTERPOLATE_BILINEAR)
@@ -1940,6 +1950,28 @@ class HostSprite extends RefCounted:
 			texture = ImageTexture.create_from_image(image)
 			return 1
 		return 0
+
+	func _draw_transformed_image(source: Image, dst_pos: Vector2i, center: Vector2i, scale: Vector2, angle: float, crossing: float, transparency_value: int) -> void:
+		var radians := deg_to_rad(angle)
+		var cross_radians := deg_to_rad(angle + crossing)
+		var x_axis := Vector2(cos(radians), sin(radians)) * scale.x
+		var y_axis := Vector2(cos(cross_radians), sin(cross_radians)) * scale.y
+		var transform := Transform2D(x_axis, y_axis, Vector2(dst_pos) - x_axis * center.x - y_axis * center.y)
+		if is_zero_approx(transform.determinant()):
+			return
+		var size_vector := Vector2(source.get_size())
+		var bounds := Rect2(transform * Vector2.ZERO, Vector2.ZERO)
+		for point: Vector2 in [Vector2(size_vector.x, 0), size_vector, Vector2(0, size_vector.y)]:
+			bounds = bounds.expand(transform * point)
+		var inverse := transform.affine_inverse()
+		var alpha_scale := float(256 - transparency_value) / 256.0
+		for y in range(maxi(0, floori(bounds.position.y)), mini(image.get_height(), ceili(bounds.end.y))):
+			for x in range(maxi(0, floori(bounds.position.x)), mini(image.get_width(), ceili(bounds.end.x))):
+				var sample := inverse * Vector2(x + 0.5, y + 0.5)
+				if sample.x >= 0.0 and sample.y >= 0.0 and sample.x < size_vector.x and sample.y < size_vector.y:
+					var color := source.get_pixel(floori(sample.x), floori(sample.y))
+					color.a *= alpha_scale
+					image.set_pixel(x, y, image.get_pixel(x, y).blend(color))
 
 	func get_parameter(param: Variant) -> int:
 		if param != null and param.has_method("set_field"):

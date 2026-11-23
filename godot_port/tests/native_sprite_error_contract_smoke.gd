@@ -53,6 +53,15 @@ func _initialize() -> void:
 	if destination.draw_image(source, draw_param) != 1 or destination.image.get_pixel(2, 1).b < 0.9 or destination.image.get_pixel(3, 1).r < 0.9 or absf(destination.image.get_pixel(2, 1).a - 0.5) > 0.02:
 		_fail("DrawImage must flip negative scale and apply transparency")
 		return
+	destination.image.fill(Color.TRANSPARENT)
+	draw_param.get_field("ptDstPos").set_field("x", 4)
+	draw_param.get_field("ptDstPos").set_field("y", 2)
+	draw_param.set_field("rHorzUnit", 1.0)
+	draw_param.set_field("nTransparency", 0)
+	draw_param.set_field("rRevAngle", 90.0)
+	if destination.draw_image(source, draw_param) != 1 or destination.image.get_pixel(3, 2).r < 0.9 or destination.image.get_pixel(3, 3).b < 0.9:
+		_fail("DrawImage must rotate the source around its native destination anchor")
+		return
 	if vm._dispatch_sprite_method(sprite, "CreateMessage", [640, 120]) != 0:
 		_fail("Sprite.CreateMessage success must return Entis Error 0")
 		return
