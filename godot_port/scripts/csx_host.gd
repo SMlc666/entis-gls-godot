@@ -1423,7 +1423,7 @@ class HostSprite extends RefCounted:
 			activation_end_alpha = clampi(b, 0, 256)
 
 	func _divide_activation() -> void:
-		if not is_activating or activation_elapsed_ms <= 0.0 or activation_duration_ms <= 0.0:
+		if not is_activating or activation_action_type != 0 or activation_elapsed_ms <= 0.0 or activation_duration_ms <= 0.0:
 			return
 		var progress := clampf(activation_elapsed_ms / activation_duration_ms, 0.0, 1.0)
 		for index in activation_curves.size():

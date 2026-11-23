@@ -95,6 +95,11 @@ func _initialize() -> void:
 	if not sprite.is_activating or not is_equal_approx(sprite.rotation_degrees, 60.0):
 		_fail("Turn-loop activation must reverse after the forward duration")
 		return
+	var loop_elapsed := sprite.activation_elapsed_ms
+	vm._dispatch_sprite_method(sprite, "SetBezierCurve", [null, null, []])
+	if sprite.activation_elapsed_ms != loop_elapsed or sprite.activation_curves[1].size() != 4:
+		_fail("Replacing a curve during turn-loop activation must not divide or reset other curves")
+		return
 	sprite.flush_activation()
 	print("PASS Sprite activation")
 	quit(0)
