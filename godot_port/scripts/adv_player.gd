@@ -1483,17 +1483,35 @@ func _process_mei_movie(delta: float) -> void:
 	else:
 		due_frames = mini(due_frames, mei_movie_frames.size())
 		mei_movie_elapsed = fposmod(mei_movie_elapsed, mei_movie_frame_duration)
+	var frame_to_display: Dictionary = {}
 	for _step: int in range(due_frames):
 		if mei_movie_queue.is_empty() and not _prepare_next_mei_group():
 			if mei_movie_loop:
 				_restart_mei_movie()
+				frame_to_display = {
+					"rgba": mei_movie_first_rgba,
+					"width": mei_movie_width,
+					"height": mei_movie_height,
+					"index": 0
+				}
+				continue
 			else:
+				if not frame_to_display.is_empty():
+					mei_movie_displayed_index = int(frame_to_display["index"])
+					if host != null:
+						host.movie_current_frame = mei_movie_displayed_index
 				_finish_mei_movie()
 				return
 		if mei_movie_queue.is_empty():
 			return
-		var frame: Dictionary = mei_movie_queue.pop_front()
-		_show_mei_frame(frame["rgba"], int(frame["width"]), int(frame["height"]), int(frame["index"]))
+		frame_to_display = mei_movie_queue.pop_front()
+	if mei_movie_active and not frame_to_display.is_empty():
+		_show_mei_frame(
+			frame_to_display["rgba"],
+			int(frame_to_display["width"]),
+			int(frame_to_display["height"]),
+			int(frame_to_display["index"])
+		)
 
 
 func _on_movie_seek_requested(frame_index: int) -> void:
@@ -1646,7 +1664,6 @@ func _restart_mei_movie() -> void:
 	mei_movie_anchor_index = 0
 	mei_movie_anchor_rgba = mei_movie_first_reference_rgba
 	mei_movie_elapsed = 0.0
-	_show_mei_frame(mei_movie_first_rgba, mei_movie_width, mei_movie_height, 0)
 	if mei_audio_player != null and mei_audio_player.stream != null:
 		mei_audio_player.stop()
 		mei_audio_player.play()
