@@ -21,6 +21,8 @@ func _run() -> void:
 
 	if not _check_empty_noa_fixture(absolute_dir):
 		return
+	if not _check_cp932_noa_names():
+		return
 	if not _check_noa_rejections(absolute_dir):
 		return
 	if not _check_bytecode_bounds():
@@ -76,6 +78,20 @@ func _check_noa_rejections(absolute_dir: String) -> bool:
 		_fail("A wrong NOA marker must be rejected with an error")
 		return false
 	print("  Truncated and invalid NOA headers rejected")
+	return true
+
+
+func _check_cp932_noa_names() -> bool:
+	var reader = NoaArchiveReader.new()
+	var japanese_name := reader._decode_entry_name(PackedByteArray([0x93, 0xFA, 0x96, 0x7B, 0x8C, 0xEA]))
+	if japanese_name != "日本語":
+		_fail("NOA entry names must decode valid CP932 bytes (got '%s')" % japanese_name)
+		return false
+	var invalid_name := reader._decode_entry_name(PackedByteArray([0x81]))
+	if not invalid_name.begins_with("[Invalid CP932:"):
+		_fail("NOA entry names must retain a diagnostic placeholder for malformed CP932")
+		return false
+	print("  Japanese NOA names decode from CP932; malformed names remain diagnosable")
 	return true
 
 

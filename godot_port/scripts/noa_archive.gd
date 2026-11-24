@@ -2,6 +2,7 @@ extends RefCounted
 class_name NoaArchive
 
 const ErisanDecoder = preload("res://scripts/erisan_decoder.gd")
+const Cp932Decoder = preload("res://scripts/cp932_decoder.gd")
 
 const HEADER_PREFIX_HEX := "456e7469731a0000"
 const HEADER_FILE_ID := 0x02000400
@@ -228,10 +229,10 @@ func _decode_section_name(raw: PackedByteArray) -> String:
 
 
 func _decode_entry_name(raw: PackedByteArray) -> String:
-	for byte in raw:
-		if byte > 0x7F:
-			return "[CP932 字节名 %s]" % raw.hex_encode()
-	return raw.get_string_from_ascii()
+	var decoded: Dictionary = Cp932Decoder.decode_to_utf8(raw)
+	if decoded.get("ok", false):
+		return str(decoded.get("text", ""))
+	return "[Invalid CP932: %s]" % raw.hex_encode()
 
 
 func _failure(message: String) -> Dictionary:
