@@ -2223,6 +2223,10 @@ func _dispatch_window_method(win: CsxHostClass.HostWindow, method: String, args:
 			var w = _to_int(args[2]) if args.size() > 2 else 800
 			var h = _to_int(args[3]) if args.size() > 3 else 600
 			return win.create_display(m, d, w, h)
+		"ChangeDisplaySize":
+			return win.change_display_size(_to_int(args[0]) if args.size() > 0 else 800, _to_int(args[1]) if args.size() > 1 else 600)
+		"ChangeCooperationLevel":
+			return win.change_cooperation_level(_to_int(args[0]) if args.size() > 0 else 0)
 		"ChangeDisplay":
 			return win.change_display(_to_int(args[0]) if args.size() > 0 else 0)
 		"GetJoyButtonPushed":

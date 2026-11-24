@@ -2371,6 +2371,26 @@ class HostWindow extends RefCounted:
 		viewport_size = Vector2i(w, h)
 		return 0
 
+	func change_display_size(w: int, h: int) -> int:
+		if w <= 0 or h <= 0:
+			return 1
+		viewport_size = Vector2i(w, h)
+		if DisplayServer.get_name() != "headless" and DisplayServer.window_get_mode() != DisplayServer.WINDOW_MODE_FULLSCREEN:
+			DisplayServer.window_set_size(viewport_size)
+		return 0
+
+	func change_cooperation_level(level: int) -> int:
+		# The original ChangeDisplay(fFullscreen) helper calls level 3 for its
+		# fullscreen branch and level 0 for its windowed branch.
+		if DisplayServer.get_name() == "headless":
+			return 0
+		var requested_mode := DisplayServer.WINDOW_MODE_FULLSCREEN if level == 3 else DisplayServer.WINDOW_MODE_WINDOWED
+		if DisplayServer.window_get_mode() != requested_mode:
+			DisplayServer.window_set_mode(requested_mode)
+		if requested_mode == DisplayServer.WINDOW_MODE_WINDOWED:
+			DisplayServer.window_set_size(viewport_size)
+		return 0
+
 	func change_display(_fullscreen: int) -> int:
 		return 0
 

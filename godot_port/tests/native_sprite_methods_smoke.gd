@@ -36,8 +36,12 @@ func _initialize() -> void:
 
 	var window := Host.HostWindow.new(host)
 	_expect(vm._dispatch_window_method(window, "Refresh", []) == 0, "Window.Refresh must complete as a native no-op on the retained Godot scene")
+	_expect(vm._dispatch_window_method(window, "ChangeDisplaySize", [800, 600]) == 0 and window.viewport_size == Vector2i(800, 600), "Native ChangeDisplaySize must update the CSX display dimensions")
+	_expect(vm._dispatch_window_method(window, "ChangeCooperationLevel", [3]) == 0, "Native fullscreen cooperation level must be accepted")
+	_expect(vm._dispatch_window_method(window, "ChangeDisplaySize", [1024, 600]) == 0 and window.viewport_size == Vector2i(1024, 600), "Native ChangeDisplaySize must accept the windowed dimensions")
+	_expect(vm._dispatch_window_method(window, "ChangeCooperationLevel", [0]) == 0, "Native windowed cooperation level must be accepted")
 	_expect(host.last_error.is_empty(), "Implemented native methods must not set an unsupported-capability error")
-	print("PASS native sprite Enable, message cursor/border, and window Refresh methods")
+	print("PASS native sprite methods and native display size/cooperation calls")
 	quit(0)
 
 
