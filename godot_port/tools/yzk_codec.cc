@@ -506,9 +506,10 @@ bool reconstruct_mei_frame_pixels(size_t width, size_t height,
                     spectrum[block][zigzag[index]] = static_cast<int16_t>(
                         std::clamp(dequantized, -32768, 32767));
                 }
-                // Port the SDK's fixed 16.14 IDCT matrix. The additional
-                // half-scale per pass matches the ERI packed-frame pixels
-                // returned by Entis' native decoder.
+                // Preserve the Entis integer IDCT's asymmetric pass shifts:
+                // the row pass shifts by 14 and the column pass by 16. Their
+                // combined scale is unchanged by 15/15, but the intermediate
+                // truncation changes decoded pixels when using 15/15.
                 for (size_t y = 0; y < 8; ++y) {
                     for (size_t x = 0; x < 8; ++x) {
                         int32_t sum = 0;
@@ -516,7 +517,7 @@ bool reconstruct_mei_frame_pixels(size_t width, size_t height,
                             sum += static_cast<int32_t>(spectrum[block][y * 8 + frequency])
                                 * idct_matrix[x][frequency];
                         horizontal[block][y * 8 + x] = static_cast<int16_t>(
-                            std::clamp(sum >> 15, -32768, 32767));
+                            std::clamp(sum >> 14, -32768, 32767));
                     }
                 }
                 for (size_t y = 0; y < 8; ++y) {
@@ -525,7 +526,7 @@ bool reconstruct_mei_frame_pixels(size_t width, size_t height,
                         for (size_t frequency = 0; frequency < 8; ++frequency)
                             sum += static_cast<int32_t>(horizontal[block][frequency * 8 + x])
                                 * idct_matrix[y][frequency];
-                        const int value = std::clamp(sum >> 15, -32768, 32767);
+                        const int value = std::clamp(sum >> 16, -32768, 32767);
                         spatial[block][y * 8 + x] = block < 4 && !differential
                             ? static_cast<int8_t>(mei_clamp_byte(value))
                             : static_cast<int8_t>(std::clamp(value, -128, 127));
@@ -547,22 +548,33 @@ bool reconstruct_mei_frame_pixels(size_t width, size_t height,
                     const int v = spatial[5][(local_y / 2) * 8 + local_x / 2];
                     minimum_luma = std::min(minimum_luma, y_value);
                     maximum_luma = std::max(maximum_luma, y_value);
-                    int blue = y_value + ((u * 7) >> 2);
-                    int green = y_value - ((u * 3 + v * 6) >> 3);
-                    int red = y_value + ((v * 3) >> 1);
                     const size_t x = bx * 16 + local_x;
                     const size_t y = by * 16 + local_y;
                     if (x >= width || y >= height) continue;
                     const size_t pixel = (y * width + x) * 4;
                     if (differential) {
-                        blue = static_cast<int>(mei_clamp_byte(blue + 0x80)) - 0x80;
-                        green = static_cast<int>(mei_clamp_byte(green + 0x80)) - 0x80;
-                        red = static_cast<int>(mei_clamp_byte(red + 0x80)) - 0x80;
-                        rgba[pixel] = mei_clamp_byte(static_cast<int>(rgba[pixel]) + red * 2);
-                        rgba[pixel + 1] = mei_clamp_byte(static_cast<int>(rgba[pixel + 1]) + green * 2);
-                        rgba[pixel + 2] = mei_clamp_byte(static_cast<int>(rgba[pixel + 2]) + blue * 2);
+                        // Entis scales Y/U/V before its RGB conversion and
+                        // clips only after adding each residual to its
+                        // reference pixel. Clipping the unscaled residual
+                        // first loses odd values and overflows on saturated
+                        // chroma.
+                        const int y2 = y_value * 2;
+                        const int u2 = u * 2;
+                        const int v2 = v * 2;
+                        const int u7 = u2 * 7;
+                        const int u3 = u2 * 3;
+                        const int v3 = v2 * 3;
+                        const int blue_delta = y2 + (u7 >> 2);
+                        const int green_delta = y2 - ((u3 + v3 + v3) >> 3);
+                        const int red_delta = y2 + (v3 >> 1);
+                        rgba[pixel] = mei_clamp_byte(static_cast<int>(rgba[pixel]) + red_delta);
+                        rgba[pixel + 1] = mei_clamp_byte(static_cast<int>(rgba[pixel + 1]) + green_delta);
+                        rgba[pixel + 2] = mei_clamp_byte(static_cast<int>(rgba[pixel + 2]) + blue_delta);
                         rgba[pixel + 3] = 255;
                     } else {
+                        const int blue = y_value + ((u * 7) >> 2);
+                        const int green = y_value - ((u * 3 + v * 6) >> 3);
+                        const int red = y_value + ((v * 3) >> 1);
                         rgba[pixel] = mei_clamp_byte(red);
                         rgba[pixel + 1] = mei_clamp_byte(green);
                         rgba[pixel + 2] = mei_clamp_byte(blue);
