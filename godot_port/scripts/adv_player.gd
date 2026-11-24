@@ -298,6 +298,11 @@ var mei_movie_height := 0
 var mei_movie_elapsed := 0.0
 var mei_movie_active := false
 var mei_movie_loop := false
+var mei_movie_loop_start_frame := 0
+var mei_movie_loop_end_frame := -1
+var mei_movie_repeat_portion := false
+var mei_movie_sprite_id := -1
+var mei_movie_play_flags := 0
 var mei_movie_no_skip_frame := false
 var mei_movie_decode_flags := 0
 
@@ -804,6 +809,7 @@ func _start_engine() -> void:
 	host.bg_updated.connect(_on_bg_updated)
 	host.choices_updated.connect(_on_choices_updated)
 	host.movie_requested.connect(_on_movie_requested)
+	host.movie_loop_portion_requested.connect(_on_movie_loop_portion_requested)
 	host.movie_open_requested.connect(_on_movie_open_requested)
 	host.movie_stop_requested.connect(_on_movie_stop_requested)
 	host.movie_close_requested.connect(_on_movie_close_requested)
@@ -1281,7 +1287,7 @@ func _on_choice_clicked(index: int) -> void:
 	choice_buttons.clear()
 
 
-func _on_movie_requested(movie_file: String, play_mode: int = 0) -> void:
+func _on_movie_requested(movie_file: String, play_mode: int = 0, rewind_frame: int = -1, end_frame: int = -1, repeat: bool = false, sprite_id: int = -1) -> void:
 	print("[AdvPlayer] Movie playback requested: %s" % movie_file)
 	var base_name := movie_file.get_file().get_basename()
 	var mei_candidates: Array[String] = [
@@ -1290,7 +1296,7 @@ func _on_movie_requested(movie_file: String, play_mode: int = 0) -> void:
 		game_dir.path_join("movie").path_join(base_name + ".mei")
 	]
 	for mei_path: String in mei_candidates:
-		if FileAccess.file_exists(mei_path) and _start_native_mei_movie(mei_path, play_mode):
+		if FileAccess.file_exists(mei_path) and _start_native_mei_movie(mei_path, play_mode, rewind_frame, end_frame, repeat, sprite_id):
 			return
 	var candidates: Array[String] = [
 		game_dir.path_join(base_name + ".ogv"),
@@ -1315,6 +1321,7 @@ func _on_movie_requested(movie_file: String, play_mode: int = 0) -> void:
 		if host != null:
 			host.is_movie_playing = true
 			host.movie_total_frames = 0
+			host.movie_stored_frame_count = 0
 			host.movie_total_time_ms = 0
 			host.movie_current_frame = -1
 	else:
@@ -1395,6 +1402,7 @@ func _open_native_mei_movie(path: String) -> bool:
 		mei_audio_player.stream = audio
 	if host != null:
 		host.movie_total_frames = frame_count
+		host.movie_stored_frame_count = frames.size()
 		host.movie_total_time_ms = duration_ms
 		host.movie_current_frame = 0
 	_show_mei_frame(first_rgba, mei_movie_width, mei_movie_height, 0)
@@ -1403,13 +1411,22 @@ func _open_native_mei_movie(path: String) -> bool:
 	return true
 
 
-func _start_native_mei_movie(path: String, play_mode: int = 0) -> bool:
+func _start_native_mei_movie(path: String, play_mode: int = 0, rewind_frame: int = -1, end_frame: int = -1, repeat_portion: bool = false, sprite_id: int = -1) -> bool:
 	if mei_movie_open_path != path or mei_movie_codec == null:
 		if not _open_native_mei_movie(path):
 			return false
 	var decoded: Dictionary = mei_movie_decoded
 	var frame_count := int(decoded.get("frame_count", mei_movie_frames.size()))
 	var duration_ms := int(decoded.get("duration_ms", 0))
+	var actual_frame_count := mei_movie_frames.size()
+	var loop_start := 0 if rewind_frame < 0 else rewind_frame
+	# The SDK can declare a terminal frame beyond the stored image records.
+	# That declared end is valid and maps to the decoder's natural EOF boundary.
+	var requested_loop_end := frame_count if end_frame < 0 else end_frame
+	var loop_end := mini(requested_loop_end, actual_frame_count)
+	if loop_start < 0 or loop_start >= actual_frame_count or requested_loop_end > frame_count or loop_end <= loop_start:
+		push_warning("MovieSprite rewinding portion [%d,%d) is outside the opened movie" % [loop_start, loop_end])
+		return false
 	var resume_index := mei_movie_displayed_index
 	if resume_index < 0 and host != null:
 		resume_index = host.movie_current_frame
@@ -1420,7 +1437,12 @@ func _start_native_mei_movie(path: String, play_mode: int = 0) -> bool:
 	mei_movie_active = false
 	mei_movie_queue.clear()
 	mei_movie_elapsed = 0.0
-	mei_movie_loop = (play_mode & MEI_PLAY_FLAG_LOOP) != 0
+	mei_movie_play_flags = play_mode
+	mei_movie_sprite_id = sprite_id
+	mei_movie_loop_start_frame = loop_start
+	mei_movie_loop_end_frame = loop_end
+	mei_movie_repeat_portion = repeat_portion
+	mei_movie_loop = ((play_mode & MEI_PLAY_FLAG_LOOP) != 0) or repeat_portion
 	mei_movie_no_skip_frame = (play_mode & MEI_PLAY_FLAG_NO_SKIP_FRAME) != 0
 	mei_movie_decode_flags = play_mode & (MEI_PLAY_FLAG_NO_LOOP_FILTER | MEI_PLAY_FLAG_USE_LOOP_FILTER)
 	var first_frame_flags := int(mei_movie_frames[0].get("operation_flags", 0)) if not mei_movie_frames.is_empty() else 0
@@ -1451,13 +1473,36 @@ func _start_native_mei_movie(path: String, play_mode: int = 0) -> bool:
 	if mei_audio_player != null and mei_audio_player.stream != null:
 		mei_audio_player.play(_mei_frame_position_seconds(resume_index))
 	if host != null:
+		host.active_movie_sprite_id = sprite_id
 		host.is_movie_playing = true
 		host.movie_opened = true
 		host.movie_total_frames = frame_count
+		host.movie_stored_frame_count = actual_frame_count
 		host.movie_total_time_ms = duration_ms
 		host.movie_current_frame = resume_index
 	print("[AdvPlayer] Native MEI playback started: %s at frame %d/%d (%.3f ms/frame)" % [path, resume_index, frame_count, mei_movie_frame_duration * 1000.0])
 	return true
+
+
+func _on_movie_loop_portion_requested(rewind_frame: int, end_frame: int, repeat_portion: bool, sprite_id: int) -> void:
+	if not mei_movie_active or sprite_id != mei_movie_sprite_id or mei_movie_frames.is_empty():
+		return
+	var loop_start := 0 if rewind_frame < 0 else rewind_frame
+	var declared_count := int(mei_movie_decoded.get("frame_count", mei_movie_frames.size()))
+	var requested_loop_end := declared_count if end_frame < 0 else end_frame
+	var loop_end := mini(requested_loop_end, mei_movie_frames.size())
+	if (
+		loop_start < 0
+		or loop_start >= mei_movie_frames.size()
+		or requested_loop_end > declared_count
+		or loop_end <= loop_start
+	):
+		push_warning("MovieSprite rewinding portion [%d,%d) is outside the opened movie" % [loop_start, loop_end])
+		return
+	mei_movie_loop_start_frame = loop_start
+	mei_movie_loop_end_frame = loop_end
+	mei_movie_repeat_portion = repeat_portion
+	mei_movie_loop = ((mei_movie_play_flags & MEI_PLAY_FLAG_LOOP) != 0) or repeat_portion
 
 
 func _mei_frame_position_seconds(frame_index: int) -> float:
@@ -1487,13 +1532,8 @@ func _process_mei_movie(delta: float) -> void:
 	for _step: int in range(due_frames):
 		if mei_movie_queue.is_empty() and not _prepare_next_mei_group():
 			if mei_movie_loop:
-				_restart_mei_movie()
-				frame_to_display = {
-					"rgba": mei_movie_first_rgba,
-					"width": mei_movie_width,
-					"height": mei_movie_height,
-					"index": 0
-				}
+				_on_movie_seek_requested(mei_movie_loop_start_frame)
+				frame_to_display.clear()
 				continue
 			else:
 				if not frame_to_display.is_empty():
@@ -1503,6 +1543,22 @@ func _process_mei_movie(delta: float) -> void:
 				_finish_mei_movie()
 				return
 		if mei_movie_queue.is_empty():
+			return
+		# Check after preparing a GOP: its first queued frame can already be the
+		# exclusive loop/end boundary (including an I-frame at that position).
+		if int(mei_movie_queue.front().get("index", -1)) >= mei_movie_loop_end_frame:
+			if mei_movie_loop:
+				_on_movie_seek_requested(mei_movie_loop_start_frame)
+				frame_to_display.clear()
+				continue
+			if not frame_to_display.is_empty():
+				_show_mei_frame(
+					frame_to_display["rgba"],
+					int(frame_to_display["width"]),
+					int(frame_to_display["height"]),
+					int(frame_to_display["index"])
+				)
+			_finish_mei_movie()
 			return
 		frame_to_display = mei_movie_queue.pop_front()
 	if mei_movie_active and not frame_to_display.is_empty():
@@ -1651,6 +1707,7 @@ func _close_native_mei_movie() -> void:
 		host.movie_opened = false
 		host.movie_current_frame = -1
 		host.movie_total_frames = 0
+		host.movie_stored_frame_count = 0
 		host.movie_total_time_ms = 0
 
 

@@ -1659,6 +1659,11 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 		"LoadImage":
 			var fname := str(args[0]) if args.size() > 0 else ""
 			return _sprite_error_code(spr.load_image(fname), 1)
+		"SetRewindingPortion":
+			var rewind_pos := _to_int(args[0]) if args.size() > 0 else -1
+			var end_pos := _to_int(args[1]) if args.size() > 1 else -1
+			var repeat := _to_int(args[2]) != 0 if args.size() > 2 else false
+			return _sprite_error_code(spr.set_rewinding_portion(rewind_pos, end_pos, repeat), 1)
 		"OpenMovie":
 			var mov_path := str(args[0]) if args.size() > 0 else ""
 			return _sprite_error_code(spr.open_movie(mov_path), 1)

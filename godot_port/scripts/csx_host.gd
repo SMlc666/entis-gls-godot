@@ -13,7 +13,8 @@ signal message_output(sprite: HostSprite)
 signal message_progress(sprite: HostSprite)
 signal bg_updated(bg_name: String, texture: Texture2D)
 signal bgm_updated(bgm_name: String)
-signal movie_requested(movie_file: String, play_mode: int)
+signal movie_requested(movie_file: String, play_mode: int, rewind_frame: int, end_frame: int, repeat: bool, sprite_id: int)
+signal movie_loop_portion_requested(rewind_frame: int, end_frame: int, repeat: bool, sprite_id: int)
 signal movie_open_requested(movie_file: String)
 signal movie_stop_requested
 signal movie_close_requested
@@ -82,8 +83,10 @@ var yield_for_sprite_activation: bool = false
 var is_movie_playing: bool = false
 var movie_current_frame: int = -1
 var movie_total_frames: int = 0
+var movie_stored_frame_count: int = 0
 var movie_total_time_ms: int = 0
 var movie_opened: bool = false
+var active_movie_sprite_id: int = -1
 var current_choices: Array[String] = []
 var is_waiting_choice: bool = false
 var selected_choice: int = -1
@@ -1188,6 +1191,9 @@ class HostSprite extends RefCounted:
 	var z_order: int = 0
 	var filename: String = ""
 	var archive_hint: String = ""
+	var movie_rewind_frame: int = -1
+	var movie_end_frame: int = -1
+	var movie_repeat: bool = false
 	var attached_resource: HostResource = null
 	var image: Image = null
 	var texture: ImageTexture = null
@@ -2201,7 +2207,26 @@ class HostSprite extends RefCounted:
 	func play_movie(mode: int = 0) -> int:
 		if host == null or filename.is_empty():
 			return 0
-		host.emit_signal("movie_requested", filename, mode)
+		host.emit_signal("movie_requested", filename, mode, movie_rewind_frame, movie_end_frame, movie_repeat, sprite_id)
+		return 1
+
+	func set_rewinding_portion(rewind_pos: int = -1, end_pos: int = -1, repeat: bool = false) -> int:
+		if rewind_pos < -1 or end_pos < -1:
+			return 0
+		var resolved_start := 0 if rewind_pos < 0 else rewind_pos
+		var resolved_end := host.movie_total_frames if end_pos < 0 and host != null and host.movie_total_frames > 0 else end_pos
+		var stored_count := host.movie_stored_frame_count if host != null and host.movie_stored_frame_count > 0 else (host.movie_total_frames if host != null else 0)
+		if resolved_end >= 0 and (
+			resolved_start >= resolved_end
+			or (host != null and host.movie_total_frames > 0 and resolved_end > host.movie_total_frames)
+			or (stored_count > 0 and resolved_start >= stored_count)
+		):
+			return 0
+		movie_rewind_frame = rewind_pos
+		movie_end_frame = end_pos
+		movie_repeat = repeat
+		if host != null and host.is_movie_playing and host.active_movie_sprite_id == sprite_id:
+			host.emit_signal("movie_loop_portion_requested", rewind_pos, end_pos, repeat, sprite_id)
 		return 1
 
 	func is_movie_playing() -> int:

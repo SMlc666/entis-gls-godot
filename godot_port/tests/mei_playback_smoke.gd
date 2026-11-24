@@ -2,6 +2,7 @@ extends SceneTree
 
 const GAME_DIR := "/mnt/sdb1/devs/yzk2godot/缘之空（全cg步兵版）"
 const CsxHostClass = preload("res://scripts/csx_host.gd")
+const CsxVMClass = preload("res://scripts/csx_vm.gd")
 
 
 func _initialize() -> void:
@@ -137,11 +138,72 @@ func _run() -> void:
 		_fail("original PlayMovie loop flag did not restart at the first MEI frame (active=%s anchor=%s display=%s queue=%d)" % [str(player.get("mei_movie_active")), str(player.get("mei_movie_anchor_index")), str(player.get("mei_movie_displayed_index")), (player.get("mei_movie_queue") as Array).size()])
 		return
 	player.call("_on_movie_stop_requested")
+	var movie_vm := CsxVMClass.new(player.get("host"))
+	var movie_frames: Array = player.get("mei_movie_frames")
+	var loop_anchor := -1
+	for frame_index in range(10, movie_frames.size()):
+		if str(movie_frames[frame_index].get("picture_type", "")) == "I":
+			loop_anchor = frame_index
+			break
+	if loop_anchor < 0:
+		_fail("opening.mei has no I-frame available for a loop seek test")
+		return
+	var first_next_group_frame := -1
+	for frame_index in range(loop_anchor + 1, movie_frames.size()):
+		var picture_type := str(movie_frames[frame_index].get("picture_type", ""))
+		if picture_type == "B":
+			if first_next_group_frame < 0:
+				first_next_group_frame = frame_index
+		elif picture_type in ["I", "P"]:
+			if first_next_group_frame < 0:
+				first_next_group_frame = frame_index
+			break
+	if first_next_group_frame <= loop_anchor:
+		_fail("opening.mei could not provide a valid first frame for the next GOP")
+		return
+	if movie_resource.play_movie(0) != 1:
+		_fail("MovieSprite failed to start a one-shot movie before setting an active rewind interval")
+		return
+	var terminal_frame_dispatch: Variant = movie_vm._dispatch_sprite_method(movie_resource, "SetRewindingPortion", [0, 2521, 1])
+	if terminal_frame_dispatch != 0 or int(player.get("mei_movie_loop_end_frame")) != 2520:
+		_fail("MovieSprite did not map the SDK-declared terminal frame 2521 to opening.mei's stored-record EOF boundary 2520")
+		return
+	var unavailable_start_dispatch: Variant = movie_vm._dispatch_sprite_method(movie_resource, "SetRewindingPortion", [2520, 2521, 1])
+	if unavailable_start_dispatch == 0:
+		_fail("MovieSprite accepted frame 2520 as a loop start even though opening.mei has no stored record at that index")
+		return
+	var loop_dispatch: Variant = movie_vm._dispatch_sprite_method(movie_resource, "SetRewindingPortion", [loop_anchor, first_next_group_frame, -1])
+	if loop_dispatch != 0 or int(player.get("mei_movie_loop_start_frame")) != loop_anchor or int(player.get("mei_movie_loop_end_frame")) != first_next_group_frame or not player.get("mei_movie_loop"):
+		_fail("MovieSprite.SetRewindingPortion did not configure the active exclusive loop interval through the VM")
+		return
+	if movie_resource.seek_frame(loop_anchor) != 1:
+		_fail("MovieSprite could not seek to the loop start before the boundary tick")
+		return
+	player.call("_process_mei_movie", float(player.get("mei_movie_frame_duration")) + 0.01)
+	if not player.get("mei_movie_active") or int(player.get("mei_movie_displayed_index")) != loop_anchor or int(player.get("host").movie_current_frame) != loop_anchor:
+		_fail("opening.mei displayed the exclusive end at the first queued frame of a new GOP instead of seeking back")
+		return
+	var expected_loop_audio_position := float(player.call("_mei_frame_position_seconds", loop_anchor))
+	var actual_loop_audio_position := float(player.get("mei_audio_player").get_playback_position())
+	if absf(actual_loop_audio_position - expected_loop_audio_position) > 0.2:
+		_fail("MovieSprite loop seek did not synchronize MEI audio to the loop start frame")
+		return
+	player.call("_on_movie_stop_requested")
+	if movie_vm._dispatch_sprite_method(movie_resource, "SetRewindingPortion", [loop_anchor, first_next_group_frame, 0]) != 0:
+		_fail("MovieSprite rejected a valid non-repeating playback end interval")
+		return
+	if movie_resource.play_movie(0) != 1 or movie_resource.seek_frame(loop_anchor) != 1:
+		_fail("MovieSprite could not start and seek the non-repeating interval")
+		return
+	player.call("_process_mei_movie", float(player.get("mei_movie_frame_duration")) + 0.01)
+	if player.get("mei_movie_active") or player.get("host").is_movie_playing:
+		_fail("MovieSprite repeat=false did not stop at its exclusive end frame")
+		return
 	movie_resource.close_movie()
 	if movie_resource.get_total_frame() != 0 or movie_resource.get_current_frame() != -1 or player.get("mei_movie_codec") != null:
 		_fail("MovieSprite close did not release decoder state and metadata")
 		return
-	print("PASS native MEI playback displays/reorders frames, resumes after stop, honors loop/no-skip modes, seek, and lifecycle")
+	print("PASS native MEI playback displays/reorders frames, seeks exclusive rewind portions with synchronized audio, honors loop/no-skip modes, and preserves lifecycle")
 	player.queue_free()
 	await process_frame
 	quit(0)

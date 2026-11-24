@@ -131,7 +131,7 @@ func _run() -> void:
 	var movie_requests: Array[String] = []
 	var movie_modes: Array[int] = []
 	var stop_requests := [0]
-	host.movie_requested.connect(func(filename: String, mode: int):
+	host.movie_requested.connect(func(filename: String, mode: int, _rewind_frame: int, _end_frame: int, _repeat: bool, _sprite_id: int):
 		movie_requests.append(filename)
 		movie_modes.append(mode)
 	)
