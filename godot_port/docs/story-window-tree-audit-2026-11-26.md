@@ -54,21 +54,27 @@ godot --headless --audio-driver Dummy --path godot_port \
   and leaves no stale command. This smoke uses a synthetic TextureButton
   activation; it does not yet exercise a physical mouse or keyboard event.
 - During the same original `00_Z000` body-message wait, the compositor smoke
-  submits the original `ID_QSAVE` HostSprite command. `CsxHost.push_command()`
-  wakes the paused VM without adding an advance tick; the CSX command loop
-  consumes it and returns to the same body-message wait. The test confirms the
-  current dialogue history and advance tick count do not change. Save files
-  are isolated under the smoke's temporary user path.
+  activates the original `ID_QSAVE` HostSprite and verifies the producer
+  contract: exactly one bounded event is queued with its window and source
+  sprite IDs, and `CsxHost.push_command()` wakes the paused VM without adding
+  an advance tick. It then opens a fresh command scope to discard this
+  synthetic event. This smoke does not claim that the QSave action itself was
+  consumed or that a save was written. The selection smoke separately proves
+  full CSX command consumption for `ID_SELECT` and `selectResult == 1`.
 - Both Story smokes verify that `system/yosuga.csx` and `data1.noa` retain their
   input hashes:
   - `yosuga.csx`: `157be9eb39cdc2d3cb654096340ca686f4ef48ac7fd7a6255673ba5f0c79afb6`
   - `data1.noa`: `d324c49ed4a80108f68aabaf7a202ec31d1b8f64075918f136944e72ec919831`
 
 The audit command exits with `PASS Story HostWindow tree audit`; the selection
-smoke exits with the `selectResult=1` pass above. The compositor smoke also
-passes its assertions but currently reports 151 leaked ObjectDB instances,
-three resources in use, and 43 dummy texture RIDs during process shutdown. The
-leak is unresolved and must not be counted as clean teardown.
+smoke exits with the `selectResult=1` pass above. The compositor smoke passes
+its assertions. A verbose rerun on commit `1b49dcd` exited 0 without ObjectDB,
+resource-in-use, or texture-RID leak reports; it still reports seven orphan
+`StringName`s (`ScriptBacktrace`, `YzkCodec`, `OS`, `RefCounted`, `Object`,
+`ClassDB`, and `Logger`) at shutdown. An earlier worktree run reported 151
+ObjectDB instances, three resources, and 43 dummy texture RIDs; that result is
+superseded by the later clean resource teardown, but the remaining
+`StringName` reports are still open.
 
 ## Remaining split paths and limits
 
