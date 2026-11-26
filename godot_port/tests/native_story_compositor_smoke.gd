@@ -2,6 +2,7 @@ extends SceneTree
 
 const CsxHostClass = preload("res://scripts/csx_host.gd")
 const CsxVMReader = preload("res://scripts/csx_vm.gd")
+const AdvPlayerScript = preload("res://scripts/adv_player.gd")
 const TestSupport = preload("res://tests/test_support.gd")
 
 const MESSAGE_STYLE_ID := "ID_FONT_MESSAGE"
@@ -12,6 +13,12 @@ func _initialize() -> void:
 
 
 func _run() -> void:
+	if not _test_transformed_surface_geometry():
+		quit(1)
+		return
+	if not _test_button_surface_opacity():
+		quit(1)
+		return
 	var game_dir := TestSupport.resolve_game_dir(OS.get_cmdline_user_args())
 	if game_dir.is_empty():
 		printerr("FAIL Pass the original game directory after --")
@@ -99,6 +106,23 @@ func _run() -> void:
 		await _cleanup(player, save_dir)
 		quit(1)
 		return
+	var original_message_style: Dictionary = latest_message.message_style.duplicate(true)
+	latest_message.message_style = {"font": {"face": "DejaVu Sans", "size": "22"}}
+	player._sync_host_window_canvas()
+	if not message_label.has_theme_font_override("normal_font"):
+		printerr("FAIL A named HostSprite font style was not applied")
+		await _cleanup(player, save_dir)
+		quit(1)
+		return
+	latest_message.message_style = {}
+	player._sync_host_window_canvas()
+	if message_label.has_theme_font_override("normal_font"):
+		printerr("FAIL Resetting a HostSprite to the default style retained the old font override")
+		await _cleanup(player, save_dir)
+		quit(1)
+		return
+	latest_message.message_style = original_message_style
+	player._sync_host_window_canvas()
 
 	var window: CsxHostClass.HostWindow = player.vm.data_vars[4].get("value") as CsxHostClass.HostWindow
 	var button_sprites: Array[CsxHostClass.HostSprite] = []
@@ -211,6 +235,77 @@ func _collect_buttons(sprite: CsxHostClass.HostSprite, target: Array[CsxHostClas
 		target.append(sprite)
 	for child: CsxHostClass.HostSprite in sprite.children:
 		_collect_buttons(child, target)
+
+
+func _test_transformed_surface_geometry() -> bool:
+	var target := Rect2(Vector2.ZERO, Vector2(800, 600))
+	if not AdvPlayerScript._transformed_rect_covers_rect(Transform2D.IDENTITY, target, target):
+		printerr("FAIL An identity 800x600 sprite must cover the logical viewport")
+		return false
+	var translated := Transform2D(0.0, Vector2.ONE, 0.0, Vector2(1, 0))
+	if AdvPlayerScript._transformed_rect_covers_rect(translated, target, target):
+		printerr("FAIL A translated 800x600 sprite must not cover the viewport's far edge")
+		return false
+	var pivoted_scale := (
+		Transform2D(0.0, Vector2(2.0, 1.5), 0.0, Vector2(600, 450))
+		* Transform2D(0.0, Vector2.ONE, 0.0, Vector2(-400, -300))
+	)
+	if not AdvPlayerScript._transformed_rect_covers_rect(pivoted_scale, target, target):
+		printerr("FAIL A non-uniformly scaled sprite with a non-zero pivot should cover the viewport")
+		return false
+	var rotate_about_center := (
+		Transform2D(PI / 4.0, Vector2.ONE, 0.0, Vector2(400, 300))
+		* Transform2D(0.0, Vector2.ONE, 0.0, Vector2(-400, -300))
+	)
+	if AdvPlayerScript._transformed_rect_covers_rect(rotate_about_center, target, target):
+		printerr("FAIL Rotated AABB overlap must not count as full viewport coverage")
+		return false
+	var parent_transform := Transform2D(0.0, Vector2(1.5, 1.25), 0.0, Vector2.ZERO)
+	var child_transform := Transform2D(0.0, Vector2.ONE, 0.0, Vector2(-100.0 / 1.5, -50.0 / 1.25))
+	if not AdvPlayerScript._transformed_rect_covers_rect(parent_transform * child_transform, target, target):
+		printerr("FAIL Composed parent and child transforms should preserve viewport coverage")
+		return false
+	print("PASS transformed HostWindow surface coverage geometry")
+	return true
+
+
+func _test_button_surface_opacity() -> bool:
+	var player_script := AdvPlayerScript.new()
+	var sprite := CsxHostClass.HostSprite.new()
+	sprite.is_button = true
+	var opaque_image := Image.create(2, 2, false, Image.FORMAT_RGBA8)
+	opaque_image.fill(Color.WHITE)
+	var transparent_image := Image.create(2, 2, false, Image.FORMAT_RGBA8)
+	transparent_image.fill(Color(1.0, 1.0, 1.0, 0.5))
+	var opaque_texture := ImageTexture.create_from_image(opaque_image)
+	var transparent_texture := ImageTexture.create_from_image(transparent_image)
+	sprite.texture = opaque_texture
+	sprite.btn_normal_tex = transparent_texture
+	sprite.btn_focus_tex = opaque_texture
+	sprite.btn_pushed_tex = opaque_texture
+	sprite.btn_disabled_tex = opaque_texture
+	if player_script._host_sprite_has_opaque_surface(sprite):
+		printerr("FAIL A transparent button state must not be masked by the sprite's opaque fallback texture")
+		player_script.free()
+		return false
+	sprite.btn_normal_tex = opaque_texture
+	if not player_script._host_sprite_has_opaque_surface(sprite):
+		printerr("FAIL A button with opaque state textures should cover its surface")
+		player_script.free()
+		return false
+	var expired_texture := ImageTexture.create_from_image(opaque_image)
+	player_script.host_texture_opacity_cache[expired_texture.get_instance_id()] = {"texture_ref": weakref(expired_texture), "opaque": true}
+	expired_texture = null
+	player_script._prune_host_texture_opacity_cache()
+	for cache_entry: Dictionary in player_script.host_texture_opacity_cache.values():
+		var texture_ref: Variant = cache_entry.get("texture_ref", null)
+		if texture_ref is WeakRef and texture_ref.get_ref() == null:
+			printerr("FAIL Expired texture opacity cache entries must be removed")
+			player_script.free()
+			return false
+	player_script.free()
+	print("PASS button opacity classification and stale texture-cache cleanup")
+	return true
 
 
 func _cleanup(player: Node, save_dir: String) -> void:

@@ -148,7 +148,7 @@ func _initialize() -> void:
 
 	# Step VM a few cycles to confirm dialogue progression
 	for s in range(500):
-		if not player.vm.step():
+		if not await _step_vm_cooperatively(player):
 			break
 		if player.host.is_waiting_input:
 			player.host.is_waiting_input = false # advance line
@@ -179,3 +179,12 @@ func _initialize() -> void:
 	print("\n==================================================================")
 	TestSupport.remove_test_saves(test_save_dir)
 	finish_success("🎉 ALL SCENE RECOLLECTION & APPRECIATION TESTS PASSED!")
+
+
+func _step_vm_cooperatively(player: Variant) -> bool:
+	if not player.vm.step():
+		return false
+	while player.vm.refresh_cooperative_sleep():
+		player.host.advance_sprite_animations(1.0 / 60.0)
+		await process_frame
+	return true

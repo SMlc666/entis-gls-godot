@@ -207,6 +207,8 @@ var host_window_layer: Control
 var host_window_canvas: Control
 var story_window_compositor_active: bool = false
 var host_sprite_controls: Dictionary = {}
+var host_texture_opacity_cache: Dictionary = {}
+var host_texture_opacity_cache_sweep_ticks: int = 0
 var last_host_input_was_pointer: bool = false
 var native_title_result_handled: bool = false
 var host_window_last_viewport_size: Vector2 = Vector2.ZERO
@@ -918,12 +920,13 @@ func _process(delta: float) -> void:
 
 	# Activation checks yield for one frame so the script can recheck the sprite.
 	host.yield_for_sprite_activation = false
+	vm.refresh_cooperative_sleep()
 
 	# Run the original CSX until it reaches an input poll/yield.
 	if host != null and (not host.is_waiting_input or _has_pending_native_command()):
 		var executed := 0
 		var limit := steps_per_frame if not skip_mode else steps_per_frame * 3
-		while (not host.is_waiting_input or _has_pending_native_command()) and not host.yield_for_sprite_activation and executed < limit and not vm.is_halted:
+		while (not host.is_waiting_input or _has_pending_native_command()) and not host.yield_for_sprite_activation and not vm.cooperative_yield_requested and executed < limit and not vm.is_halted:
 			if not vm.step():
 				is_running = false
 				message_label.text = "[color=#e06c75]VM 执行中断: %s[/color]" % vm.last_error
@@ -2648,6 +2651,7 @@ func _process_native_title() -> void:
 	if vm == null or host == null:
 		return
 	_sync_host_window_canvas()
+	vm.refresh_cooperative_sleep()
 	if vm.is_halted:
 		if native_appreciation_mode:
 			_start_native_title_script()
@@ -2656,7 +2660,7 @@ func _process_native_title() -> void:
 		return
 	var executed := 0
 	host.yield_for_sprite_activation = false
-	while executed < NATIVE_TITLE_STEPS_PER_FRAME and not vm.is_halted and not host.yield_for_sprite_activation:
+	while executed < NATIVE_TITLE_STEPS_PER_FRAME and not vm.is_halted and not host.yield_for_sprite_activation and not vm.cooperative_yield_requested:
 		if not vm.step():
 			is_running = false
 			message_label.text = "[color=#e06c75]标题脚本执行中断: %s[/color]" % vm.last_error
@@ -2759,26 +2763,110 @@ func _set_story_window_compositor_active(active: bool) -> void:
 
 
 func _host_window_has_viewport_surface() -> bool:
-	if vm == null or vm.data_vars.size() <= 4:
+	if vm == null or vm.data_vars.size() <= 4 or host_window_canvas == null:
 		return false
 	var window: Variant = vm.data_vars[4].get("value", null)
 	if not window is CsxHostClass.HostWindow:
 		return false
-	var viewport_size := Vector2(window.get_display_size())
+	var viewport_rect := Rect2(Vector2.ZERO, host_window_canvas.size)
+	if viewport_rect.size.x <= 0.0 or viewport_rect.size.y <= 0.0:
+		return false
+	var canvas_inverse := host_window_canvas.get_global_transform_with_canvas().affine_inverse()
 	for sprite: CsxHostClass.HostSprite in window.root_sprites:
-		if _host_sprite_covers_viewport(sprite, viewport_size):
+		if _host_sprite_covers_viewport(sprite, viewport_rect, canvas_inverse):
 			return true
 	return false
 
 
-func _host_sprite_covers_viewport(sprite: CsxHostClass.HostSprite, viewport_size: Vector2) -> bool:
-	var render_size := Vector2(sprite.get_render_size())
-	if sprite.is_visible and render_size.x >= viewport_size.x and render_size.y >= viewport_size.y:
-		return true
+func _host_sprite_covers_viewport(
+	sprite: CsxHostClass.HostSprite,
+	viewport_rect: Rect2,
+	canvas_inverse: Transform2D,
+	parent_visible: bool = true,
+	parent_opacity: float = 1.0
+) -> bool:
+	var wrapper: Control = host_sprite_controls.get(sprite.get_instance_id(), null)
+	var wrapper_valid := wrapper != null and is_instance_valid(wrapper)
+	var visible_in_tree := parent_visible and sprite.is_visible and wrapper_valid and wrapper.visible
+	var opacity := parent_opacity * (1.0 - clampf(float(sprite.transparency) / 256.0, 0.0, 1.0))
+	if visible_in_tree and opacity >= 0.9999 and sprite.blending == 0:
+		var local_rect := Rect2(Vector2.ZERO, wrapper.size)
+		var local_to_canvas := canvas_inverse * wrapper.get_global_transform_with_canvas()
+		if (_transformed_rect_covers_rect(local_to_canvas, local_rect, viewport_rect)
+			and _host_sprite_has_opaque_surface(sprite)):
+			return true
 	for child: CsxHostClass.HostSprite in sprite.children:
-		if _host_sprite_covers_viewport(child, viewport_size):
+		if _host_sprite_covers_viewport(child, viewport_rect, canvas_inverse, visible_in_tree, opacity):
 			return true
 	return false
+
+
+func _host_sprite_has_opaque_surface(sprite: CsxHostClass.HostSprite) -> bool:
+	if sprite.transparency != 0 or (sprite.alpha_texture != null and sprite.alpha_range > 0 and sprite.alpha_range < 256):
+		return false
+	if sprite.is_button:
+		var button_textures: Array[Texture2D] = [
+			sprite.btn_normal_tex if sprite.btn_normal_tex != null else sprite.texture,
+			sprite.btn_focus_tex,
+			sprite.btn_pushed_tex,
+			sprite.btn_disabled_tex,
+		]
+		for texture: Texture2D in button_textures:
+			if texture == null or not _texture_is_opaque(texture):
+				return false
+		return true
+	if sprite.texture != null:
+		return _texture_is_opaque(sprite.texture)
+	return sprite.fill_back_color and not sprite.children.is_empty()
+
+
+func _texture_is_opaque(texture: Texture2D) -> bool:
+	var texture_id := texture.get_instance_id()
+	var cached: Dictionary = host_texture_opacity_cache.get(texture_id, {})
+	var cached_ref: Variant = cached.get("texture_ref", null)
+	if cached_ref is WeakRef and cached_ref.get_ref() == texture:
+		return bool(cached.get("opaque", false))
+	host_texture_opacity_cache_sweep_ticks += 1
+	if host_texture_opacity_cache_sweep_ticks >= 64:
+		host_texture_opacity_cache_sweep_ticks = 0
+		_prune_host_texture_opacity_cache()
+	var image := texture.get_image()
+	var opaque := image != null and not image.is_empty() and image.detect_alpha() == Image.ALPHA_NONE
+	host_texture_opacity_cache[texture_id] = {"texture_ref": weakref(texture), "opaque": opaque}
+	return opaque
+
+
+func _prune_host_texture_opacity_cache() -> void:
+	for texture_id in host_texture_opacity_cache.keys():
+		var entry: Dictionary = host_texture_opacity_cache.get(texture_id, {})
+		var texture_ref: Variant = entry.get("texture_ref", null)
+		if not texture_ref is WeakRef or texture_ref.get_ref() == null:
+			host_texture_opacity_cache.erase(texture_id)
+
+
+static func _transformed_rect_covers_rect(
+	local_to_target: Transform2D,
+	local_rect: Rect2,
+	target_rect: Rect2
+) -> bool:
+	if (local_rect.size.x <= 0.0 or local_rect.size.y <= 0.0
+		or target_rect.size.x <= 0.0 or target_rect.size.y <= 0.0
+		or absf(local_to_target.determinant()) <= 0.000001):
+		return false
+	var target_to_local := local_to_target.affine_inverse()
+	var local_end := local_rect.position + local_rect.size
+	var epsilon := 0.01
+	for target_corner in [
+		target_rect.position,
+		target_rect.position + Vector2(target_rect.size.x, 0.0),
+		target_rect.position + target_rect.size,
+		target_rect.position + Vector2(0.0, target_rect.size.y),
+	]:
+		var local_corner: Vector2 = target_to_local * target_corner
+		if (local_corner.x < local_rect.position.x - epsilon or local_corner.x > local_end.x + epsilon
+			or local_corner.y < local_rect.position.y - epsilon or local_corner.y > local_end.y + epsilon):
+			return false
+	return true
 
 
 func _get_host_cursor_position() -> Vector2i:
@@ -3133,9 +3221,10 @@ func _sync_host_sprite(sprite: CsxHostClass.HostSprite, parent: Control, seen: D
 			native_label.text = display_text
 			native_label.visible_characters = -1
 		native_label.visible = not display_text.is_empty()
-		if not sprite.message_style.is_empty() and native_label.get_meta("message_style", {}) != sprite.message_style:
+		if (not native_label.has_meta("message_style")
+			or native_label.get_meta("message_style") != sprite.message_style):
 			_apply_native_text_style(native_label, sprite.message_style, sprite.font_bordering)
-			native_label.set_meta("message_style", sprite.message_style)
+			native_label.set_meta("message_style", sprite.message_style.duplicate(true))
 	if not sprite.children.is_empty():
 		_sync_host_sprite_children(sprite.children, wrapper, seen, filter_title_depth)
 
@@ -3257,6 +3346,8 @@ func _apply_native_text_style(label: Control, style: Dictionary, font_bordering:
 		system_font.font_weight = 700 if font.get("bold") == "true" else 400
 		system_font.font_italic = font.get("italic") == "true"
 		label.add_theme_font_override(font_key, system_font)
+	else:
+		label.remove_theme_font_override(font_key)
 	var font_size := maxi(1, int(font.get("size", 13)))
 	label.add_theme_font_size_override(font_size_key, font_size)
 	label.add_theme_color_override(color_key, _native_text_color(text))
@@ -3273,6 +3364,8 @@ func _apply_native_text_style(label: Control, style: Dictionary, font_bordering:
 	if arrange.has("line_height"):
 		var metrics := label.get_theme_font(font_key).get_height(font_size)
 		label.add_theme_constant_override(spacing_key, int(arrange["line_height"]) - roundi(metrics))
+	else:
+		label.add_theme_constant_override(spacing_key, 0)
 
 
 func _native_text_color(attributes: Dictionary) -> Color:
@@ -3839,6 +3932,8 @@ func _shutdown_runtime_session() -> void:
 			host_window_canvas.remove_child(child)
 			child.queue_free()
 	host_sprite_controls.clear()
+	host_texture_opacity_cache.clear()
+	host_texture_opacity_cache_sweep_ticks = 0
 	adv_temp_controls.clear()
 	adv_temp_materials.clear()
 	for bustup: TextureRect in bustup_rects:

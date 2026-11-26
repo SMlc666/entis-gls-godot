@@ -120,7 +120,7 @@ func _run() -> void:
 	# Step until GetCommand loop (approx step 4550)
 	var steps := 0
 	while steps < 4560 and not vm.is_halted:
-		if not vm.step():
+		if not await _step_vm_cooperatively(vm, host):
 			break
 		steps += 1
 
@@ -147,7 +147,7 @@ func _run() -> void:
 	host.push_command("ID_START")
 	while steps < 6000 and not vm.is_halted:
 		host.advance_sprite_animations(1.0 / 60.0)
-		if not vm.step():
+		if not await _step_vm_cooperatively(vm, host):
 			break
 		steps += 1
 
@@ -168,3 +168,12 @@ func _run() -> void:
 
 	TestSupport.remove_test_saves(test_save_dir)
 	finish_success("PASS Native Form Page and EntisGLS Skin Smoke Test!")
+
+
+func _step_vm_cooperatively(vm: Variant, host: Variant) -> bool:
+	if not vm.step():
+		return false
+	while vm.refresh_cooperative_sleep():
+		host.advance_sprite_animations(1.0 / 60.0)
+		await process_frame
+	return true

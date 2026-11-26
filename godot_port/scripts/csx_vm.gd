@@ -237,6 +237,8 @@ var last_return_value: Variant = null
 var last_error := ""
 var executed_instructions: int = 0
 var max_call_depth: int = 1000
+var cooperative_sleep_deadline_usec: int = 0
+var cooperative_yield_requested: bool = false
 
 var host: CsxHostClass
 
@@ -282,6 +284,8 @@ func shutdown_runtime() -> void:
 	is_synchronous_call = false
 	last_error = ""
 	executed_instructions = 0
+	cooperative_sleep_deadline_usec = 0
+	cooperative_yield_requested = false
 	_image = PackedByteArray()
 	const_strings.clear()
 	instruction_starts = PackedInt32Array()
@@ -749,6 +753,10 @@ func call_address_sync(address: int, args: Array, max_steps: int = 1_000_000) ->
 	var saved_call_stack := call_stack.duplicate()
 	var saved_eval_stack := eval_stack.duplicate()
 	var saved_last_return_value: Variant = last_return_value
+	var saved_sleep_deadline_usec := cooperative_sleep_deadline_usec
+	var saved_cooperative_yield_requested := cooperative_yield_requested
+	cooperative_sleep_deadline_usec = 0
+	cooperative_yield_requested = false
 
 	ip = address
 	is_halted = false
@@ -774,6 +782,8 @@ func call_address_sync(address: int, args: Array, max_steps: int = 1_000_000) ->
 			eval_stack = saved_eval_stack
 			is_synchronous_call = was_synchronous
 			last_return_value = saved_last_return_value
+			cooperative_sleep_deadline_usec = saved_sleep_deadline_usec
+			cooperative_yield_requested = saved_cooperative_yield_requested
 			return {"ok": false, "error": err, "ip": fail_ip, "steps": steps, "stack": st, "side_effects_may_have_occurred": steps > 0}
 		steps += 1
 
@@ -789,13 +799,42 @@ func call_address_sync(address: int, args: Array, max_steps: int = 1_000_000) ->
 	eval_stack = saved_eval_stack
 	is_synchronous_call = was_synchronous
 	last_return_value = saved_last_return_value
+	cooperative_sleep_deadline_usec = saved_sleep_deadline_usec
+	cooperative_yield_requested = saved_cooperative_yield_requested
 	if timed_out:
 		last_error = "同步调用超过步数上限 (%d) @ 0x%X" % [max_steps, timeout_ip]
 		return {"ok": false, "timeout": true, "error": last_error, "ip": timeout_ip, "steps": steps, "stack": timeout_stack, "side_effects_may_have_occurred": steps > 0}
 	return {"ok": true, "result": ret, "steps": steps, "side_effects_may_have_occurred": steps > 0}
 
 
+func refresh_cooperative_sleep() -> bool:
+	if cooperative_sleep_deadline_usec <= 0:
+		cooperative_yield_requested = false
+		return false
+	if Time.get_ticks_usec() >= cooperative_sleep_deadline_usec:
+		cooperative_sleep_deadline_usec = 0
+		cooperative_yield_requested = false
+		return false
+	cooperative_yield_requested = true
+	return true
+
+
+func _request_cooperative_sleep(arguments: Array) -> void:
+	if is_synchronous_call or arguments.is_empty():
+		return
+	var requested: Variant = arguments[0]
+	if not (requested is int or requested is float) or not is_finite(float(requested)):
+		return
+	var duration_ms := floori(clampf(float(requested), 0.0, 2147483647.0))
+	if duration_ms <= 0:
+		return
+	cooperative_sleep_deadline_usec = Time.get_ticks_usec() + duration_ms * 1000
+	cooperative_yield_requested = true
+
+
 func step() -> bool:
+	if refresh_cooperative_sleep():
+		return true
 	# An error belongs to the previous step only; a failed synchronous call
 	# returns its own error and must not poison the next resumed VM instruction.
 	last_error = ""
@@ -1403,6 +1442,11 @@ func step() -> bool:
 					pending_return_ip = ip
 					ip = get_function_address(func_name)
 					pending_call_args = args
+					return true
+
+				if func_name == "Sleep":
+					_request_cooperative_sleep(resolved_args)
+					eval_stack.append(0)
 					return true
 
 				var host_res := host.call_host_function(func_name, resolved_args, self)

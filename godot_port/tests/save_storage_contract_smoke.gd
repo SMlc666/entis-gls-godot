@@ -15,6 +15,8 @@ class FailingThumbnailHost extends "res://scripts/csx_host.gd":
 
 
 class AnimationFixtureHost extends "res://scripts/csx_host.gd":
+	var resource_audio_volume_updates: Array[Dictionary] = []
+
 	func load_image(filename: String, _archive_hint: String = "") -> Dictionary:
 		var basename := filename.get_file().get_basename().to_upper()
 		if basename not in ["FRAME_FIXTURE", "BUTTON_NORMAL", "BUTTON_FOCUS", "BUTTON_PUSHED", "BUTTON_DISABLED"]:
@@ -25,6 +27,31 @@ class AnimationFixtureHost extends "res://scripts/csx_host.gd":
 		frame_b.fill(Color.BLUE)
 		var frames: Array = [frame_a, frame_b] if basename == "FRAME_FIXTURE" else [frame_a]
 		return {"ok": true, "image": frames[0], "texture": ImageTexture.create_from_image(frames[0]), "frames": frames, "frame_sequence": [0, 1] if frames.size() == 2 else [0], "total_time_ms": 120}
+
+	func load_sound(filename: String, _archive_hint: String = "") -> Dictionary:
+		if filename.get_file().get_basename().to_upper() != "SE_TEST_SAVE":
+			return super.load_sound(filename, _archive_hint)
+		var stream := AudioStreamWAV.new()
+		stream.format = AudioStreamWAV.FORMAT_16_BITS
+		stream.mix_rate = 8000
+		stream.stereo = true
+		stream.data.resize(8000 * 2 * 2)
+		return {"ok": true, "stream": stream, "archive": "fixture.noa"}
+
+	func resolve_audio_channel(filename: String, _archive_hint: String = "") -> String:
+		if filename.get_file().get_basename().to_upper() == "SE_TEST_SAVE":
+			return "se"
+		return super.resolve_audio_channel(filename, _archive_hint)
+
+	func set_resource_audio_volume(channel: String, resource_volume: float, resource_volume_right: float = -1.0, play_type: int = -2, resource_name: String = "") -> bool:
+		resource_audio_volume_updates.append({
+			"channel": channel,
+			"left": resource_volume,
+			"right": resource_volume if resource_volume_right < 0.0 else resource_volume_right,
+			"play_type": play_type,
+			"name": resource_name
+		})
+		return true
 
 
 func _initialize() -> void:
@@ -245,6 +272,62 @@ func _run() -> void:
 		expect(restored_resource.current_position == 2400, "Saved playback position must retain its frame units")
 		expect(restored_resource.is_repeating and restored_resource.playback_end_frame == 8400 and restored_resource.playback_rewind_frame == 1200, "Custom playback loop must survive save and load")
 		expect(restored_resource.fields.get("custom_state") == [1, "two", false], "HostResource.fields values must round-trip with their original types")
+
+	# Persist an active audio curve and its explicit play category. The fixture
+	# provides a generated WAV in memory, so no original or commercial audio is read.
+	var audio_source = CsxVMClass.CsxInstance.new("AudioSaveFixture")
+	var audio_resource = CsxHostClass.HostResource.new("SE_TEST_SAVE.mio", "fixture.noa", 0, 0, 0, host)
+	expect(audio_resource.load_sound(audio_resource.name) == 1, "Generated audio fixture must load through HostResource")
+	audio_resource.play_type = CsxHostClass.AUDIO_PLAY_TYPE_MUSIC
+	audio_resource.volume_left = 0.8
+	audio_resource.volume_right = 0.7
+	audio_resource.volume_envelope.assign([
+		Vector2(0.8, 0.7), Vector2(0.7, 0.6), Vector2(0.5, 0.4), Vector2(0.3, 0.2)
+	])
+	audio_resource.volume_envelope_duration_ms = 1000.0
+	audio_resource.volume_envelope_elapsed_ms = 250.0
+	audio_source.set_field("resource", audio_resource)
+	expect(host.save_object_file("audio_envelope.json", audio_source), "An in-flight audio envelope must save")
+	var audio_restored = CsxVMClass.CsxInstance.new("AudioSaveFixture")
+	expect(host.load_object_file("audio_envelope.json", audio_restored, vm), "An in-flight audio envelope must restore")
+	var restored_audio_resource: Variant = audio_restored.get_field("resource")
+	expect(restored_audio_resource is CsxHostClass.HostResource, "Audio save fixture must restore a HostResource")
+	if restored_audio_resource is CsxHostClass.HostResource:
+		expect(restored_audio_resource.play_type == CsxHostClass.AUDIO_PLAY_TYPE_MUSIC, "HostResource play type must survive save/load")
+		expect(restored_audio_resource.audio_channel == "se", "Restored audio channel must resolve from its resource descriptor")
+		expect(restored_audio_resource.volume_envelope.size() == 4 and is_equal_approx(restored_audio_resource.volume_envelope_elapsed_ms, 250.0), "The pending volume envelope and elapsed progress must round-trip")
+		expect(host.active_volume_envelopes.has(restored_audio_resource.get_instance_id()), "A restored pending envelope must register only after object graph commit")
+		host.resource_audio_volume_updates.clear()
+		host.advance_audio_envelopes(0.25)
+		expect(not host.resource_audio_volume_updates.is_empty(), "A restored pending volume envelope must continue advancing")
+		if not host.resource_audio_volume_updates.is_empty():
+			var envelope_update: Dictionary = host.resource_audio_volume_updates.back()
+			expect(envelope_update.get("channel") == "se" and envelope_update.get("play_type") == CsxHostClass.AUDIO_PLAY_TYPE_MUSIC, "Resumed audio automation must use the restored channel and play type")
+			expect(is_equal_approx(float(envelope_update.get("left", -1.0)), 0.5875) and is_equal_approx(float(envelope_update.get("right", -1.0)), 0.4875), "Resumed automation must continue from the saved 250 ms position")
+			expect(is_equal_approx(restored_audio_resource.volume_envelope_elapsed_ms, 500.0), "Resumed audio automation must advance its elapsed time")
+			expect(restored_audio_resource.set_volume(0.9, 0.8) == 1, "Restored audio volume updates must keep their audio category")
+			var explicit_volume_update: Dictionary = host.resource_audio_volume_updates.back()
+			expect(explicit_volume_update.get("play_type") == CsxHostClass.AUDIO_PLAY_TYPE_MUSIC, "HostResource.SetVolume must pass its restored play type")
+
+	# Schema 6 snapshots predate these fields; missing values keep their legacy defaults.
+	var legacy_audio_payload: Dictionary = CsxHostClass.serialize_value(audio_resource)
+	legacy_audio_payload.erase("play_type")
+	legacy_audio_payload.erase("volume_envelope")
+	legacy_audio_payload.erase("volume_envelope_duration_ms")
+	legacy_audio_payload.erase("volume_envelope_elapsed_ms")
+	var legacy_audio_file := FileAccess.open(host.get_save_path("legacy_audio_v6.json"), FileAccess.WRITE)
+	legacy_audio_file.store_string(JSON.stringify({"__yzk_save_document__": true, "schema_version": 6, "payload": legacy_audio_payload}))
+	legacy_audio_file.close()
+	var legacy_audio_target := CsxHostClass.HostResource.new("", "", -1, 0, 0, host)
+	legacy_audio_target.play_type = CsxHostClass.AUDIO_PLAY_TYPE_VOICE
+	legacy_audio_target.volume_envelope.assign([Vector2.ZERO, Vector2.ONE, Vector2.ONE, Vector2.ZERO])
+	legacy_audio_target.volume_envelope_duration_ms = 2000.0
+	legacy_audio_target.volume_envelope_elapsed_ms = 200.0
+	host.active_volume_envelopes[legacy_audio_target.get_instance_id()] = weakref(legacy_audio_target)
+	expect(host.load_object_file("legacy_audio_v6.json", legacy_audio_target, vm), "A schema 6 audio resource without envelope fields must remain loadable")
+	expect(legacy_audio_target.play_type == CsxHostClass.AUDIO_PLAY_TYPE_NONE and legacy_audio_target.volume_envelope.is_empty() and legacy_audio_target.volume_envelope_duration_ms == 0.0 and legacy_audio_target.volume_envelope_elapsed_ms == 0.0, "Legacy audio restoration must reset newer state to legacy defaults")
+	expect(not host.active_volume_envelopes.has(legacy_audio_target.get_instance_id()), "Legacy audio restoration must unregister a stale target envelope")
+
 	var restored_cycle: Variant = restored.get_field("cyclic_fields")
 	expect(restored_cycle is Dictionary and is_same(restored_cycle, restored_cycle.get("self")), "Cyclic dictionaries must round-trip without recursion")
 	var restored_integer_keys: Dictionary = restored.get_field("integer_keys")
@@ -456,6 +539,8 @@ func _run() -> void:
 	_break_fixture_cycles(source)
 	_break_fixture_cycles(restored)
 	_break_fixture_cycles(final_loaded)
+	_break_fixture_cycles(strict_fallback_target)
+	_break_fixture_cycles(semantic_target)
 	_break_fixture_cycles(old_sprite)
 	_break_fixture_cycles(root_sprite)
 	dictionary_source.clear()

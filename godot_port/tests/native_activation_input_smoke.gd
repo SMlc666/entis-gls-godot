@@ -34,7 +34,7 @@ func _run() -> void:
 	vm.is_halted = false
 	host.skip_input_pending = true
 	while not vm.is_halted and not host.yield_for_sprite_activation:
-		if not vm.step():
+		if not await _step_vm_cooperatively(vm, host):
 			_fail(vm.last_error)
 			return
 	if host.skip_input_pending or not sprite.is_activating:
@@ -51,7 +51,7 @@ func _run() -> void:
 	host.yield_for_sprite_activation = false
 	var steps := 0
 	while not vm.is_halted and steps < 1000:
-		if not vm.step():
+		if not await _step_vm_cooperatively(vm, host):
 			_fail(vm.last_error)
 			return
 		steps += 1
@@ -68,14 +68,14 @@ func _run() -> void:
 	vm.is_halted = false
 	host.yield_for_sprite_activation = false
 	while not vm.is_halted and not host.yield_for_sprite_activation:
-		if not vm.step():
+		if not await _step_vm_cooperatively(vm, host):
 			_fail(vm.last_error)
 			return
 	host.skip_input_pending = true
 	for frame in range(3):
 		host.yield_for_sprite_activation = false
 		while not vm.is_halted and not host.yield_for_sprite_activation:
-			if not vm.step():
+			if not await _step_vm_cooperatively(vm, host):
 				_fail(vm.last_error)
 				return
 	if vm.is_halted or not sprite.is_activating:
@@ -84,7 +84,7 @@ func _run() -> void:
 	host.advance_sprite_animations(5.0)
 	host.yield_for_sprite_activation = false
 	while not vm.is_halted:
-		if not vm.step():
+		if not await _step_vm_cooperatively(vm, host):
 			_fail(vm.last_error)
 			return
 	if vm.last_return_value != 0:
@@ -98,3 +98,12 @@ func _run() -> void:
 func _fail(message: String) -> void:
 	printerr("FAIL ", message)
 	quit(1)
+
+
+func _step_vm_cooperatively(vm: Variant, host: Variant) -> bool:
+	if not vm.step():
+		return false
+	while vm.refresh_cooperative_sleep():
+		host.advance_sprite_animations(1.0 / 60.0)
+		await process_frame
+	return true

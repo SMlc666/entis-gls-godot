@@ -123,7 +123,7 @@ var runtime_windows: Dictionary[int, WeakRef] = {}
 var runtime_services: Dictionary[int, WeakRef] = {}
 var runtime_shutdown: bool = false
 var save_dir: String = "user://saves"
-const SAVE_SCHEMA_VERSION := 6
+const SAVE_SCHEMA_VERSION := 7
 const MAX_SAVE_DOCUMENT_BYTES := 16 * 1024 * 1024
 const MAX_SERIALIZATION_DEPTH := 256
 
@@ -3987,8 +3987,6 @@ func call_host_function(func_name: String, args: Array, vm: RefCounted) -> Dicti
 			return {"handled": true, "result": 0}
 		"InitRandom":
 			return {"handled": true, "result": 0}
-		"Sleep":
-			return {"handled": true, "result": 0}
 		"Trace":
 			var msg := ""
 			for a in args:
@@ -4022,8 +4020,6 @@ func call_host_function(func_name: String, args: Array, vm: RefCounted) -> Dicti
 		"LeaveLoad":
 			return {"handled": true, "result": 0}
 		"Confirm":
-			return {"handled": true, "result": 0}
-		"ProcessUserInput":
 			return {"handled": true, "result": 0}
 		"PlayBgm", "RestartBgm", "ScRestartBgm", "ScPlayBgm":
 			if args.size() > 0:
@@ -4586,6 +4582,8 @@ func _commit_staged_root(target: Variant, staged: Variant) -> bool:
 		var destination := target as HostResource
 		var source := staged as HostResource
 		var runtime_host := destination.host if destination.host != null else source.host
+		if runtime_host != null:
+			runtime_host.active_volume_envelopes.erase(destination.get_instance_id())
 		destination.name = source.name
 		destination.archive_name = source.archive_name
 		destination.entry_index = source.entry_index
@@ -4599,6 +4597,10 @@ func _commit_staged_root(target: Variant, staged: Variant) -> bool:
 		destination.use_channel_default_loop = source.use_channel_default_loop
 		destination.volume_left = source.volume_left
 		destination.volume_right = source.volume_right
+		destination.play_type = source.play_type
+		destination.volume_envelope.assign(source.volume_envelope)
+		destination.volume_envelope_duration_ms = source.volume_envelope_duration_ms
+		destination.volume_envelope_elapsed_ms = source.volume_envelope_elapsed_ms
 		destination.fields = source.fields
 		destination.audio_stream = source.audio_stream
 		destination.audio_channel = source.audio_channel
@@ -4724,7 +4726,12 @@ func _register_restored_runtime_bindings(value: Variant, visited: Array) -> void
 	elif value is HostToneFilter:
 		_register_restored_runtime_bindings((value as HostToneFilter).fields, visited)
 	elif value is HostResource:
-		_register_restored_runtime_bindings((value as HostResource).fields, visited)
+		var resource := value as HostResource
+		if resource.host != null:
+			resource.host.active_volume_envelopes.erase(resource.get_instance_id())
+			if resource.is_volume_envelope_pending() != 0:
+				resource.host.active_volume_envelopes[resource.get_instance_id()] = weakref(resource)
+		_register_restored_runtime_bindings(resource.fields, visited)
 	elif value.get("type_name") != null and value.get("fields") is Dictionary:
 		_register_restored_runtime_bindings(value.fields, visited)
 
@@ -5069,6 +5076,34 @@ func _validate_save_graph_node(value: Variant, depth: int, state: Dictionary) ->
 				for field_name in ["volume_left", "volume_right"]:
 					if value.has(field_name) and not _is_save_number(value[field_name]):
 						return false
+				if value.has("play_type") and (
+						not _is_save_integer(value["play_type"])
+						or int(value["play_type"]) not in [AUDIO_PLAY_TYPE_DEVICE, AUDIO_PLAY_TYPE_NONE, AUDIO_PLAY_TYPE_MUSIC, AUDIO_PLAY_TYPE_SOUND, AUDIO_PLAY_TYPE_VOICE, AUDIO_PLAY_TYPE_SYSTEM]
+					):
+					return false
+				var envelope_keys := ["volume_envelope", "volume_envelope_duration_ms", "volume_envelope_elapsed_ms"]
+				var has_envelope_state := false
+				for envelope_key: String in envelope_keys:
+					has_envelope_state = has_envelope_state or value.has(envelope_key)
+				if has_envelope_state:
+					if not value.has("volume_envelope") or not value.has("volume_envelope_duration_ms") or not value.has("volume_envelope_elapsed_ms"):
+						return false
+					var envelope: Variant = value["volume_envelope"]
+					var duration: Variant = value["volume_envelope_duration_ms"]
+					var elapsed: Variant = value["volume_envelope_elapsed_ms"]
+					if not envelope is Array or (envelope.size() != 0 and envelope.size() != 4):
+						return false
+					if not _is_save_number(duration) or not _is_save_number(elapsed) or float(duration) < 0.0 or float(elapsed) < 0.0:
+						return false
+					if envelope.is_empty():
+						if float(duration) != 0.0 or float(elapsed) != 0.0:
+							return false
+					else:
+						if float(duration) <= 0.0 or float(elapsed) >= float(duration):
+							return false
+						for point: Variant in envelope:
+							if not point is Array or point.size() != 2 or not _is_save_number(point[0]) or not _is_save_number(point[1]):
+								return false
 				if value.has("fields"):
 					return value["fields"] is Dictionary and _validate_save_graph_node(value["fields"], depth + 1, state)
 				return true
@@ -5097,7 +5132,7 @@ func _validate_save_graph_node(value: Variant, depth: int, state: Dictionary) ->
 
 
 static func _is_save_number(value: Variant) -> bool:
-	return value is int or value is float
+	return (value is int or value is float) and is_finite(float(value))
 
 
 static func _is_save_integer(value: Variant) -> bool:
@@ -5287,6 +5322,9 @@ static func _serialize_value_checked(val: Variant, active_stack: Array, depth: i
 			}
 		elif val is HostResource:
 			var resource: HostResource = val
+			var serialized_envelope: Array = []
+			for point: Vector2 in resource.volume_envelope:
+				serialized_envelope.append([point.x, point.y])
 			result = {
 				"__type__": "HostResource",
 				"__id__": object_id,
@@ -5303,6 +5341,10 @@ static func _serialize_value_checked(val: Variant, active_stack: Array, depth: i
 				"use_channel_default_loop": resource.use_channel_default_loop,
 				"volume_left": resource.volume_left,
 				"volume_right": resource.volume_right,
+				"play_type": resource.play_type,
+				"volume_envelope": serialized_envelope,
+				"volume_envelope_duration_ms": resource.volume_envelope_duration_ms,
+				"volume_envelope_elapsed_ms": resource.volume_envelope_elapsed_ms,
 				"fields": _serialize_value_checked(resource.fields, active_stack, depth + 1, state)
 			}
 		elif val.get_script() != null and val.get("type_name") != null and val.get("fields") is Dictionary:
@@ -5689,6 +5731,20 @@ static func deserialize_into(target: Variant, data: Variant, vm: RefCounted = nu
 			resource.use_channel_default_loop = bool(data.get("use_channel_default_loop", false))
 			resource.volume_left = clampf(float(data.get("volume_left", 1.0)), 0.0, 1.0)
 			resource.volume_right = clampf(float(data.get("volume_right", 1.0)), 0.0, 1.0)
+			resource.play_type = int(data.get("play_type", AUDIO_PLAY_TYPE_NONE))
+			resource.volume_envelope.clear()
+			var saved_envelope: Variant = data.get("volume_envelope", [])
+			if saved_envelope is Array:
+				for point: Variant in saved_envelope:
+					if point is Array and point.size() == 2 and _is_save_number(point[0]) and _is_save_number(point[1]):
+						resource.volume_envelope.append(Vector2(float(point[0]), float(point[1])))
+					else:
+						_set_restore_error(context, "HostResource 音量包络控制点格式无效。")
+						break
+			elif data.has("volume_envelope"):
+				_set_restore_error(context, "HostResource 音量包络格式无效。")
+			resource.volume_envelope_duration_ms = float(data.get("volume_envelope_duration_ms", 0.0))
+			resource.volume_envelope_elapsed_ms = float(data.get("volume_envelope_elapsed_ms", 0.0))
 			resource.fields = deserialize_value(data.get("fields", {}), vm, context) if data.get("fields", {}) is Dictionary else {}
 			if resource_host != null:
 				var extension := resource.name.get_extension().to_lower()
