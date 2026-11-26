@@ -39,7 +39,7 @@ func _run() -> void:
 	await process_frame
 	expect(player.is_appreciation_open, "is_appreciation_open must be true")
 	expect(player.appreciation_panel.visible, "appreciation_panel must be visible")
-	expect(not player.native_title_layer.visible, "Title sprites must not overlap the gallery")
+	expect(not player.host_window_layer.visible, "Title sprites must not overlap the gallery")
 	expect(player.cg_catalog.size() == 6, "cg_catalog must have 6 categories")
 
 	var total_scenes := 0
@@ -132,7 +132,7 @@ func _run() -> void:
 	player.app_close_btn.emit_signal("pressed")
 	expect(not player.is_appreciation_open, "is_appreciation_open should be false")
 	expect(player.is_title_mode, "Should remain in title mode")
-	expect(player.native_title_layer.visible, "Closing gallery must restore the native title")
+	expect(player.host_window_layer.visible, "Closing gallery must restore the native title")
 	for frame in range(120):
 		if player.host.current_bgm.to_lower() == "bgm07.mio":
 			break

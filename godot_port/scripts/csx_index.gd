@@ -2,6 +2,7 @@ extends RefCounted
 class_name CsxIndex
 
 const HEADER_SIZE := 64
+const MAX_CSX_FILE_BYTES := 512 * 1024 * 1024
 const MAX_FUNCTIONS := 100_000
 const MAX_NAME_UNITS := 65_536
 
@@ -29,6 +30,8 @@ func inspect(path: String) -> Dictionary:
 	var total_size := file.get_length()
 	if total_size < HEADER_SIZE:
 		return _failure("CSX 文件头不完整。")
+	if total_size > MAX_CSX_FILE_BYTES:
+		return _failure("CSX 文件超过读取上限 (%d bytes)。" % MAX_CSX_FILE_BYTES)
 	if file.get_buffer(8).hex_encode() != "456e7469731a0000":
 		return _failure("文件头不是 Entis 格式。")
 	if file.get_32() != 0xffffffff or file.get_32() != 0:

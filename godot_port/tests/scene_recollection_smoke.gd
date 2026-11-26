@@ -126,14 +126,25 @@ func _initialize() -> void:
 	# Phase 6: Test Scene Recollection Execution & Return Flow
 	print("\n[Phase 6] Testing Scene Recollection launch & return flow...")
 	player._switch_rec_heroine(0) # Sora
+	player.host.is_waiting_input = true
+	player.host.push_command("ID_STALE_CHOICE", "ID_STALE_CHOICE", 0, 0, Vector2i(400, 300))
+	player.host.advance_ticks = 2
+	player.host.skip_input_pending = true
+	player.host.yield_for_sprite_activation = true
+	player.auto_mode = true
+	player.skip_mode = true
 	player._start_scene_recollection("00_A020", 0)
 
 	expect(player.is_recollect_mode == true, "is_recollect_mode must be true")
 	expect(player.recollect_return_tag == 0, "recollect_return_tag must be 0")
 	expect(player.is_appreciation_open == false, "Appreciation modal must be closed during playback")
 	expect(player.is_title_mode == false, "Title mode must be false during playback")
-	expect(not player.native_title_layer.visible, "Title sprites must not cover recollection playback")
+	expect(not player.host_window_layer.visible, "Title sprites must not cover recollection playback")
 	expect(player.is_running == true, "Engine must be running recollection scenario")
+	expect(not player.host.is_waiting_input, "Recollection launch must clear stale dialogue wait")
+	expect(not player.host.has_pending_commands() and not player.host.command_cursor_override_valid, "Recollection launch must clear stale native commands and cursor override")
+	expect(player.host.advance_ticks == 0 and not player.host.skip_input_pending and not player.host.yield_for_sprite_activation, "Recollection launch must clear stale advance and activation state")
+	expect(not player.auto_mode and not player.skip_mode, "Recollection launch must not inherit auto or skip mode")
 
 	# Step VM a few cycles to confirm dialogue progression
 	for s in range(500):
@@ -145,11 +156,19 @@ func _initialize() -> void:
 	print("    - Successfully executed recollection scenario '00_A020'.")
 
 	# End recollection and test return
+	player.host.is_waiting_input = true
+	player.host.push_command("ID_STALE_TITLE", "ID_STALE_TITLE", 0, 0, Vector2i(400, 300))
+	player.host.advance_ticks = 1
+	player.host.skip_input_pending = true
+	player.host.yield_for_sprite_activation = true
 	player._end_scene_recollection()
 	expect(player.is_recollect_mode == false, "is_recollect_mode must be false after exit")
 	expect(player.is_appreciation_open == true, "Appreciation modal must be re-opened")
 	expect(player.app_mode == "rec", "Appreciation modal must return to 'rec' mode")
 	expect(player.app_rec_heroine_index == 0, "Heroine tab must be restored to Sora (0)")
+	expect(not player.host.is_waiting_input, "Returning to title must clear old story wait")
+	expect(not player.host.has_pending_commands() and not player.host.command_cursor_override_valid, "Returning to title must clear stale native commands and cursor override")
+	expect(player.host.advance_ticks == 0 and not player.host.skip_input_pending and not player.host.yield_for_sprite_activation, "Returning to title must clear old pending input and activation state")
 	print("  ✓ Exited recollection: returned seamlessly to Appreciation View on the same heroine tab.")
 
 	# Phase 7: Final Hash Verification

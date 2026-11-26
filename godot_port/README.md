@@ -1,6 +1,6 @@
-# Yosuga Port
+# EntisGLS Godot Runtime
 
-Godot 上的 Cotopha/EntisGLS 移植原型。当前开发重点是 Linux；原始 `.noa` 和 `yosuga.csx` 以只读方式加载，资源暂存只写入副本。
+Godot 上的 Cotopha/EntisGLS 兼容性移植原型。当前开发重点是 Linux；原始 `.noa` 和 `yosuga.csx` 以只读方式加载，资源暂存只写入副本。
 
 ## 当前状态
 
@@ -60,9 +60,15 @@ sha256sum --check assets/STAGED_GAME_ASSETS.sha256
 
 ## Android 导出脚手架
 
-工程带有 [Android ARM64 导出预设](export_presets.cfg)。需要在 Godot Editor Settings 配置 Java SDK 与 Android SDK，并安装匹配的 Godot 导出模板。当前预设只启用 ARM64，并将 `.noa`/`.csx` 文件加入导出。
+工程带有 [Android ARM64 导出预设](export_presets.cfg)。需要在 Godot Editor Settings 配置 Java SDK 与 Android SDK，并安装匹配的 Godot 导出模板。当前预设只启用 ARM64，并将 `.noa`、`.csx` 和 CP932 `.tbl` 文件加入导出。
 
 **该预设不等于 Android 已支持。** 当前工作区没有 Android 原生 codec 库；本机只有 Android `platform-tools/adb`，没有用于扩展构建和 APK 导出的完整 SDK/NDK 工具链、Java SDK 或 Godot 导出模板。因此这里尚不能导出可运行 APK。codec 和真机状态以 [Android 状态文档](docs/android-porting.md) 为准。
+
+## 原生 Codec 构建
+
+`tools/build_codec_extension.sh` 会将固定版本的 `arc_unpacker`、`godot-cpp` 源码和 CMake 构建树保存在项目外的 `../reference-sources/`，Linux 运行库安装到 `tools/bin/linux/`。源码和构建树可用 `YOSUGA_REFERENCE_ROOT`、`YOSUGA_CODEC_SOURCE_DIR`、`YOSUGA_CODEC_BUILD_DIR` 改变位置；Android 构建使用同一组持久化源码，构建树可用 `YOSUGA_ANDROID_CODEC_BUILD_DIR` 指定。构建脚本不会把参考 SDK 源码复制进 Godot 项目，也不会把编译过程丢在 `/tmp`。
+
+MEI open 与 I/P/B 单帧解码都按输入、音频 chunk/PCM、图像和索引元数据估算 live working set，并在估算超过 256 MiB 时拒绝解码。MIO 输入副本按其实际生命周期分阶段估算；section table 最多接受 32,768 条。该值是 **estimated live working set**，不是 RSS 硬限制；allocator/RSS overhead、碎片和进程内其他资源不包含在估算中。
 
 ## 命令行回归
 

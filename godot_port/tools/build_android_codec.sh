@@ -29,27 +29,13 @@ if ! awk -v version="$cmake_version" 'BEGIN { split(version, parts, "."); exit !
   exit 2
 fi
 
-arc_source_url="${YOSUGA_ARC_SOURCE:-https://github.com/vn-tools/arc_unpacker.git}"
-arc_revision="456834ecf2e5686813802c37efd829310485c57d"
-godot_cpp_url="https://github.com/godotengine/godot-cpp.git"
-godot_cpp_revision="507ed9d840c01a3c5b2a39af8bb4000bfac30bf5"
-build_root="$(mktemp -d "${TMPDIR:-/tmp}/yzk-android-codec.XXXXXXXX")"
-trap 'rm -rf -- "$build_root"' EXIT
-arc_source="$build_root/arc_unpacker"
-godot_cpp_source="$build_root/godot-cpp"
-
-git init -q "$arc_source"
-git -C "$arc_source" remote add origin "$arc_source_url"
-git -C "$arc_source" fetch -q --depth 1 origin "$arc_revision"
-git -C "$arc_source" checkout -q --detach FETCH_HEAD
-git init -q "$godot_cpp_source"
-git -C "$godot_cpp_source" remote add origin "$godot_cpp_url"
-git -C "$godot_cpp_source" fetch -q --depth 1 origin "$godot_cpp_revision"
-git -C "$godot_cpp_source" checkout -q --detach FETCH_HEAD
+source "$project_dir/tools/codec_build_sources.sh"
+build_root="${YOSUGA_ANDROID_CODEC_BUILD_DIR:-$codec_reference_root/yzk2godot-android-codec-build}"
+mkdir -p "$build_root"
 
 abis=(arm64-v8a armeabi-v7a x86_64)
 for abi in "${abis[@]}"; do
-  build_dir="$build_root/build-$abi"
+  build_dir="$build_root/$abi"
   echo "===> Building ERISAN/ERI/MIO GDExtension for $abi"
   cmake -S "$project_dir/tools/codec" -B "$build_dir" \
     -DCMAKE_TOOLCHAIN_FILE="$ndk_path/build/cmake/android.toolchain.cmake" \
@@ -58,8 +44,8 @@ for abi in "${abis[@]}"; do
     -DCMAKE_BUILD_TYPE=Release \
     -DGODOTCPP_TARGET=template_release \
     -DGODOTCPP_API_VERSION=4.7 \
-    -DAU_SOURCE_DIR="$arc_source" \
-    -DGODOTCPP_SOURCE_DIR="$godot_cpp_source" \
+	    -DAU_SOURCE_DIR="$codec_arc_dir" \
+	    -DGODOTCPP_SOURCE_DIR="$codec_godot_cpp_dir" \
     -DCMAKE_SKIP_RPATH=ON
   cmake --build "$build_dir" --target yzk_codec --parallel "${YOSUGA_BUILD_JOBS:-4}"
   output_dir="$project_dir/android/libs/$abi"
@@ -71,3 +57,4 @@ for abi in "${abis[@]}"; do
     sha256sum --check SHA256SUMS
   )
 done
+printf 'Persistent Android source and build tree: %s\n' "$build_root"

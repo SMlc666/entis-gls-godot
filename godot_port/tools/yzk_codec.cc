@@ -4,9 +4,11 @@
 #include <cstdint>
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -14,6 +16,8 @@
 #include "algo/locale.h"
 #include "algo/str.h"
 #include "dec/entis/common/erisan_decoder.h"
+#include "dec/entis/audio/common.h"
+#include "dec/entis/common/sections.h"
 #include "dec/entis/eri_image_decoder.h"
 #include "dec/entis/mio_audio_decoder.h"
 #include "dec/entis/common/huffman_tree.h"
@@ -47,6 +51,9 @@ namespace {
 
 constexpr size_t kMaxCodecInputBytes = 128U * 1024U * 1024U;
 constexpr size_t kMaxCodecOutputBytes = 128U * 1024U * 1024U;
+constexpr uint64_t kMaxMeiWorkingSetBytes = 256ULL * 1024ULL * 1024ULL;
+constexpr size_t kMaxSectionCount = 32768;
+constexpr uint64_t kMeiDctFixedScratchBytes = 1ULL * 1024ULL * 1024ULL;
 // Values from Entis ERISADecoder::DecodeFlag in erisaimage.h.
 constexpr uint32_t kMeiPlayNoLoopFilter = 0x0400;
 constexpr uint32_t kMeiPlayUseLoopFilter = 0x0800;
@@ -66,6 +73,17 @@ struct MeiFrameRecord {
     uint8_t encode_type = 0;
     uint8_t bit_count = 0;
     char picture_type = 'P';
+};
+
+struct MioDecodeEstimate {
+    uint64_t decoded_audio_bytes = 0;
+    uint64_t compressed_chunk_bytes = 0;
+    uint64_t max_decoded_chunk_bytes = 0;
+    uint64_t max_compressed_chunk_bytes = 0;
+    uint64_t chunk_count = 0;
+    uint64_t stream_section_count = 0;
+    uint32_t transformation = 0;
+    uint32_t subband_degree = 0;
 };
 
 class MeiBitReader {
@@ -618,7 +636,7 @@ bool read_sections(
     if (!data || begin > end) return false;
     size_t cursor = begin;
     while (cursor < end) {
-        if (end - cursor < 16) return false;
+        if (end - cursor < 16 || sections.size() >= kMaxSectionCount) return false;
         std::string name(reinterpret_cast<const char *>(data + cursor), 8);
         const size_t trim_at = name.find_first_of(" \0");
         if (trim_at != std::string::npos) name.resize(trim_at);
@@ -698,7 +716,8 @@ bool validate_eri_shape(const uint8_t *data, size_t size, std::string &error) {
     return true;
 }
 
-bool validate_mio_size(const uint8_t *data, size_t size, std::string &error) {
+bool validate_mio_size(const uint8_t *data, size_t size, std::string &error,
+    MioDecodeEstimate *estimate = nullptr) {
     if (size < 0x40) {
         error = "MIO input is shorter than its header.";
         return false;
@@ -724,25 +743,55 @@ bool validate_mio_size(const uint8_t *data, size_t size, std::string &error) {
     const uint32_t sample_rate = read_u32_le(data + sound_info.offset + 16);
     const uint32_t header_samples = read_u32_le(data + sound_info.offset + 28);
     const uint32_t bits_per_sample = read_u32_le(data + sound_info.offset + 36);
+    const uint32_t transformation = read_u32_le(data + sound_info.offset + 4);
+    const uint32_t subband_degree = read_u32_le(data + sound_info.offset + 24);
+    const uint32_t lapped_degree = read_u32_le(data + sound_info.offset + 32);
+    const bool lossless = transformation == 0x03020000U;
+    const bool lossy = transformation == 0x00000005U || transformation == 0x00000105U;
     if (channels == 0 || channels > 8 || sample_rate < 8000 || sample_rate > 384000
-        || (bits_per_sample != 8 && bits_per_sample != 16 && bits_per_sample != 24 && bits_per_sample != 32)) {
+        || (bits_per_sample != 8 && bits_per_sample != 16 && bits_per_sample != 24 && bits_per_sample != 32)
+        || (!lossless && !lossy)
+        || (lossy && (subband_degree < 8 || subband_degree > 11 || lapped_degree != 1))) {
         error = "MIO audio format fields are outside supported bounds.";
         return false;
     }
+    // arc_unpacker's Entis audio decoders emit signed 16-bit PCM. Lossy DCT
+    // chunks round each channel's sample count up to the subband block width;
+    // budget against that allocation rather than only the declared/raw count.
+    const uint64_t block_width = lossless ? 1ULL : (1ULL << subband_degree);
     std::vector<SectionRange> stream_sections;
     if (!read_sections(data, stream.offset, stream.offset + stream.size, stream_sections)) {
         error = "MIO stream section table is malformed.";
         return false;
     }
     uint64_t total_samples = 0;
+    uint64_t compressed_chunk_bytes = 0;
+    uint64_t max_decoded_chunk_bytes = 0;
+    uint64_t max_compressed_chunk_bytes = 0;
+    uint64_t chunk_count = 0;
     for (const SectionRange &section : stream_sections) {
         if (section.name != "SoundStm") continue;
         if (section.size < 8) {
             error = "MIO SoundStm chunk is truncated.";
             return false;
         }
-        total_samples += read_u32_le(data + section.offset + 4);
-        if (total_samples > (kMaxCodecOutputBytes / 4) / channels) {
+        const uint64_t chunk_samples = read_u32_le(data + section.offset + 4);
+        const uint64_t padded_samples = ((chunk_samples + block_width - 1) / block_width) * block_width;
+        const uint64_t chunk_pcm_bytes = padded_samples * channels * sizeof(int16_t);
+        if (padded_samples > std::numeric_limits<uint64_t>::max() - total_samples) {
+            error = "Decoded MIO audio sample count overflows.";
+            return false;
+        }
+        if (section.size - 8 > std::numeric_limits<uint64_t>::max() - compressed_chunk_bytes) {
+            error = "Decoded MIO compressed chunk size overflows.";
+            return false;
+        }
+        total_samples += padded_samples;
+        compressed_chunk_bytes += section.size - 8;
+        max_decoded_chunk_bytes = std::max(max_decoded_chunk_bytes, chunk_pcm_bytes);
+        max_compressed_chunk_bytes = std::max<uint64_t>(max_compressed_chunk_bytes, section.size - 8);
+        ++chunk_count;
+        if (total_samples > kMaxCodecOutputBytes / channels / sizeof(int16_t)) {
             error = "Decoded MIO audio would exceed the output limit.";
             return false;
         }
@@ -750,6 +799,16 @@ bool validate_mio_size(const uint8_t *data, size_t size, std::string &error) {
     if (total_samples == 0 || header_samples == 0) {
         error = "MIO contains no samples.";
         return false;
+    }
+    if (estimate) {
+        estimate->decoded_audio_bytes = total_samples * channels * sizeof(int16_t);
+        estimate->compressed_chunk_bytes = compressed_chunk_bytes;
+        estimate->max_decoded_chunk_bytes = max_decoded_chunk_bytes;
+        estimate->max_compressed_chunk_bytes = max_compressed_chunk_bytes;
+        estimate->chunk_count = chunk_count;
+        estimate->stream_section_count = stream_sections.size();
+        estimate->transformation = transformation;
+        estimate->subband_degree = subband_degree;
     }
     return true;
 }
@@ -766,7 +825,9 @@ bool validate_mei_size(
     uint32_t &declared_samples,
     uint32_t &channels,
     uint32_t &sample_rate,
-    uint32_t &bits_per_sample) {
+    uint32_t &bits_per_sample,
+    MioDecodeEstimate &audio_estimate,
+    uint64_t &metadata_estimate_bytes) {
     static constexpr uint8_t prefix[] = {'E','n','t','i','s',0x1a,0,0};
     static constexpr char title[] = "Moving Entis Image";
     if (!data || size < 64 || std::memcmp(data, prefix, sizeof(prefix)) != 0
@@ -841,14 +902,21 @@ bool validate_mei_size(
             ? 'I' : ((frame[1] & 0x02) != 0 ? 'B' : 'P');
         frame_records.push_back(std::move(record));
     }
-    if (frame_records.empty() || frame_records.size() > 100000 || declared_frames == 0
-        || declared_frames > 100000 || declared_samples == 0 || channels == 0
+    if (frame_records.empty() || frame_records.size() > kMaxSectionCount || declared_frames == 0
+        || declared_frames > kMaxSectionCount || declared_samples == 0 || channels == 0
         || (bits_per_sample != 8 && bits_per_sample != 16 && bits_per_sample != 24 && bits_per_sample != 32)
         || declared_samples > kMaxCodecOutputBytes / channels / (bits_per_sample / 8)) {
         error = "MEI has no frames or an invalid declared frame count.";
         return false;
     }
-    if (!validate_mio_size(data, size, error)) return false;
+    if (!validate_mio_size(data, size, error, &audio_estimate)) return false;
+    // The outer MEI tables remain alive while validate_mio_size reparses the
+    // MIO view and constructs a second set of tables. read_sections caps each
+    // table, so this deliberately budgets both parser layers and index growth.
+    const uint64_t section_count_sum = top_sections.size() + header_sections.size()
+        + stream_sections.size();
+    metadata_estimate_bytes = section_count_sum * sizeof(SectionRange) * 8
+        + static_cast<uint64_t>(frame_records.size()) * sizeof(MeiFrameRecord) * 2;
     return true;
 }
 
@@ -963,6 +1031,123 @@ namespace godot {
 class YzkCodec final : public RefCounted {
     GDCLASS(YzkCodec, RefCounted)
 
+    struct MeiMovieIndex {
+        PackedByteArray source;
+        bool attempted = false;
+        bool valid = false;
+        std::string error;
+        size_t width = 0;
+        size_t height = 0;
+        std::vector<MeiFrameRecord> frames;
+        uint32_t declared_frames = 0;
+        uint32_t duration_ms = 0;
+        uint32_t declared_samples = 0;
+        uint32_t channels = 0;
+        uint32_t sample_rate = 0;
+        uint32_t bits_per_sample = 0;
+        MioDecodeEstimate audio_estimate;
+        uint64_t metadata_estimate_bytes = 0;
+        uint64_t build_count = 0;
+        uint64_t reuse_count = 0;
+        uint64_t validation_us = 0;
+    };
+
+    mutable std::mutex mei_index_mutex_;
+    mutable MeiMovieIndex mei_index_;
+
+    static uint64_t frame_bytes(const MeiMovieIndex &index) {
+        return static_cast<uint64_t>(index.width) * index.height * 4;
+    }
+
+    static uint64_t coefficient_bytes(const MeiMovieIndex &index) {
+        const uint64_t blocks_wide = (index.width + 15) / 16;
+        const uint64_t blocks_high = (index.height + 15) / 16;
+        return blocks_wide * blocks_high * 384;
+    }
+
+    static uint64_t estimate_mei_open_working_set(
+        size_t input_bytes, const MeiMovieIndex &index) {
+        const MioDecodeEstimate &audio = index.audio_estimate;
+        const uint64_t input_size = input_bytes;
+        const uint64_t expected_audio_bytes = static_cast<uint64_t>(index.declared_samples)
+            * index.channels * (index.bits_per_sample / 8);
+        const uint64_t copy_phase = input_size * 3 + index.metadata_estimate_bytes;
+
+        // The pinned MIO reader owns one SectionReader table, a filtered
+        // SoundStm table, and a MioChunk table. It then copies one compressed
+        // chunk into each by-value process_chunk argument. Include vector
+        // growth room for all three tables plus those transient byte copies.
+        const uint64_t mio_metadata = audio.stream_section_count
+                * 2 * sizeof(au::dec::entis::common::Section)
+            + audio.chunk_count * 2 * sizeof(au::dec::entis::common::Section)
+            + audio.chunk_count * 3 * sizeof(au::dec::entis::audio::MioChunk);
+        const uint64_t compressed_live = audio.compressed_chunk_bytes
+            + audio.max_compressed_chunk_bytes * 2 + mio_metadata;
+
+        // bstr::operator+= grows a vector while the previous storage remains
+        // live, keeps the active decoded chunk, then MioAudioDecoder copies
+        // the completed aggregate into Audio::samples. This 3x aggregate plus
+        // one chunk covers those peak live buffers for the pinned toolchain.
+        const uint64_t aggregate_audio = audio.decoded_audio_bytes * 3
+            + audio.max_decoded_chunk_bytes;
+        const uint64_t decoder_scratch = audio.transformation == 0x03020000U
+            ? audio.max_decoded_chunk_bytes * 2
+            : audio.max_decoded_chunk_bytes * 8 + kMeiDctFixedScratchBytes;
+        const uint64_t video_live = frame_bytes(index) * 6
+            + coefficient_bytes(index) * 4
+            + static_cast<uint64_t>(index.frames.size()) * 512;
+        const uint64_t decode_phase = input_size * 2 + index.metadata_estimate_bytes
+            + compressed_live + aggregate_audio + decoder_scratch
+            + expected_audio_bytes + video_live;
+        return std::max(copy_phase, decode_phase);
+    }
+
+    static uint64_t estimate_mei_frame_working_set(
+        size_t input_bytes, const MeiMovieIndex &index,
+        uint64_t previous_bytes, uint64_t next_bytes) {
+        // I/P/B reconstruction can retain the input references, independent
+        // copies of them, coefficient/motion tables, RGBA/reference surfaces,
+        // and a loop-filter scratch surface at the same time. The multipliers
+        // are intentionally conservative for the maximum supported frame.
+        return static_cast<uint64_t>(input_bytes) + index.metadata_estimate_bytes
+            + previous_bytes + next_bytes + frame_bytes(index) * 12
+            + coefficient_bytes(index) * 4 + 2ULL * 1024ULL * 1024ULL;
+    }
+
+    bool get_or_build_mei_index(const PackedByteArray &input, std::string &error) const {
+        // Holding this snapshot keeps the backing allocation alive. Godot's
+        // PackedByteArray copy-on-write makes writes detach from the shared
+        // storage, so a live snapshot plus size/pointer identity is a stable
+        // immutable-content key without rescanning a large movie on every seek.
+        if (mei_index_.attempted && mei_index_.source.size() == input.size()
+            && mei_index_.source.ptr() == input.ptr()) {
+            ++mei_index_.reuse_count;
+            error = mei_index_.error;
+            return mei_index_.valid;
+        }
+
+        const uint64_t next_build_count = mei_index_.build_count + 1;
+        const uint64_t reuse_count = mei_index_.reuse_count;
+        const uint64_t validation_us = mei_index_.validation_us;
+        mei_index_ = MeiMovieIndex{};
+        mei_index_.build_count = next_build_count;
+        mei_index_.reuse_count = reuse_count;
+        mei_index_.validation_us = validation_us;
+        mei_index_.attempted = true;
+        mei_index_.source = input;
+        const auto started = std::chrono::steady_clock::now();
+        mei_index_.valid = validate_mei_size(input.ptr(), static_cast<size_t>(input.size()),
+            mei_index_.error, mei_index_.width, mei_index_.height, mei_index_.frames,
+            mei_index_.declared_frames, mei_index_.duration_ms, mei_index_.declared_samples,
+            mei_index_.channels, mei_index_.sample_rate, mei_index_.bits_per_sample,
+            mei_index_.audio_estimate, mei_index_.metadata_estimate_bytes);
+        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - started).count();
+        mei_index_.validation_us += static_cast<uint64_t>(std::max<int64_t>(elapsed, 0));
+        error = mei_index_.error;
+        return mei_index_.valid;
+    }
+
 protected:
     static void _bind_methods();
 
@@ -971,6 +1156,7 @@ public:
     Dictionary decode_eri(const PackedByteArray &input) const;
     Dictionary decode_mio(const PackedByteArray &input) const;
     Dictionary decode_mei(const PackedByteArray &input) const;
+    Dictionary get_mei_index_stats() const;
     Dictionary decode_mei_i_frame(const PackedByteArray &input, int64_t frame_index,
         int64_t play_mode_flags = 0) const;
     Dictionary decode_mei_p_frame(const PackedByteArray &input, int64_t frame_index,
@@ -986,10 +1172,24 @@ void YzkCodec::_bind_methods() {
     ClassDB::bind_method(D_METHOD("decode_eri", "input"), &YzkCodec::decode_eri);
     ClassDB::bind_method(D_METHOD("decode_mio", "input"), &YzkCodec::decode_mio);
     ClassDB::bind_method(D_METHOD("decode_mei", "input"), &YzkCodec::decode_mei);
+    ClassDB::bind_method(D_METHOD("get_mei_index_stats"), &YzkCodec::get_mei_index_stats);
     ClassDB::bind_method(D_METHOD("decode_mei_i_frame", "input", "frame_index", "play_mode_flags"), &YzkCodec::decode_mei_i_frame, DEFVAL(0));
     ClassDB::bind_method(D_METHOD("decode_mei_p_frame", "input", "frame_index", "previous_rgba", "play_mode_flags"), &YzkCodec::decode_mei_p_frame, DEFVAL(0));
     ClassDB::bind_method(D_METHOD("decode_mei_b_frame", "input", "frame_index", "previous_rgba", "next_rgba", "play_mode_flags"), &YzkCodec::decode_mei_b_frame, DEFVAL(0));
     ClassDB::bind_method(D_METHOD("build_shading_levels", "rgba", "width", "height"), &YzkCodec::build_shading_levels);
+}
+
+Dictionary YzkCodec::get_mei_index_stats() const {
+    std::lock_guard<std::mutex> index_lock(mei_index_mutex_);
+    Dictionary result;
+    result["attempted"] = mei_index_.attempted;
+    result["valid"] = mei_index_.valid;
+    result["frame_count"] = static_cast<int64_t>(mei_index_.frames.size());
+    result["input_size"] = mei_index_.source.size();
+    result["build_count"] = static_cast<int64_t>(mei_index_.build_count);
+    result["reuse_count"] = static_cast<int64_t>(mei_index_.reuse_count);
+    result["validation_us"] = static_cast<int64_t>(mei_index_.validation_us);
+    return result;
 }
 
 Array YzkCodec::build_shading_levels(const PackedByteArray &rgba, int64_t width, int64_t height) const {
@@ -1144,37 +1344,56 @@ Dictionary YzkCodec::decode_mio(const PackedByteArray &input) const {
 }
 
 Dictionary YzkCodec::decode_mei(const PackedByteArray &input) const {
+    std::lock_guard<std::mutex> index_lock(mei_index_mutex_);
     if (input.size() < 64 || static_cast<size_t>(input.size()) > kMaxCodecInputBytes)
         return codec_failure("MEI input size is outside the supported bounds.");
     std::string validation_error;
-    size_t width = 0, height = 0;
-    std::vector<MeiFrameRecord> frame_records;
-    uint32_t declared_frames = 0, duration_ms = 0, declared_samples = 0;
-    uint32_t channels = 0, sample_rate = 0, bits_per_sample = 0;
-    if (!validate_mei_size(input.ptr(), static_cast<size_t>(input.size()), validation_error,
-        width, height, frame_records, declared_frames, duration_ms, declared_samples,
-        channels, sample_rate, bits_per_sample))
+    if (!get_or_build_mei_index(input, validation_error))
         return codec_failure(validation_error);
+    const MeiMovieIndex &index = mei_index_;
+    const size_t width = index.width, height = index.height;
+    const std::vector<MeiFrameRecord> &frame_records = index.frames;
+    const uint32_t declared_frames = index.declared_frames;
+    const uint32_t duration_ms = index.duration_ms;
+    const uint32_t declared_samples = index.declared_samples;
+    const uint32_t channels = index.channels;
+    const uint32_t sample_rate = index.sample_rate;
+    const uint32_t bits_per_sample = index.bits_per_sample;
+    const uint64_t expected_audio_bytes = static_cast<uint64_t>(declared_samples)
+        * channels * (bits_per_sample / 8);
+    const uint64_t estimated_working_set = estimate_mei_open_working_set(
+        static_cast<size_t>(input.size()), index);
+    if (estimated_working_set > kMaxMeiWorkingSetBytes)
+        return codec_failure("MEI estimated live working set would exceed the 256 MiB session budget.");
     try {
-        // MEI and MIO share SoundInf/SoundStm coding. Adapt only the private
-        // container signature in this owned memory copy, then use the existing
-        // in-process MIO decoder without touching the original movie bytes.
-        au::bstr encoded = copy_input(input);
-        static constexpr char mio_title[] = "Music Interleaved and Orthogonal";
-        static_assert(sizeof(mio_title) - 1 == 32);
-        std::memcpy(encoded.get<char>() + 16, mio_title, sizeof(mio_title) - 1);
-        au::io::File file("input.mio", encoded);
+        // MEI and MIO share SoundInf/SoundStm coding. Adapt only an owned copy
+        // of the private container signature. MemoryByteStream deep-copies
+        // that bstr, so release the intermediate encoded copy before decoding
+        // chunks; the input, encoded bstr, and stream copy coexist only during
+        // this short copy phase.
+        std::unique_ptr<au::io::BaseByteStream> mio_stream;
+        {
+            au::bstr encoded = copy_input(input);
+            static constexpr char mio_title[] = "Music Interleaved and Orthogonal";
+            static_assert(sizeof(mio_title) - 1 == 32);
+            std::memcpy(encoded.get<char>() + 16, mio_title, sizeof(mio_title) - 1);
+            mio_stream = std::make_unique<au::io::MemoryByteStream>(encoded);
+        }
+        au::io::File file("input.mio", std::move(mio_stream));
         au::dec::entis::MioAudioDecoder decoder;
         au::Logger logger;
         logger.mute();
         const au::res::Audio audio = decoder.decode(logger, file);
-        const uint64_t expected_audio_bytes = static_cast<uint64_t>(declared_samples)
-            * channels * (bits_per_sample / 8);
-        if (audio.samples.empty() || audio.samples.size() < expected_audio_bytes
-            || expected_audio_bytes > kMaxCodecOutputBytes
+        if (audio.samples.empty() || audio.samples.size() != index.audio_estimate.decoded_audio_bytes
+            || audio.samples.size() > kMaxCodecOutputBytes
+            || expected_audio_bytes > audio.samples.size()
             || audio.channel_count != channels || audio.sample_rate != sample_rate
             || audio.bits_per_sample != bits_per_sample)
             return codec_failure("Decoded MEI audio is outside the supported bounds.");
+        const uint64_t actual_working_set = estimate_mei_open_working_set(
+            static_cast<size_t>(input.size()), index);
+        if (actual_working_set > kMaxMeiWorkingSetBytes)
+            return codec_failure("MEI estimated live working set would exceed the 256 MiB session budget.");
         std::vector<int8_t> first_frame_coefficients;
         std::array<uint8_t, 128> first_frame_quantization{};
         std::vector<int8_t> first_frame_operations, first_frame_motion_flags, first_frame_motion_vectors;
@@ -1263,17 +1482,18 @@ Dictionary YzkCodec::decode_mei(const PackedByteArray &input) const {
 
 Dictionary YzkCodec::decode_mei_i_frame(const PackedByteArray &input, int64_t frame_index,
     int64_t play_mode_flags) const {
+    std::lock_guard<std::mutex> index_lock(mei_index_mutex_);
     if (input.size() < 64 || static_cast<size_t>(input.size()) > kMaxCodecInputBytes)
         return codec_failure("MEI input size is outside the supported bounds.");
     std::string validation_error;
-    size_t width = 0, height = 0;
-    std::vector<MeiFrameRecord> frame_records;
-    uint32_t declared_frames = 0, duration_ms = 0, declared_samples = 0;
-    uint32_t channels = 0, sample_rate = 0, bits_per_sample = 0;
-    if (!validate_mei_size(input.ptr(), static_cast<size_t>(input.size()), validation_error,
-        width, height, frame_records, declared_frames, duration_ms, declared_samples,
-        channels, sample_rate, bits_per_sample))
+    if (!get_or_build_mei_index(input, validation_error))
         return codec_failure(validation_error);
+    const MeiMovieIndex &index = mei_index_;
+    const size_t width = index.width, height = index.height;
+    const std::vector<MeiFrameRecord> &frame_records = index.frames;
+    if (estimate_mei_frame_working_set(static_cast<size_t>(input.size()), index, 0, 0)
+        > kMaxMeiWorkingSetBytes)
+        return codec_failure("MEI frame estimated live working set would exceed the 256 MiB session budget.");
     if (frame_index < 0 || static_cast<uint64_t>(frame_index) >= frame_records.size())
         return codec_failure("MEI frame index is outside the stream.");
     const MeiFrameRecord &frame = frame_records[static_cast<size_t>(frame_index)];
@@ -1318,17 +1538,18 @@ Dictionary YzkCodec::decode_mei_i_frame(const PackedByteArray &input, int64_t fr
 
 Dictionary YzkCodec::decode_mei_p_frame(const PackedByteArray &input, int64_t frame_index,
     const PackedByteArray &previous_rgba, int64_t play_mode_flags) const {
+    std::lock_guard<std::mutex> index_lock(mei_index_mutex_);
     if (input.size() < 64 || static_cast<size_t>(input.size()) > kMaxCodecInputBytes)
         return codec_failure("MEI input size is outside the supported bounds.");
     std::string validation_error;
-    size_t width = 0, height = 0;
-    std::vector<MeiFrameRecord> frame_records;
-    uint32_t declared_frames = 0, duration_ms = 0, declared_samples = 0;
-    uint32_t channels = 0, sample_rate = 0, bits_per_sample = 0;
-    if (!validate_mei_size(input.ptr(), static_cast<size_t>(input.size()), validation_error,
-        width, height, frame_records, declared_frames, duration_ms, declared_samples,
-        channels, sample_rate, bits_per_sample))
+    if (!get_or_build_mei_index(input, validation_error))
         return codec_failure(validation_error);
+    const MeiMovieIndex &index = mei_index_;
+    const size_t width = index.width, height = index.height;
+    const std::vector<MeiFrameRecord> &frame_records = index.frames;
+    if (estimate_mei_frame_working_set(static_cast<size_t>(input.size()), index,
+        static_cast<uint64_t>(previous_rgba.size()), 0) > kMaxMeiWorkingSetBytes)
+        return codec_failure("MEI frame estimated live working set would exceed the 256 MiB session budget.");
     if (frame_index < 0 || static_cast<uint64_t>(frame_index) >= frame_records.size())
         return codec_failure("MEI frame index is outside the stream.");
     const MeiFrameRecord &frame = frame_records[static_cast<size_t>(frame_index)];
@@ -1378,17 +1599,19 @@ Dictionary YzkCodec::decode_mei_p_frame(const PackedByteArray &input, int64_t fr
 Dictionary YzkCodec::decode_mei_b_frame(const PackedByteArray &input, int64_t frame_index,
     const PackedByteArray &previous_rgba, const PackedByteArray &next_rgba,
     int64_t play_mode_flags) const {
+    std::lock_guard<std::mutex> index_lock(mei_index_mutex_);
     if (input.size() < 64 || static_cast<size_t>(input.size()) > kMaxCodecInputBytes)
         return codec_failure("MEI input size is outside the supported bounds.");
     std::string validation_error;
-    size_t width = 0, height = 0;
-    std::vector<MeiFrameRecord> frame_records;
-    uint32_t declared_frames = 0, duration_ms = 0, declared_samples = 0;
-    uint32_t channels = 0, sample_rate = 0, bits_per_sample = 0;
-    if (!validate_mei_size(input.ptr(), static_cast<size_t>(input.size()), validation_error,
-        width, height, frame_records, declared_frames, duration_ms, declared_samples,
-        channels, sample_rate, bits_per_sample))
+    if (!get_or_build_mei_index(input, validation_error))
         return codec_failure(validation_error);
+    const MeiMovieIndex &index = mei_index_;
+    const size_t width = index.width, height = index.height;
+    const std::vector<MeiFrameRecord> &frame_records = index.frames;
+    if (estimate_mei_frame_working_set(static_cast<size_t>(input.size()), index,
+        static_cast<uint64_t>(previous_rgba.size()), static_cast<uint64_t>(next_rgba.size()))
+        > kMaxMeiWorkingSetBytes)
+        return codec_failure("MEI frame estimated live working set would exceed the 256 MiB session budget.");
     if (frame_index < 0 || static_cast<uint64_t>(frame_index) >= frame_records.size())
         return codec_failure("MEI frame index is outside the stream.");
     const MeiFrameRecord &frame = frame_records[static_cast<size_t>(frame_index)];

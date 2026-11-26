@@ -121,10 +121,12 @@ func _run() -> void:
 
 	# Quick Load
 	player._on_quick_load()
-	await process_frame
-	var scObj = vm.global_vars[4]["value"]
+	# QuickLoad restores the synchronous CSX state before returning. The resumed
+	# ScenarioLoop consumes isLoad on its next frame, so assert at this boundary.
+	var scObj = vm.globals_by_name.get("scObj", null)
 	expect(scObj.fields.get("isLoad") == -1, "scObj.isLoad should be -1 after quick load")
 	print("  QuickLoad restored scenario state successfully!")
+	await process_frame
 
 	# Movie host lifecycle: OpenMovie selects the source; PlayMovie starts it.
 	var movie_sprite := CsxHostClass.HostSprite.new(9801, host)
@@ -136,18 +138,25 @@ func _run() -> void:
 		movie_modes.append(mode)
 	)
 	host.movie_stop_requested.connect(func(): stop_requests[0] += 1)
+	var unopened_movie_sprite := CsxHostClass.HostSprite.new(9800, host)
+	unopened_movie_sprite.filename = "opening.mei"
+	expect(unopened_movie_sprite.play_movie(0) == 0 and movie_requests.is_empty(), "PlayMovie must fail without a successful OpenMovie even when a filename is set")
 	expect(movie_sprite.open_movie("opening.mei") == 1, "OpenMovie must retain the original MEI path")
 	expect(movie_requests.is_empty(), "OpenMovie must not start playback before PlayMovie")
+	movie_sprite.release()
+	expect(host.movie_opened and host.movie_owner_instance_id == movie_sprite.get_instance_id(), "Sprite.Release must not close an explicitly opened MovieSprite resource")
 	expect(movie_sprite.play_movie(0x403) == 1 and movie_requests == ["opening.mei"] and movie_modes == [0x403], "PlayMovie must dispatch the selected original movie and native mode flags to the host")
 	movie_sprite.stop_movie()
 	expect(stop_requests[0] == 1 and not host.is_movie_playing, "StopMovie must stop host playback and clear its state")
 	movie_sprite.close_movie()
 	expect(movie_sprite.filename.is_empty() and stop_requests[0] == 2, "CloseMovie must stop playback and release the selected path")
-	# The host now routes original MEI through the in-process decoder.
-	player._on_movie_requested("opening.mei", 0)
-	expect(host.is_movie_playing and player.mei_movie_active, "native MEI playback must start for the original movie")
-	player._on_movie_stop_requested()
-	expect(not host.is_movie_playing and not player.mei_movie_active, "native MEI playback must stop cleanly")
+	# The host routes original MEI through the in-process decoder only after the
+	# owner successfully opens it, then releases it through MovieSprite methods.
+	expect(movie_sprite.open_movie("opening.mei") == 1, "OpenMovie must select the original MEI before native playback")
+	expect(movie_sprite.play_movie(0) == 1 and host.is_movie_playing and player.mei_movie_active, "PlayMovie must start native MEI playback for the opened original movie")
+	movie_sprite.stop_movie()
+	expect(not host.is_movie_playing and not player.mei_movie_active, "StopMovie must stop native MEI playback cleanly")
+	movie_sprite.close_movie()
 	print("  Native MEI movie lifecycle passed!")
 
 	print("[5/5] Verifying original game files are 100% pristine and unmodified ...")
@@ -160,5 +169,8 @@ func _run() -> void:
 	expect(voice_hash_before == voice_hash_after, "voice.noa must remain completely unmodified!")
 	print("  Hashes match perfectly: CSX and NOA files are completely untouched.")
 
+	player.free()
+	await process_frame
+	await process_frame
 	TestSupport.remove_test_saves(test_save_dir)
 	finish_success("PASS All Bustup, Backlog, Save/Load and Video Integration Smoke Tests!")

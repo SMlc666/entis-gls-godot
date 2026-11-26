@@ -94,7 +94,7 @@ func _run() -> void:
 		title_bg_sprite.texture.get_width(), title_bg_sprite.texture.get_height(),
 		title_logo_sprite.texture.get_width(), title_logo_sprite.texture.get_height()
 	])
-	if player.native_title_layer == null or not player.native_title_layer.visible:
+	if player.host_window_layer == null or not player.host_window_layer.visible:
 		printerr("FAIL Native HostWindow renderer is hidden")
 		quit(1)
 		return
@@ -234,7 +234,7 @@ func _run() -> void:
 					continue
 				for child in sprite.children:
 					if child.btn_id == "ID_CONTINUE":
-						var wrapper: Control = player.native_title_controls.get(child.get_instance_id())
+						var wrapper: Control = player.host_sprite_controls.get(child.get_instance_id())
 						if wrapper != null and wrapper.is_visible_in_tree():
 							continue_button = wrapper.get_node("NativeButton")
 		if continue_button != null:

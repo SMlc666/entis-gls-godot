@@ -41,9 +41,57 @@ func _initialize() -> void:
 	if decoded_audio.size() != 22226400:
 		_fail("expected audio output of 22226400 bytes, got %d" % decoded_audio.size())
 		return
+	var oversized_stream := original.duplicate()
+	var first_sound_stream := _find_record_header(oversized_stream, "SoundStm", 0)
+	if first_sound_stream < 0:
+		_fail("could not locate the first SoundStm chunk for the decoded-buffer bound check")
+		return
+	# Keep SoundInf's declared sample count unchanged. The native buffer bound
+	# must also account for the actual chunk sizes the decoder will consume.
+	oversized_stream.encode_u32(first_sound_stream + 4, 0xffffffff)
+	var oversized_result: Variant = codec.call("decode_mei", oversized_stream)
+	if (not oversized_result is Dictionary or oversized_result.get("ok", false)
+		or not str(oversized_result.get("error", "")).contains("Decoded MIO audio would exceed the output limit")):
+		_fail("MEI decoder did not reject an oversized SoundStm sample buffer before decode")
+		return
+	var many_sections := _build_many_section_mei()
+	var many_sections_result: Variant = codec.call("decode_mei", many_sections)
+	if not many_sections_result is Dictionary or many_sections_result.get("ok", false):
+		_fail("MEI parser did not reject a stream with more than the bounded section count")
+		return
 	var frames: Array = result.get("video_frame_info", [])
 	if frames.size() != 2520:
 		_fail("expected 2520 video frame records, got %d" % frames.size())
+		return
+	var huge_frame_movie := original.duplicate()
+	var image_info := _find_record_header(huge_frame_movie, "ImageInf", 0)
+	if image_info < 0:
+		_fail("could not locate ImageInf for frame working-set guard test")
+		return
+	huge_frame_movie.encode_u32(image_info + 16, 8192)
+	huge_frame_movie.encode_u32(image_info + 20, 4096)
+	var oversized_i: Variant = codec.call("decode_mei_i_frame", huge_frame_movie, 0)
+	if (not oversized_i is Dictionary or oversized_i.get("ok", true)
+		or not str(oversized_i.get("error", "")).contains("frame estimated live working set")):
+		_fail("I-frame decode did not apply the MEI working-set guard before frame reconstruction")
+		return
+	var p_index := -1
+	var b_index := -1
+	for frame_index: int in frames.size():
+		if p_index < 0 and str(frames[frame_index].get("picture_type", "")) == "P":
+			p_index = frame_index
+		if b_index < 0 and str(frames[frame_index].get("picture_type", "")) == "B":
+			b_index = frame_index
+	var oversized_p: Variant = codec.call("decode_mei_p_frame", huge_frame_movie, p_index, PackedByteArray())
+	var oversized_b: Variant = codec.call("decode_mei_b_frame", huge_frame_movie, b_index,
+		PackedByteArray(), PackedByteArray())
+	if (not oversized_p is Dictionary or oversized_p.get("ok", true)
+		or not str(oversized_p.get("error", "")).contains("frame estimated live working set")):
+		_fail("P-frame decode did not apply the MEI working-set guard")
+		return
+	if (not oversized_b is Dictionary or oversized_b.get("ok", true)
+		or not str(oversized_b.get("error", "")).contains("frame estimated live working set")):
+		_fail("B-frame decode did not apply the MEI working-set guard")
 		return
 	var expected_pictures := ["I", "B", "B", "P", "B", "B", "P", "B"]
 	for index: int in expected_pictures.size():
@@ -320,6 +368,55 @@ func _find_record_header(data: PackedByteArray, record_name: String, ordinal: in
 			return offset + signature.size() + 8
 		found += 1
 	return -1
+
+
+func _build_many_section_mei() -> PackedByteArray:
+	var file := PackedByteArray()
+	file.resize(64)
+	var magic := PackedByteArray([69, 110, 116, 105, 115, 26, 0, 0])
+	for index: int in range(magic.size()):
+		file[index] = magic[index]
+	var title := "Moving Entis Image".to_ascii_buffer()
+	for index: int in range(title.size()):
+		file[16 + index] = title[index]
+	var file_header := PackedByteArray()
+	file_header.resize(20)
+	file_header.encode_u32(12, 1)
+	var image_info := PackedByteArray()
+	image_info.resize(68)
+	image_info.encode_u32(16, 1)
+	image_info.encode_u32(20, 1)
+	var sound_info := PackedByteArray()
+	sound_info.resize(40)
+	sound_info.encode_u32(12, 1)
+	sound_info.encode_u32(16, 44100)
+	sound_info.encode_u32(28, 1)
+	sound_info.encode_u32(36, 16)
+	var header := PackedByteArray()
+	header.append_array(_make_section("FileHdr", file_header))
+	header.append_array(_make_section("ImageInf", image_info))
+	header.append_array(_make_section("SoundInf", sound_info))
+	var stream := PackedByteArray()
+	stream.resize(16 * 32769)
+	var padding_name := "Pad".to_ascii_buffer()
+	for index: int in range(padding_name.size()):
+		stream[index] = padding_name[index]
+	var top_sections := PackedByteArray()
+	top_sections.append_array(_make_section("Header", header))
+	top_sections.append_array(_make_section("Stream", stream))
+	file.append_array(top_sections)
+	return file
+
+
+func _make_section(name: String, payload: PackedByteArray) -> PackedByteArray:
+	var section := PackedByteArray()
+	section.resize(16)
+	var name_bytes := name.to_ascii_buffer()
+	for index: int in range(mini(name_bytes.size(), 8)):
+		section[index] = name_bytes[index]
+	section.encode_u64(8, payload.size())
+	section.append_array(payload)
+	return section
 
 
 func _changed_byte_count(left: PackedByteArray, right: PackedByteArray) -> int:

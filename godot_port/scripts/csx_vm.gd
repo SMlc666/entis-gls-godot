@@ -140,6 +140,19 @@ class CsxInstance extends RefCounted:
 		return fields.has(name)
 
 
+class CsxObjectCreationError extends RefCounted:
+	## Returned by create_object when a declared constructor fails. Any work the
+	## constructor completed before failure remains applied to VM/game state.
+	var target_class: String
+	var error: String
+	var side_effects_may_have_occurred: bool
+
+	func _init(p_target_class: String, p_error: String, p_side_effects: bool) -> void:
+		target_class = p_target_class
+		error = p_error
+		side_effects_may_have_occurred = p_side_effects
+
+
 class StackFrame extends RefCounted:
 	const MAX_LOCALS := 65536
 	var name: String
@@ -235,6 +248,153 @@ func _init(p_host: CsxHostClass = null) -> void:
 		host = CsxHostClass.new()
 
 
+## Final lifecycle hook. Call only after this VM has stopped executing and will
+## not be resumed. It severs reachable CSX container/object references before
+## dropping VM roots so RefCounted cycles among those values can be released.
+func shutdown_runtime() -> void:
+	var visited: Array[Variant] = []
+	for entry in global_vars:
+		_detach_runtime_value(entry.get("value"), visited)
+	for value in data_by_name.values():
+		_detach_runtime_value(value, visited)
+	for value in eval_stack:
+		_detach_runtime_value(value, visited)
+	for value in pending_call_args:
+		_detach_runtime_value(value, visited)
+	for frame in call_stack:
+		_detach_runtime_value(frame.this_obj, visited)
+		for value in frame.locals.values():
+			_detach_runtime_value(value, visited)
+		frame.locals.clear()
+		frame.local_order.clear()
+		frame.block_locals.clear()
+	global_vars.clear()
+	globals_by_name.clear()
+	data_vars.clear()
+	data_by_name.clear()
+	eval_stack.clear()
+	pending_call_args.clear()
+	call_stack.clear()
+	pending_return_ip = -1
+	last_return_value = null
+	ip = 0
+	is_halted = true
+	is_synchronous_call = false
+	last_error = ""
+	executed_instructions = 0
+	_image = PackedByteArray()
+	const_strings.clear()
+	instruction_starts = PackedInt32Array()
+	_image_validation_attempted = false
+	_image_validation_error = ""
+	functions.clear()
+	functions_lower.clear()
+	prologues.clear()
+	host = null
+
+
+## Compatibility alias for existing callers; new lifecycle code should use
+## shutdown_runtime().
+func clear_runtime_state() -> void:
+	shutdown_runtime()
+
+
+func _detach_runtime_value(value: Variant, visited: Array[Variant]) -> void:
+	if value == null or (not value is Object and not value is Array and not value is Dictionary):
+		return
+	for previous in visited:
+		if is_same(previous, value):
+			return
+	visited.append(value)
+	if value is CsxRef:
+		var ref_value := value as CsxRef
+		_detach_runtime_value(ref_value.container, visited)
+		ref_value.container = null
+		ref_value.key = null
+	elif value is CsxInstance:
+		var instance := value as CsxInstance
+		_detach_runtime_value(instance.fields, visited)
+		instance.fields.clear()
+		instance.field_names.clear()
+		instance.native_tone_filter = null
+	elif value is Array:
+		for item in value:
+			_detach_runtime_value(item, visited)
+		value.clear()
+	elif value is Dictionary:
+		for item in value.values():
+			_detach_runtime_value(item, visited)
+		value.clear()
+	elif value is CsxHostClass.HostFile:
+		(value as CsxHostClass.HostFile).vm = null
+		(value as CsxHostClass.HostFile).host = null
+	elif value is CsxHostClass.HostSprite:
+		var sprite := value as CsxHostClass.HostSprite
+		_detach_runtime_value(sprite.fields, visited)
+		_detach_runtime_value(sprite.children, visited)
+		_detach_runtime_value(sprite.sprite_parameters, visited)
+		_detach_runtime_value(sprite.activation_curves, visited)
+		_detach_runtime_value(sprite.message_style, visited)
+		sprite.fields.clear()
+		sprite.children.clear()
+		sprite.sprite_parameters.clear()
+		sprite.activation_curves.clear()
+		sprite.message_style.clear()
+		sprite.parent_sprite = null
+		sprite.host = null
+		sprite.attached_resource = null
+		sprite.alpha_resource = null
+		sprite.tone_filter = null
+		sprite.form_resources = null
+	elif value is CsxHostClass.HostWindow:
+		var window := value as CsxHostClass.HostWindow
+		_detach_runtime_value(window.fields, visited)
+		_detach_runtime_value(window.root_sprites, visited)
+		window.fields.clear()
+		window.root_sprites.clear()
+		window.focused_sprite = null
+		window.host = null
+	elif value is CsxHostClass.HostResourceManager:
+		var manager := value as CsxHostClass.HostResourceManager
+		_detach_runtime_value(manager.fields, visited)
+		_detach_runtime_value(manager.resource_cache, visited)
+		_detach_runtime_value(manager.skin_resources, visited)
+		_detach_runtime_value(manager.skin_styles, visited)
+		_detach_runtime_value(manager.skin_pages, visited)
+		manager.fields.clear()
+		manager.resource_cache.clear()
+		manager.skin_resources.clear()
+		manager.skin_styles.clear()
+		manager.skin_pages.clear()
+		manager.host = null
+	elif value is CsxHostClass.HostResource:
+		var resource := value as CsxHostClass.HostResource
+		_detach_runtime_value(resource.fields, visited)
+		_detach_runtime_value(resource.volume_envelope, visited)
+		_detach_runtime_value(resource.image_frames, visited)
+		_detach_runtime_value(resource.image_frame_sequence, visited)
+		resource.fields.clear()
+		resource.host = null
+	elif value is CsxHostClass.HostInputFilter:
+		var input_filter := value as CsxHostClass.HostInputFilter
+		_detach_runtime_value(input_filter.fields, visited)
+		_detach_runtime_value(input_filter.window_ref, visited)
+		_detach_runtime_value(input_filter.input_queue, visited)
+		_detach_runtime_value(input_filter.joy_buttons, visited)
+		_detach_runtime_value(input_filter.input_assignments, visited)
+		input_filter.fields.clear()
+		input_filter.window_ref = null
+		input_filter.input_queue.clear()
+		input_filter.joy_buttons.clear()
+		input_filter.input_assignments.clear()
+		input_filter.host = null
+	elif value is CsxHostClass.HostToneFilter:
+		var tone_filter := value as CsxHostClass.HostToneFilter
+		_detach_runtime_value(tone_filter.fields, visited)
+		tone_filter.fields.clear()
+		tone_filter.host = null
+
+
 func load_csx(path: String) -> Dictionary:
 	last_error = ""
 	image = PackedByteArray()
@@ -261,14 +421,18 @@ func load_csx(path: String) -> Dictionary:
 	if image_section.is_empty():
 		last_error = "CSX 缺少 image 区段。"
 		return {"ok": false, "error": last_error}
+	var image_size := int(image_section.get("size", -1))
+	if image_size <= 0 or image_size > CsxBytecodeReader.MAX_IMAGE_SIZE:
+		last_error = "CSX image 区段为空或超过 %d bytes。" % CsxBytecodeReader.MAX_IMAGE_SIZE
+		return {"ok": false, "error": last_error}
 
 	var file := FileAccess.open(path, FileAccess.READ)
 	if file == null:
 		last_error = "无法读取 CSX 内容: %s" % error_string(FileAccess.get_open_error())
 		return {"ok": false, "error": last_error}
 	file.seek(image_section["offset"])
-	image = file.get_buffer(image_section["size"])
-	if image.size() != int(image_section["size"]):
+	image = file.get_buffer(image_size)
+	if image.size() != image_size:
 		last_error = "CSX image 区段读取不完整。"
 		return {"ok": false, "error": last_error}
 	var conststr_section: Dictionary = {}
@@ -316,7 +480,8 @@ func load_csx(path: String) -> Dictionary:
 			last_error = "初始化入口不是有效指令边界：0x%X" % address
 			return {"ok": false, "error": last_error}
 
-	_init_storage(idx.global_variables, idx.data_variables)
+	if not _init_storage(idx.global_variables, idx.data_variables):
+		return {"ok": false, "error": last_error}
 	return {"ok": true, "functions": functions.size(), "prologues": prologues.size(), "globals": global_vars.size(), "data": data_vars.size()}
 
 
@@ -399,7 +564,7 @@ func get_function_address(p_name: String) -> int:
 
 
 
-func _init_storage(raw_globals: Array[Dictionary], raw_data: Array[Dictionary]) -> void:
+func _init_storage(raw_globals: Array[Dictionary], raw_data: Array[Dictionary]) -> bool:
 	global_vars.clear()
 	globals_by_name.clear()
 	data_vars.clear()
@@ -409,6 +574,10 @@ func _init_storage(raw_globals: Array[Dictionary], raw_data: Array[Dictionary]) 
 		var name: String = g["name"]
 		var desc: Dictionary = g["value"]
 		var val = _instantiate_storage_object(desc)
+		if val is CsxObjectCreationError:
+			last_error = "全局变量 %s 对象创建失败：%s%s" % [name, val.error,
+				"（构造函数可能已产生副作用）" if val.side_effects_may_have_occurred else ""]
+			return false
 		var entry := {"name": name, "value": val}
 		global_vars.append(entry)
 		globals_by_name[name] = val
@@ -421,13 +590,23 @@ func _init_storage(raw_globals: Array[Dictionary], raw_data: Array[Dictionary]) 
 			for field in d.get("fields", []):
 				var tag: String = field.get("tag", "")
 				var fdesc: Dictionary = field.get("value", {})
-				group_dict[tag] = _instantiate_storage_object(fdesc)
+				var field_value: Variant = _instantiate_storage_object(fdesc)
+				if field_value is CsxObjectCreationError:
+					last_error = "数据组 %s.%s 对象创建失败：%s%s" % [name, tag, field_value.error,
+						"（构造函数可能已产生副作用）" if field_value.side_effects_may_have_occurred else ""]
+					return false
+				group_dict[tag] = field_value
 			val = group_dict
 		else:
 			val = _instantiate_storage_object(d.get("value", {}))
+		if val is CsxObjectCreationError:
+			last_error = "数据变量 %s 对象创建失败：%s%s" % [name, val.error,
+				"（构造函数可能已产生副作用）" if val.side_effects_may_have_occurred else ""]
+			return false
 		var entry := {"name": name, "value": val}
 		data_vars.append(entry)
 		data_by_name[name] = val
+	return true
 
 
 func _instantiate_storage_object(desc: Dictionary) -> Variant:
@@ -442,7 +621,10 @@ func _instantiate_storage_object(desc: Dictionary) -> Variant:
 		"array":
 			var arr: Array = []
 			for item in desc.get("items", []):
-				arr.append(_instantiate_storage_object(item))
+				var value: Variant = _instantiate_storage_object(item)
+				if value is CsxObjectCreationError:
+					return value
+				arr.append(value)
 			return arr
 		"hash":
 			return {}
@@ -455,7 +637,7 @@ func _instantiate_storage_object(desc: Dictionary) -> Variant:
 			return null
 
 
-func create_object(target_class: String) -> Variant:
+func create_object(target_class: String, constructor_max_steps: int = 1_000_000) -> Variant:
 	match target_class:
 		"ResourceManager":
 			return CsxHostClass.HostResourceManager.new(host)
@@ -470,7 +652,7 @@ func create_object(target_class: String) -> Variant:
 		"Resource":
 			return CsxHostClass.HostResource.new("", "", -1, 0, 0, host)
 		"File":
-			return CsxHostClass.HostFile.new(host)
+			return CsxHostClass.HostFile.new(host, self)
 		"SpriteParam":
 			var param := CsxInstance.new("SpriteParam")
 			param.set_field("nFlags", 0)
@@ -520,7 +702,11 @@ func create_object(target_class: String) -> Variant:
 			var inst := CsxInstance.new(target_class)
 			var ctor_name := "%s::%s" % [target_class, target_class]
 			if functions.has(ctor_name):
-				call_function_sync(ctor_name, [inst])
+				var result: Dictionary = call_function_sync(ctor_name, [inst], constructor_max_steps)
+				if not result.get("ok", false):
+					return CsxObjectCreationError.new(target_class,
+						str(result.get("error", "同步构造函数调用失败。")),
+						bool(result.get("side_effects_may_have_occurred", false)))
 			return inst
 
 
@@ -539,7 +725,7 @@ func call_function_sync(func_name: String, args: Array, max_steps: int = 1_000_0
 	var addr := get_function_address(func_name)
 	if addr < 0:
 		last_error = "函数不存在: %s" % func_name
-		return {"ok": false, "error": last_error}
+		return {"ok": false, "error": last_error, "steps": 0, "side_effects_may_have_occurred": false}
 	return call_address_sync(addr, args, max_steps)
 
 
@@ -547,21 +733,22 @@ func call_address_sync(address: int, args: Array, max_steps: int = 1_000_000) ->
 	last_error = ""
 	if args.size() > MAX_VM_CALL_ARGUMENTS:
 		last_error = "同步调用参数超过上限 (%d)。" % MAX_VM_CALL_ARGUMENTS
-		return {"ok": false, "error": last_error}
+		return {"ok": false, "error": last_error, "steps": 0, "side_effects_may_have_occurred": false}
 	if max_steps < 1 or max_steps > MAX_SYNC_STEPS:
 		last_error = "同步调用预算无效（允许 1..%d 步）。" % MAX_SYNC_STEPS
-		return {"ok": false, "error": last_error}
+		return {"ok": false, "error": last_error, "steps": 0, "side_effects_may_have_occurred": false}
 	if not _ensure_image_validated():
-		return {"ok": false, "error": last_error}
+		return {"ok": false, "error": last_error, "steps": 0, "side_effects_may_have_occurred": false}
 	if not _is_instruction_boundary(address):
 		last_error = "同步调用入口不是有效指令边界：0x%X" % address
-		return {"ok": false, "error": last_error}
+		return {"ok": false, "error": last_error, "steps": 0, "side_effects_may_have_occurred": false}
 	var saved_ip := ip
 	var saved_halted := is_halted
 	var saved_pending_args := pending_call_args.duplicate()
 	var saved_pending_ret := pending_return_ip
 	var saved_call_stack := call_stack.duplicate()
 	var saved_eval_stack := eval_stack.duplicate()
+	var saved_last_return_value: Variant = last_return_value
 
 	ip = address
 	is_halted = false
@@ -586,7 +773,8 @@ func call_address_sync(address: int, args: Array, max_steps: int = 1_000_000) ->
 			call_stack = saved_call_stack
 			eval_stack = saved_eval_stack
 			is_synchronous_call = was_synchronous
-			return {"ok": false, "error": err, "ip": fail_ip, "steps": steps, "stack": st}
+			last_return_value = saved_last_return_value
+			return {"ok": false, "error": err, "ip": fail_ip, "steps": steps, "stack": st, "side_effects_may_have_occurred": steps > 0}
 		steps += 1
 
 	var timed_out := not is_halted and steps >= max_steps
@@ -600,13 +788,17 @@ func call_address_sync(address: int, args: Array, max_steps: int = 1_000_000) ->
 	call_stack = saved_call_stack
 	eval_stack = saved_eval_stack
 	is_synchronous_call = was_synchronous
+	last_return_value = saved_last_return_value
 	if timed_out:
 		last_error = "同步调用超过步数上限 (%d) @ 0x%X" % [max_steps, timeout_ip]
-		return {"ok": false, "timeout": true, "error": last_error, "ip": timeout_ip, "steps": steps, "stack": timeout_stack}
-	return {"ok": true, "result": ret, "steps": steps}
+		return {"ok": false, "timeout": true, "error": last_error, "ip": timeout_ip, "steps": steps, "stack": timeout_stack, "side_effects_may_have_occurred": steps > 0}
+	return {"ok": true, "result": ret, "steps": steps, "side_effects_may_have_occurred": steps > 0}
 
 
 func step() -> bool:
+	# An error belongs to the previous step only; a failed synchronous call
+	# returns its own error and must not poison the next resumed VM instruction.
+	last_error = ""
 	if not _ensure_image_validated():
 		return false
 	if ip < 0 or ip >= image.size():
@@ -643,6 +835,10 @@ func step() -> bool:
 			var new_val: Variant = null
 			if type_code == 0:
 				new_val = create_object(target_class)
+				if new_val is CsxObjectCreationError:
+					last_error = "创建 %s 失败：%s%s" % [target_class, new_val.error,
+						"（构造函数可能已产生副作用）" if new_val.side_effects_may_have_occurred else ""]
+					return false
 			elif type_code == 1:
 				new_val = null
 			elif type_code == 2:
@@ -684,7 +880,12 @@ func step() -> bool:
 					0:
 						var cname := _read_string()
 						if not last_error.is_empty(): return false
-						eval_stack.append(create_object(cname))
+						var created: Variant = create_object(cname)
+						if created is CsxObjectCreationError:
+							last_error = "创建 %s 失败：%s%s" % [cname, created.error,
+								"（构造函数可能已产生副作用）" if created.side_effects_may_have_occurred else ""]
+							return false
+						eval_stack.append(created)
 					1:
 						eval_stack.append(null)
 					2:
@@ -998,29 +1199,6 @@ func step() -> bool:
 							var voc: String = str(msg_info.get_field("voice"))
 							if not txt.is_empty():
 								host.record_dialogue(spk, txt, voc)
-					if func_name == "startSelect" or full_name == "AdvScreen::startSelect":
-						var items = inst.get_field("selectItem")
-						if items is Array and host.current_choices.is_empty():
-							host.record_choices(items)
-						if host.auto_advance:
-							inst.set_field("selectResult", 1)
-							eval_stack.append(1)
-							return true
-						if host.selected_choice > 0:
-							var choice: int = host.selected_choice
-							host.selected_choice = -1
-							host.is_waiting_choice = false
-							host.current_choices.clear()
-							inst.set_field("selectResult", choice)
-							if items is Array:
-								(items as Array).clear()
-							eval_stack.append(choice)
-							return true
-						for arg in args:
-							eval_stack.append(arg)
-						ip = start_ip
-						host.is_waiting_choice = true
-						return true
 					if has_function(full_name):
 						pending_return_ip = ip
 						ip = get_function_address(full_name)
@@ -1042,7 +1220,7 @@ func step() -> bool:
 						eval_stack.append(tone_result)
 						return true
 					elif inst.type_name == "File":
-						var f_dummy := CsxHostClass.HostFile.new(host)
+						var f_dummy := CsxHostClass.HostFile.new(host, self)
 						var fres = _dispatch_file_method(f_dummy, func_name, method_args)
 						eval_stack.append(fres)
 						return true

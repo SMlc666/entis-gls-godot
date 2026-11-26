@@ -22,14 +22,23 @@ func _run() -> void:
 	var first_path := absolute_dir.path_join("first.noa")
 	var second_path := absolute_dir.path_join("second.noa")
 	var duplicate_path := absolute_dir.path_join("duplicate.noa")
-	if not _write_archive(first_path, ["Shared/entry.eri"]):
+	var priority_root := absolute_dir.path_join("priority")
+	var priority_system := priority_root.path_join("system")
+	DirAccess.make_dir_recursive_absolute(priority_system)
+	if not _write_archive(first_path, ["Shared/entry.eri", "token"]):
 		_fail("could not write first archive")
 		return
-	if not _write_archive(second_path, ["Shared/entry.eri"]):
+	if not _write_archive(second_path, ["Shared/entry.eri", "token.eri"]):
 		_fail("could not write second archive")
 		return
 	if not _write_archive(duplicate_path, ["same.eri", "same.eri"]):
 		_fail("could not write duplicate-entry archive")
+		return
+	if not _write_archive(priority_system.path_join("choice.noa"), ["shadowed.eri"]):
+		_fail("could not write standard fallback archive")
+		return
+	if not _write_archive(priority_root.path_join("choice.noa"), ["authoritative.eri"]):
+		_fail("could not write explicitly requested archive")
 		return
 
 	var host = HostClass.new()
@@ -37,12 +46,25 @@ func _run() -> void:
 	_check(host.get_or_open_archive(second_path) != null, "second NOA fixture should index")
 	var first := host.find_vfs_entry("Shared/entry.eri")
 	var second := host.find_vfs_entry("Shared/entry.eri", second_path)
-	_check(not first.is_empty() and str(first.get("archive", "")) == first_path.to_lower(), "unhinted collision should choose deterministic first-loaded candidate")
-	_check(not second.is_empty() and str(second.get("archive", "")) == second_path.to_lower(), "archive hint should select the matching archive candidate")
+	var canonical_first := ProjectSettings.globalize_path(first_path).simplify_path()
+	var canonical_second := ProjectSettings.globalize_path(second_path).simplify_path()
+	_check(not first.is_empty() and str(first.get("archive", "")) == canonical_first, "unhinted collision should choose deterministic first-loaded candidate")
+	_check(not second.is_empty() and str(second.get("archive", "")) == canonical_second, "archive hint should select the matching archive candidate")
+	_check(host.find_vfs_entry("SHARED/ENTRY.ERI").get("entry_name") == "shared/entry.eri", "archive path lookup should normalize case on Linux hosts")
+	var extension_alias := host.find_vfs_entry("token", second_path)
+	_check(not extension_alias.is_empty() and extension_alias.get("entry_name") == "token.eri", "an archive hint must search later extension aliases instead of stopping at an earlier mismatched candidate")
 	_check(host._vfs_cache_key(first) != host._vfs_cache_key(second), "same internal path in different archives must have different cache keys")
 	_check(host.get_vfs_conflict_report().size() == 1, "cross-archive conflict must be exposed in the conflict report")
 	_check(host.find_vfs_entry("Shared/entry.eri", "missing.noa").is_empty(), "unmatched archive hint must fail instead of silently selecting another archive")
 	_check(host.last_error.contains("归档提示"), "unmatched archive hint should leave an actionable error")
+
+	# An explicit physical path wins over conventional system/<basename> probing,
+	# even when a different archive with the same filename exists there.
+	var priority_host = HostClass.new(priority_root)
+	var authoritative_archive := priority_root.path_join("choice.noa")
+	_check(priority_host.get_or_open_archive(authoritative_archive) != null, "explicit archive path must open")
+	_check(not priority_host.find_vfs_entry("authoritative.eri", authoritative_archive).is_empty(), "explicit archive path must beat same-basename standard fallback")
+	_check(priority_host.find_vfs_entry("shadowed.eri", authoritative_archive).is_empty(), "same-basename fallback must not satisfy an explicit archive hint")
 
 	_check(host.get_or_open_archive(duplicate_path) != null, "duplicate-name NOA fixture should index")
 	var duplicate_entries := host.find_vfs_entry("same.eri", duplicate_path)

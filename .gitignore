@@ -1,6 +1,9 @@
-# Original game data: keep NOA/CSX archives outside version control.
+# Original game archives and raw Entis assets are local-only.
 *.noa
 *.csx
+*.mei
+*.eri
+*.mio
 
 # Godot generated editor/import cache and local exports.
 **/.godot/
@@ -22,5 +25,5 @@ godot_port/android/libs/
 *.log
 .DS_Store
 
-# Original game installation and backups are local-only.
+# Keep the complete local game installation out of every Git commit.
 /缘之空（全cg步兵版）/

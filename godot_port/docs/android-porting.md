@@ -6,12 +6,12 @@
 
 | 部分 | 当前状态 |
 |---|---|
-| 资源打包 | 支持将原始 .noa 与 yosuga.csx 无损复制到 assets/；导出 preset 包含这两类文件。 |
+| 资源打包 | 支持将原始 .noa 与 yosuga.csx 无损复制到 assets/；导出 preset 显式包含这两类文件和 CP932 `.tbl` 表。 |
 | 横屏 | project.godot 设置 display/window/handheld/orientation=0（横屏）。 |
 | Godot 主场景 | 指向 ADV 播放器；资源来源可为显式游戏目录、环境变量或工程内资源。 |
 | Android 导出 preset | 有 ARM64 脚手架；尚未在此环境完成导出。 |
 | 原生 codec | GDExtension 源码包含 ERISAN、ERI、MIO 进程内入口，Android 构建脚本固定使用 NDK r28b；本地 Android `.so` 尚未生成/验证。 |
-| 触屏交互 | 尚未完成 Android 设备验证。不能据此宣称双指历史手势、长按快进或触控冲突处理已完成。 |
+| 触屏交互 | 当前 ADV 推进与全屏 CG 交互监听鼠标按钮；没有显式触屏/手势输入处理，也未完成 Android 设备验证。 |
 | APK/AAB 安装和完整剧情 | 尚未验证。 |
 
 ## 暂存原版资源
@@ -52,14 +52,14 @@
 
 ## 构建 Entis Android GDExtension
 
-`tools/build_android_codec.sh` 从固定的 `arc_unpacker` 与 `godot-cpp` 提交构建包含 ERISAN、ERI 图像及 MIO 音频入口的原生扩展，目标 ABI 为 `arm64-v8a`、`armeabi-v7a`、`x86_64`。脚本读取 NDK 安装目录的 `source.properties`，只接受 NDK r28b `28.1.13356709`；并要求 PATH 上的 CMake 版本不低于 3.18。Godot 4.7 导出文档列出的 SDK CMake 包为 3.10.2.4988404，单独安装该版本不能满足此扩展构建脚本的最低版本要求。脚本会在每个 ABI 目录生成 `libyzk_codec.so` 和 `SHA256SUMS`。
+`tools/build_android_codec.sh` 从固定的 `arc_unpacker` 与 `godot-cpp` 提交构建包含 ERISAN、ERI 图像及 MIO 音频入口的原生扩展，目标 ABI 为 `arm64-v8a`、`armeabi-v7a`、`x86_64`。脚本读取 NDK 安装目录的 `source.properties`，只接受 NDK r28b `28.1.13356709`；并要求 PATH 上的 CMake 版本不低于 3.18。Godot 4.7 导出文档列出的 SDK CMake 包为 3.10.2.4988404，单独安装该版本不能满足此扩展构建脚本的最低版本要求。固定源码、ABI 构建目录和编译产物默认保存在项目外的 `../reference-sources/`；可通过 `YOSUGA_REFERENCE_ROOT`、`YOSUGA_CODEC_SOURCE_DIR` 和 `YOSUGA_ANDROID_CODEC_BUILD_DIR` 指定持久目录。脚本会在每个 ABI 目录生成 `libyzk_codec.so` 和 `SHA256SUMS`。
 
 示例（将路径改为本机 NDK r28b 的安装目录）：
 
     cd godot_port
     ANDROID_NDK_HOME="/path/to/android-ndk/28.1.13356709" ./tools/build_android_codec.sh
 
-构建后可复核每个 ABI 的扩展：
+构建后源码和 CMake 中间产物保留在项目外的持久目录，Android `.so` 会安装到项目的 `android/libs/<ABI>/` 供 PCK 导出。可复核每个 ABI 的扩展：
 
     for abi in arm64-v8a armeabi-v7a x86_64; do
       (cd "android/libs/$abi" && sha256sum --check SHA256SUMS)
@@ -71,9 +71,11 @@ Godot 4.7 的完整 Android 导出还需要 Android SDK、Java SDK 和匹配的�
 
 ## 编解码器接口要求
 
+Linux 开发机可运行 `tools/verify_linux_runtime.sh` 复核扩展 ELF 架构、入口符号、哈希清单与 CP932 表内容。`tools/build_codec_extension.sh` 和 `tools/build_arc_unpacker.sh` 均会在安装产物后重写 Linux 清单，避免仅更新扩展后遗留旧哈希。
+
 tools/yzk_codec.gdextension 声明的入口符号、原生库实际导出的符号和库路径必须一致，并在 Godot 中完成加载与 GDScript 调用验证。GDExtension 初始化成功本身不足以证明解码方法可用；还需确认 ERISAN、ERI 图像和 MIO 音频路径都使用可用的运行时实现。
 
-Android 运行时不得依赖 OS.execute() 调起 Linux ELF。Android preset 排除 `tools/bin/linux/*`；GDScript 解码器在加载到原生扩展时优先走 ERISAN、ERI 与 MIO 进程内路径，但 Android `.so` 尚未构建和验证，因此不能据此宣称 Android 解码已可用。
+Android 运行时不得依赖 OS.execute() 调起 Linux ELF。Android preset 排除 `tools/bin/linux/*`，并包含 CP932 `.tbl`；GDScript 解码器在加载到原生扩展时优先走 ERISAN、ERI 与 MIO 进程内路径，但 Android `.so` 尚未构建和验证，因此不能据此宣称 Android 解码已可用。资源暂存脚本不复制 `.mei` 视频；当前播放代码从 `game_dir` 的文件系统路径读取 MEI。Android 上游戏目录的提供方式、文件访问权限以及 MEI 可访问性尚未实现或验证，不能假设视频会随 PCK 自动打包。
 
 ## Android 验收清单
 

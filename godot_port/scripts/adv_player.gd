@@ -5,6 +5,9 @@ const CsxHostClass = preload("res://scripts/csx_host.gd")
 const PlayerSettingsState = preload("res://scripts/player_settings_state.gd")
 const CgThumbnailCache = preload("res://scripts/cg_thumbnail_cache.gd")
 const NativeMessageFadeEffect = preload("res://scripts/native_message_fade_effect.gd")
+const BoundedFileReader = preload("res://scripts/bounded_file_reader.gd")
+const MAX_MEI_FILE_BYTES := 128 * 1024 * 1024
+const MAX_MEI_GOP_BUFFER_BYTES := 64 * 1024 * 1024
 
 const CG_CATEGORIES: Array[Dictionary] = [
 	{"id": "EA", "name": "春日野 穹", "sub": "Kasugano Sora"},
@@ -97,6 +100,7 @@ var csx_script_path: String = ""
 var host: CsxHostClass = null
 var vm: CsxVMReader = null
 var settings_state = PlayerSettingsState.new()
+var runtime_shutdown: bool = false
 
 # UI Nodes
 var bg_rect: TextureRect
@@ -120,15 +124,11 @@ var voice_button: BaseButton
 var history_button: BaseButton
 var save_button: BaseButton
 var load_button: BaseButton
-var gallery_button: BaseButton
 var qsave_button: BaseButton
 var qload_button: BaseButton
-var home_button: BaseButton
 var config_button: BaseButton
 var close_button: BaseButton
 var title_label: Label
-var choice_container: VBoxContainer
-var choice_buttons: Array[Button] = []
 
 # Config / Options Modal UI Nodes
 var config_panel: PanelContainer
@@ -203,11 +203,13 @@ var is_title_mode: bool = false
 var native_appreciation_mode: bool = false
 var start_in_title: bool = false
 var start_scenario: String = "00_Z000"
-var native_title_layer: Control
-var native_title_canvas: Control
-var native_title_controls: Dictionary = {}
+var host_window_layer: Control
+var host_window_canvas: Control
+var story_window_compositor_active: bool = false
+var host_sprite_controls: Dictionary = {}
+var last_host_input_was_pointer: bool = false
 var native_title_result_handled: bool = false
-var native_title_last_viewport_size: Vector2 = Vector2.ZERO
+var host_window_last_viewport_size: Vector2 = Vector2.ZERO
 
 # Confirmation Dialog
 var confirm_panel: PanelContainer
@@ -243,6 +245,7 @@ var previous_bgm_before_app: String = ""
 
 # Scene Recollection Nodes & State
 var is_recollect_mode: bool = false
+var recollect_exit_failed: bool = false
 var recollect_return_tag: int = 0
 var app_rec_heroine_index: int = 0
 var rec_container: VBoxContainer
@@ -280,6 +283,7 @@ var video_player: VideoStreamPlayer
 var mei_video_backdrop: ColorRect
 var mei_video_rect: TextureRect
 var mei_movie_texture: ImageTexture
+var mei_movie_image: Image
 var mei_audio_player: AudioStreamPlayer
 var mei_movie_codec: Object
 var mei_movie_open_path := ""
@@ -296,15 +300,18 @@ var mei_movie_frame_duration := 1.0 / 30.0
 var mei_movie_width := 0
 var mei_movie_height := 0
 var mei_movie_elapsed := 0.0
+var mei_movie_audio_clock_frame := 0
+var mei_movie_audio_clock_enabled := true
 var mei_movie_active := false
 var mei_movie_loop := false
 var mei_movie_loop_start_frame := 0
 var mei_movie_loop_end_frame := -1
 var mei_movie_repeat_portion := false
-var mei_movie_sprite_id := -1
+var mei_movie_instance_id := -1
 var mei_movie_play_flags := 0
 var mei_movie_no_skip_frame := false
 var mei_movie_decode_flags := 0
+var mei_movie_last_decode_error := ""
 
 # Audio Nodes
 var bgm_player: AudioStreamPlayer
@@ -329,6 +336,9 @@ const MEI_PLAY_FLAG_NO_SKIP_FRAME := 0x0004
 const MEI_PLAY_FLAG_NO_LOOP_FILTER := 0x0400
 const MEI_PLAY_FLAG_USE_LOOP_FILTER := 0x0800
 const MEI_FRAME_LOOP_FILTER_MASK := 0x0c
+const MEI_GROUP_DECODE_ERROR := -1
+const MEI_GROUP_END_OF_STREAM := 0
+const MEI_GROUP_READY := 1
 
 
 func _ready() -> void:
@@ -455,12 +465,7 @@ func _build_ui() -> void:
 		bustup_container.add_child(b_rect)
 		bustup_rects.append(b_rect)
 
-	# 3. Top Header Bar (Makeshift bar deprecated in favor of authentic in-game dialogue menu)
-	# Keeping dummy buttons for compatibility
-	home_button = Button.new()
-	home_button.pressed.connect(_on_home_button_pressed)
-	gallery_button = Button.new()
-	gallery_button.pressed.connect(_open_appreciation_modal)
+	# 3. Top Header Bar: the original in-game dialogue menu owns these actions.
 
 	# 4. Authentic EntisGLS Dialogue Box & In-Game Quick Menu (750 x 152)
 	dialogue_box = Control.new()
@@ -600,22 +605,10 @@ func _build_ui() -> void:
 	history_button.pressed.connect(_toggle_backlog)
 	menu_box.add_child(history_button)
 
-	# 5. Choice Selection Panel (centered overlay)
-	choice_container = VBoxContainer.new()
-	choice_container.name = "ChoiceContainer"
-	choice_container.anchor_left = 0.2
-	choice_container.anchor_right = 0.8
-	choice_container.anchor_top = 0.25
-	choice_container.anchor_bottom = 0.68
-	choice_container.alignment = BoxContainer.ALIGNMENT_CENTER
-	choice_container.add_theme_constant_override("separation", 14)
-	choice_container.visible = false
-	add_child(choice_container)
-
-	# 6. Video Player Layer
+	# 5. Video Player Layer
 	_build_video_player()
 
-	# 7. Tone Filter Shader
+	# 6. Tone Filter Shader
 	_setup_tone_shader()
 
 	# 8. Backlog Modal Overlay
@@ -790,7 +783,7 @@ func _start_engine() -> void:
 	print("[AdvPlayer] Using game resources from: %s" % game_dir)
 
 	host = CsxHostClass.new(game_dir)
-	host.cursor_position_provider = Callable(self, "_get_native_cursor_position")
+	host.cursor_position_provider = Callable(self, "_get_host_cursor_position")
 	if not save_dir_override.is_empty():
 		host.save_dir = save_dir_override
 	host.bgm_player = bgm_player
@@ -807,7 +800,6 @@ func _start_engine() -> void:
 	host.message_output.connect(_on_message_output)
 	host.message_progress.connect(_on_message_progress)
 	host.bg_updated.connect(_on_bg_updated)
-	host.choices_updated.connect(_on_choices_updated)
 	host.movie_requested.connect(_on_movie_requested)
 	host.movie_loop_portion_requested.connect(_on_movie_loop_portion_requested)
 	host.movie_open_requested.connect(_on_movie_open_requested)
@@ -875,6 +867,7 @@ func _start_engine() -> void:
 
 
 func _process(delta: float) -> void:
+	_cleanup_abandoned_movie_owner()
 	_process_mei_movie(delta)
 	if not is_initialized:
 		return
@@ -901,17 +894,14 @@ func _process(delta: float) -> void:
 	host.advance_sprite_animations(delta)
 	_update_native_dialogue_transform()
 	_update_bustups()
+	_sync_host_window_canvas()
 
 	# Handle blinking advance indicator
 	indicator_timer += delta * 4.0
-	if host.is_waiting_input and not host.is_waiting_choice:
+	if host.is_waiting_input:
 		indicator.visible = int(indicator_timer) % 2 == 0
 	else:
 		indicator.visible = false
-
-	# If waiting for choice selection, pause automatic advance
-	if host != null and host.is_waiting_choice:
-		return
 
 	# Auto advance handling
 	if auto_mode and host.is_waiting_input:
@@ -929,20 +919,21 @@ func _process(delta: float) -> void:
 	# Activation checks yield for one frame so the script can recheck the sprite.
 	host.yield_for_sprite_activation = false
 
-	# Run VM steps if not waiting for player input or choices
-	if host != null and not host.is_waiting_input and not host.is_waiting_choice:
+	# Run the original CSX until it reaches an input poll/yield.
+	if host != null and (not host.is_waiting_input or _has_pending_native_command()):
 		var executed := 0
 		var limit := steps_per_frame if not skip_mode else steps_per_frame * 3
-		while not host.is_waiting_input and not host.is_waiting_choice and not host.yield_for_sprite_activation and executed < limit and not vm.is_halted:
+		while (not host.is_waiting_input or _has_pending_native_command()) and not host.yield_for_sprite_activation and executed < limit and not vm.is_halted:
 			if not vm.step():
 				is_running = false
 				message_label.text = "[color=#e06c75]VM 执行中断: %s[/color]" % vm.last_error
 				print("[AdvPlayer] VM halted with error: ", vm.last_error)
 				break
 			executed += 1
-		if is_recollect_mode and (vm.is_halted or not is_running):
+		if is_recollect_mode and not recollect_exit_failed and (vm.is_halted or not is_running):
 			_end_scene_recollection()
 			return
+		_sync_host_window_canvas()
 
 
 func _is_story_paused() -> bool:
@@ -956,6 +947,23 @@ func _is_story_paused() -> bool:
 		or (confirm_panel != null and confirm_panel.visible)
 		or (cg_fullscreen_panel != null and cg_fullscreen_panel.visible)
 	)
+
+
+func _has_pending_native_command() -> bool:
+	if host == null:
+		return false
+	if vm != null and vm.data_vars.size() > 4:
+		var active_window: Variant = vm.data_vars[4].get("value", null)
+		if active_window is CsxHostClass.HostWindow:
+			return host.has_pending_commands_for_window(active_window.get_instance_id())
+	return host.has_pending_commands()
+
+
+func _input(event: InputEvent) -> void:
+	if event is InputEventMouse:
+		last_host_input_was_pointer = true
+	elif (event is InputEventKey and event.pressed) or (event is InputEventJoypadButton and event.pressed):
+		last_host_input_was_pointer = false
 
 
 func _gui_input(event: InputEvent) -> void:
@@ -972,17 +980,18 @@ func _gui_input(event: InputEvent) -> void:
 				_toggle_backlog()
 				accept_event()
 				return
-			elif dialogue_box != null:
+			elif dialogue_box != null and not story_window_compositor_active:
 				dialogue_box.visible = not dialogue_box.visible
 				accept_event()
 				return
 		elif event.button_index == MOUSE_BUTTON_LEFT:
-			if dialogue_box != null and not dialogue_box.visible:
+			if dialogue_box != null and not dialogue_box.visible and not story_window_compositor_active:
 				dialogue_box.visible = true
 				accept_event()
 				return
-			if not is_backlog_open and host != null and host.is_waiting_input and not host.is_waiting_choice:
+			if not is_backlog_open and host != null and host.is_waiting_input:
 				_advance_line()
+				accept_event()
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -1044,11 +1053,11 @@ func _unhandled_input(event: InputEvent) -> void:
 	if is_title_mode or is_save_load_open or (confirm_panel != null and confirm_panel.visible) or is_appreciation_open or (cg_fullscreen_panel != null and cg_fullscreen_panel.visible) or is_config_open or is_voice_details_open:
 		return
 	if event.is_action_pressed("ui_accept") or (event is InputEventKey and event.pressed and (event.keycode == KEY_SPACE or event.keycode == KEY_ENTER)):
-		if dialogue_box != null and not dialogue_box.visible:
+		if dialogue_box != null and not dialogue_box.visible and not story_window_compositor_active:
 			dialogue_box.visible = true
 			get_viewport().set_input_as_handled()
 			return
-		if not is_backlog_open and host != null and host.is_waiting_input and not host.is_waiting_choice:
+		if not is_backlog_open and host != null and host.is_waiting_input:
 			_advance_line()
 
 
@@ -1108,6 +1117,9 @@ func _update_bustups() -> void:
 		var spr = sprs[i]
 		var b_rect: TextureRect = bustup_rects[i]
 		if spr is CsxHostClass.HostSprite and spr.is_visible and spr.texture != null:
+			if story_window_compositor_active and _host_window_contains_sprite(spr):
+				b_rect.visible = false
+				continue
 			b_rect.visible = true
 			if b_rect.texture != spr.texture:
 				b_rect.texture = spr.texture
@@ -1123,6 +1135,27 @@ func _update_bustups() -> void:
 			b_rect.modulate.a = 1.0 - (float(spr.transparency) / 256.0)
 		else:
 			b_rect.visible = false
+
+
+func _host_window_contains_sprite(target: CsxHostClass.HostSprite) -> bool:
+	if vm == null or vm.data_vars.size() <= 4:
+		return false
+	var window: Variant = vm.data_vars[4].get("value", null)
+	if not window is CsxHostClass.HostWindow:
+		return false
+	for sprite: CsxHostClass.HostSprite in window.root_sprites:
+		if _host_tree_contains_sprite(sprite, target):
+			return true
+	return false
+
+
+func _host_tree_contains_sprite(sprite: CsxHostClass.HostSprite, target: CsxHostClass.HostSprite) -> bool:
+	if sprite == target:
+		return true
+	for child: CsxHostClass.HostSprite in sprite.children:
+		if _host_tree_contains_sprite(child, target):
+			return true
+	return false
 
 
 func _sync_adv_temp_sprites(adv: CsxVMReader.CsxInstance) -> void:
@@ -1230,64 +1263,9 @@ func _sync_adv_cg_sprite(sprite: Variant) -> void:
 		adv_cg_material.set_shader_parameter("alpha_mask_texture", native_sprite.alpha_texture)
 
 
-func _on_choices_updated(choices: Array) -> void:
-	for btn in choice_buttons:
-		if is_instance_valid(btn):
-			btn.queue_free()
-	choice_buttons.clear()
-
-	if choices.is_empty():
-		choice_container.visible = false
-		return
-
-	choice_container.visible = true
-	for i in range(choices.size()):
-		var choice_text: String = str(choices[i])
-		var btn := Button.new()
-		btn.text = choice_text
-		btn.custom_minimum_size = Vector2(0, 52)
-		btn.add_theme_font_size_override("font_size", 18)
-
-		var normal_style := StyleBoxFlat.new()
-		normal_style.bg_color = Color(0.08, 0.12, 0.18, 0.92)
-		normal_style.border_color = Color(0.35, 0.45, 0.6, 0.8)
-		normal_style.set_border_width_all(2)
-		normal_style.set_corner_radius_all(6)
-		btn.add_theme_stylebox_override("normal", normal_style)
-
-		var hover_style := StyleBoxFlat.new()
-		hover_style.bg_color = Color(0.15, 0.22, 0.32, 0.95)
-		hover_style.border_color = Color(0.55, 0.7, 0.9, 1.0)
-		hover_style.set_border_width_all(2)
-		hover_style.set_corner_radius_all(6)
-		btn.add_theme_stylebox_override("hover", hover_style)
-
-		var pressed_style := StyleBoxFlat.new()
-		pressed_style.bg_color = Color(0.2, 0.3, 0.45, 0.98)
-		pressed_style.border_color = Color(0.7, 0.85, 1.0, 1.0)
-		pressed_style.set_border_width_all(2)
-		pressed_style.set_corner_radius_all(6)
-		btn.add_theme_stylebox_override("pressed", pressed_style)
-
-		btn.pressed.connect(_on_choice_clicked.bind(i))
-		choice_container.add_child(btn)
-		choice_buttons.append(btn)
-
-
-func _on_choice_clicked(index: int) -> void:
+func _on_movie_requested(movie_file: String, play_mode: int = 0, rewind_frame: int = -1, end_frame: int = -1, repeat: bool = false, movie_instance_id: int = -1) -> void:
 	if host != null:
-		print("[AdvPlayer] Player selected choice %d: %s" % [index + 1, host.current_choices[index] if index < host.current_choices.size() else ""])
-		host.selected_choice = index + 1
-		host.is_waiting_choice = false
-		host.current_choices.clear()
-	choice_container.visible = false
-	for btn in choice_buttons:
-		if is_instance_valid(btn):
-			btn.queue_free()
-	choice_buttons.clear()
-
-
-func _on_movie_requested(movie_file: String, play_mode: int = 0, rewind_frame: int = -1, end_frame: int = -1, repeat: bool = false, sprite_id: int = -1) -> void:
+		host.movie_play_result = false
 	print("[AdvPlayer] Movie playback requested: %s" % movie_file)
 	var base_name := movie_file.get_file().get_basename()
 	var mei_candidates: Array[String] = [
@@ -1296,7 +1274,7 @@ func _on_movie_requested(movie_file: String, play_mode: int = 0, rewind_frame: i
 		game_dir.path_join("movie").path_join(base_name + ".mei")
 	]
 	for mei_path: String in mei_candidates:
-		if FileAccess.file_exists(mei_path) and _start_native_mei_movie(mei_path, play_mode, rewind_frame, end_frame, repeat, sprite_id):
+		if FileAccess.file_exists(mei_path) and _start_native_mei_movie(mei_path, play_mode, rewind_frame, end_frame, repeat, movie_instance_id):
 			return
 	var candidates: Array[String] = [
 		game_dir.path_join(base_name + ".ogv"),
@@ -1320,16 +1298,24 @@ func _on_movie_requested(movie_file: String, play_mode: int = 0, rewind_frame: i
 		video_player.play()
 		if host != null:
 			host.is_movie_playing = true
+			host.active_movie_instance_id = movie_instance_id
+			host.movie_owner_instance_id = movie_instance_id
+			host.movie_opened = true
 			host.movie_total_frames = 0
 			host.movie_stored_frame_count = 0
 			host.movie_total_time_ms = 0
 			host.movie_current_frame = -1
+			host.movie_play_result = true
 	else:
 		print("[AdvPlayer] Proprietary MEI video '%s' requested, no OGV fallback found. Skipping movie safely." % movie_file)
-		host.is_movie_playing = false
+		if host != null:
+			host.is_movie_playing = false
+			host.movie_play_result = false
 
 
 func _on_movie_open_requested(movie_file: String) -> void:
+	if host != null and host.movie_owner_instance_id != -1 and host.movie_resource_request_instance_id != host.movie_owner_instance_id:
+		return
 	if host != null:
 		host.movie_opened = false
 	if not mei_movie_open_path.is_empty():
@@ -1355,7 +1341,14 @@ func _open_native_mei_movie(path: String) -> bool:
 	if not ClassDB.class_exists("YzkCodec"):
 		push_warning("MEI playback requires the native YzkCodec extension")
 		return false
-	var bytes := FileAccess.get_file_as_bytes(path)
+	var movie_data: Dictionary = BoundedFileReader.read(path, MAX_MEI_FILE_BYTES)
+	if not movie_data.get("ok", false):
+		push_warning("MEI file could not be safely read: %s" % movie_data.get("error", path))
+		return false
+	var bytes: PackedByteArray = movie_data.get("data", PackedByteArray())
+	if bytes.is_empty():
+		push_warning("MEI file is empty: %s" % path)
+		return false
 	var codec: Object = ClassDB.instantiate("YzkCodec")
 	if codec == null:
 		return false
@@ -1363,12 +1356,14 @@ func _open_native_mei_movie(path: String) -> bool:
 	if not decoded is Dictionary or not decoded.get("ok", false):
 		push_warning("MEI container decode failed for %s: %s" % [path, decoded.get("error", "invalid result") if decoded is Dictionary else "invalid result"])
 		return false
-	var frames: Variant = decoded.get("video_frame_info", [])
-	var first_rgba: Variant = decoded.get("first_frame_rgba", PackedByteArray())
-	var first_reference_rgba: Variant = decoded.get("first_frame_reference_rgba", first_rgba)
-	if not frames is Array or frames.is_empty() or not first_rgba is PackedByteArray or not first_reference_rgba is PackedByteArray:
+	if not _has_valid_mei_initial_frame(decoded):
 		push_warning("MEI file has no decoded initial frame: %s" % path)
 		return false
+	var frames: Array = decoded.get("video_frame_info", [])
+	var first_rgba: PackedByteArray = decoded.get("first_frame_rgba", PackedByteArray())
+	var first_reference_rgba: PackedByteArray = decoded.get("first_frame_reference_rgba", first_rgba)
+	var width := int(decoded.get("width", 0))
+	var height := int(decoded.get("height", 0))
 	if str(frames[0].get("picture_type", "")) != "I":
 		push_warning("MEI playback currently requires an I-frame at the start")
 		return false
@@ -1377,8 +1372,8 @@ func _open_native_mei_movie(path: String) -> bool:
 	mei_movie_codec = codec
 	mei_movie_bytes = bytes
 	mei_movie_frames = frames
-	mei_movie_width = int(decoded.get("width", 0))
-	mei_movie_height = int(decoded.get("height", 0))
+	mei_movie_width = width
+	mei_movie_height = height
 	mei_movie_first_rgba = first_rgba
 	mei_movie_first_reference_rgba = first_reference_rgba
 	mei_movie_anchor_rgba = first_reference_rgba
@@ -1388,6 +1383,7 @@ func _open_native_mei_movie(path: String) -> bool:
 	var duration_ms := int(decoded.get("duration_ms", 0))
 	mei_movie_frame_duration = float(duration_ms) / 1000.0 / maxf(1.0, float(frame_count)) if duration_ms > 0 else 1.0 / 30.0
 	mei_movie_frame_duration = clampf(mei_movie_frame_duration, 1.0 / 120.0, 1.0)
+	mei_movie_audio_clock_frame = 0
 	var bits := int(decoded.get("bits_per_sample", 0))
 	var channels := int(decoded.get("channels", 0))
 	var audio_data: Variant = decoded.get("audio_data", PackedByteArray())
@@ -1411,7 +1407,52 @@ func _open_native_mei_movie(path: String) -> bool:
 	return true
 
 
-func _start_native_mei_movie(path: String, play_mode: int = 0, rewind_frame: int = -1, end_frame: int = -1, repeat_portion: bool = false, sprite_id: int = -1) -> bool:
+func _has_valid_mei_initial_frame(decoded: Dictionary) -> bool:
+	if not bool(decoded.get("first_frame_decoded", false)):
+		return false
+	var frames: Variant = decoded.get("video_frame_info", [])
+	var first_rgba: Variant = decoded.get("first_frame_rgba", PackedByteArray())
+	var reference_rgba: Variant = decoded.get("first_frame_reference_rgba", first_rgba)
+	var width := int(decoded.get("width", 0))
+	var height := int(decoded.get("height", 0))
+	return (
+		frames is Array
+		and not frames.is_empty()
+		and str(frames[0].get("picture_type", "")) == "I"
+		and width > 0
+		and height > 0
+		and first_rgba is PackedByteArray
+		and reference_rgba is PackedByteArray
+		and first_rgba.size() == width * height * 4
+		and reference_rgba.size() == width * height * 4
+	)
+
+
+func _cleanup_abandoned_movie_owner() -> void:
+	if host == null or host.movie_owner_instance_id == -1 or host.movie_owner_ref == null:
+		return
+	if host.movie_owner_ref.get_ref() != null:
+		return
+	# HostMovieSprite is RefCounted and the engine owns the decoder. A script
+	# may drop its last Sprite reference without calling CloseMovie, so release
+	# the engine-side stream when the weak owner expires.
+	host.movie_resource_request_instance_id = host.movie_owner_instance_id
+	host.emit_signal("movie_stop_requested")
+	host.emit_signal("movie_close_requested")
+	host.is_movie_playing = false
+	host.movie_opened = false
+	host.active_movie_instance_id = -1
+	host.movie_owner_instance_id = -1
+	host.movie_owner_ref = null
+	host.movie_current_frame = -1
+	host.movie_total_frames = 0
+	host.movie_stored_frame_count = 0
+	host.movie_total_time_ms = 0
+
+
+func _start_native_mei_movie(path: String, play_mode: int = 0, rewind_frame: int = -1, end_frame: int = -1, repeat_portion: bool = false, movie_instance_id: int = -1) -> bool:
+	if host != null and movie_instance_id != -1 and host.movie_owner_instance_id != -1 and host.movie_owner_instance_id != movie_instance_id:
+		return false
 	if mei_movie_open_path != path or mei_movie_codec == null:
 		if not _open_native_mei_movie(path):
 			return false
@@ -1438,7 +1479,7 @@ func _start_native_mei_movie(path: String, play_mode: int = 0, rewind_frame: int
 	mei_movie_queue.clear()
 	mei_movie_elapsed = 0.0
 	mei_movie_play_flags = play_mode
-	mei_movie_sprite_id = sprite_id
+	mei_movie_instance_id = movie_instance_id
 	mei_movie_loop_start_frame = loop_start
 	mei_movie_loop_end_frame = loop_end
 	mei_movie_repeat_portion = repeat_portion
@@ -1461,8 +1502,7 @@ func _start_native_mei_movie(path: String, play_mode: int = 0, rewind_frame: int
 		mei_movie_anchor_rgba = mei_movie_first_reference_rgba
 		_show_mei_frame(mei_movie_first_rgba, mei_movie_width, mei_movie_height, 0)
 	else:
-		_on_movie_seek_requested(resume_index)
-		if mei_movie_displayed_index != resume_index:
+		if not _on_movie_seek_requested(resume_index) or mei_movie_displayed_index != resume_index:
 			push_error("MEI could not restore frame %d before playback" % resume_index)
 			return false
 	mei_movie_active = true
@@ -1472,9 +1512,13 @@ func _start_native_mei_movie(path: String, play_mode: int = 0, rewind_frame: int
 	mei_video_rect.move_to_front()
 	if mei_audio_player != null and mei_audio_player.stream != null:
 		mei_audio_player.play(_mei_frame_position_seconds(resume_index))
+	mei_movie_audio_clock_frame = resume_index
 	if host != null:
-		host.active_movie_sprite_id = sprite_id
+		if movie_instance_id != -1:
+			host.active_movie_instance_id = movie_instance_id
+			host.movie_owner_instance_id = movie_instance_id
 		host.is_movie_playing = true
+		host.movie_play_result = true
 		host.movie_opened = true
 		host.movie_total_frames = frame_count
 		host.movie_stored_frame_count = actual_frame_count
@@ -1484,8 +1528,8 @@ func _start_native_mei_movie(path: String, play_mode: int = 0, rewind_frame: int
 	return true
 
 
-func _on_movie_loop_portion_requested(rewind_frame: int, end_frame: int, repeat_portion: bool, sprite_id: int) -> void:
-	if not mei_movie_active or sprite_id != mei_movie_sprite_id or mei_movie_frames.is_empty():
+func _on_movie_loop_portion_requested(rewind_frame: int, end_frame: int, repeat_portion: bool, movie_instance_id: int) -> void:
+	if not mei_movie_active or movie_instance_id != mei_movie_instance_id or mei_movie_frames.is_empty():
 		return
 	var loop_start := 0 if rewind_frame < 0 else rewind_frame
 	var declared_count := int(mei_movie_decoded.get("frame_count", mei_movie_frames.size()))
@@ -1502,7 +1546,9 @@ func _on_movie_loop_portion_requested(rewind_frame: int, end_frame: int, repeat_
 	mei_movie_loop_start_frame = loop_start
 	mei_movie_loop_end_frame = loop_end
 	mei_movie_repeat_portion = repeat_portion
-	mei_movie_loop = ((mei_movie_play_flags & MEI_PLAY_FLAG_LOOP) != 0) or repeat_portion
+	# SetRewindingPortion is a live SetLoop call; its explicit repeat argument
+	# overrides the playback flag for this active resource.
+	mei_movie_loop = repeat_portion
 
 
 func _mei_frame_position_seconds(frame_index: int) -> float:
@@ -1515,27 +1561,72 @@ func _mei_frame_position_seconds(frame_index: int) -> float:
 	return float(position_ms) / 1000.0
 
 
+func _mei_audio_target_frame() -> int:
+	if mei_audio_player == null or mei_audio_player.stream == null or mei_movie_frame_duration <= 0.0:
+		return mei_movie_audio_clock_frame
+	var position_seconds := mei_audio_player.get_playback_position()
+	position_seconds += AudioServer.get_time_since_last_mix()
+	position_seconds -= AudioServer.get_output_latency()
+	return _update_mei_audio_clock_frame(position_seconds)
+
+
+func _update_mei_audio_clock_frame(position_seconds: float) -> int:
+	if mei_movie_frame_duration <= 0.0:
+		return mei_movie_audio_clock_frame
+	var estimated_frame := floori(maxf(0.0, position_seconds) / mei_movie_frame_duration)
+	var max_frame := maxi(0, mei_movie_frames.size() - 1)
+	mei_movie_audio_clock_frame = maxi(mei_movie_audio_clock_frame, clampi(estimated_frame, 0, max_frame))
+	return mei_movie_audio_clock_frame
+
+
 func _process_mei_movie(delta: float) -> void:
 	if not mei_movie_active:
 		return
-	mei_movie_elapsed += delta
-	if mei_movie_elapsed < mei_movie_frame_duration:
-		return
-	var due_frames := maxi(1, int(floor(mei_movie_elapsed / mei_movie_frame_duration)))
-	if mei_movie_no_skip_frame:
-		due_frames = 1
-		mei_movie_elapsed -= mei_movie_frame_duration
+	var due_frames := 0
+	var audio_clock_active := (
+		mei_movie_audio_clock_enabled
+		and mei_audio_player != null
+		and mei_audio_player.stream != null
+		and mei_audio_player.playing
+	)
+	if audio_clock_active:
+		var audio_target_frame := _mei_audio_target_frame()
+		due_frames = maxi(0, audio_target_frame - mei_movie_displayed_index)
+		if mei_movie_no_skip_frame:
+			due_frames = mini(due_frames, 1)
+		else:
+			due_frames = mini(due_frames, mei_movie_frames.size())
+		if due_frames <= 0:
+			return
 	else:
-		due_frames = mini(due_frames, mei_movie_frames.size())
-		mei_movie_elapsed = fposmod(mei_movie_elapsed, mei_movie_frame_duration)
+		mei_movie_elapsed += delta
+		if mei_movie_elapsed < mei_movie_frame_duration:
+			return
+		due_frames = maxi(1, int(floor(mei_movie_elapsed / mei_movie_frame_duration)))
+		if mei_movie_no_skip_frame:
+			due_frames = 1
+			mei_movie_elapsed -= mei_movie_frame_duration
+		else:
+			due_frames = mini(due_frames, mei_movie_frames.size())
+			mei_movie_elapsed = fposmod(mei_movie_elapsed, mei_movie_frame_duration)
 	var frame_to_display: Dictionary = {}
 	for _step: int in range(due_frames):
-		if mei_movie_queue.is_empty() and not _prepare_next_mei_group():
-			if mei_movie_loop:
-				_on_movie_seek_requested(mei_movie_loop_start_frame)
-				frame_to_display.clear()
-				continue
-			else:
+		if mei_movie_queue.is_empty():
+			var group_status := _prepare_next_mei_group()
+			if group_status == MEI_GROUP_DECODE_ERROR:
+				if not mei_movie_last_decode_error.is_empty():
+					push_error("MEI playback halted: %s" % mei_movie_last_decode_error)
+				_stop_mei_movie()
+				return
+			if group_status == MEI_GROUP_END_OF_STREAM:
+				if mei_movie_loop:
+					if not _on_movie_seek_requested(mei_movie_loop_start_frame):
+						_stop_mei_movie()
+						return
+					frame_to_display.clear()
+					# A seek resets both clocks. Discard overdue ticks from the old
+					# timeline instead of advancing the newly looped segment immediately.
+					break
 				if not frame_to_display.is_empty():
 					mei_movie_displayed_index = int(frame_to_display["index"])
 					if host != null:
@@ -1548,9 +1639,11 @@ func _process_mei_movie(delta: float) -> void:
 		# exclusive loop/end boundary (including an I-frame at that position).
 		if int(mei_movie_queue.front().get("index", -1)) >= mei_movie_loop_end_frame:
 			if mei_movie_loop:
-				_on_movie_seek_requested(mei_movie_loop_start_frame)
+				if not _on_movie_seek_requested(mei_movie_loop_start_frame):
+					_stop_mei_movie()
+					return
 				frame_to_display.clear()
-				continue
+				break
 			if not frame_to_display.is_empty():
 				_show_mei_frame(
 					frame_to_display["rgba"],
@@ -1570,57 +1663,101 @@ func _process_mei_movie(delta: float) -> void:
 		)
 
 
-func _on_movie_seek_requested(frame_index: int) -> void:
-	if mei_movie_open_path.is_empty() or frame_index < 0 or mei_movie_frames.is_empty():
-		return
+func _on_movie_seek_requested(frame_index: int) -> bool:
+	if host != null and host.movie_owner_instance_id != -1 and host.movie_resource_request_instance_id != host.movie_owner_instance_id:
+		return false
+	if host != null:
+		host.movie_seek_result = false
+	if mei_movie_open_path.is_empty() or mei_movie_codec == null or frame_index < 0 or mei_movie_frames.is_empty():
+		return false
 	var was_playing := mei_movie_active
 	# FileHdr.dwFrameCount can be one larger than the number of stored frame
 	# records; the SDK reports the header count, while its decoder clamps the
 	# terminal seek to the final available image record.
 	var target_index := mini(frame_index, mei_movie_frames.size() - 1)
+	if target_index < 0:
+		return false
 	var preceding_i := -1
 	for index: int in range(target_index, -1, -1):
 		if str(mei_movie_frames[index].get("picture_type", "")) == "I":
 			preceding_i = index
 			break
 	if preceding_i < 0:
-		return
+		return false
 	var result: Variant = mei_movie_codec.call("decode_mei_i_frame", mei_movie_bytes, preceding_i, mei_movie_decode_flags)
-	if not result is Dictionary or not result.get("ok", false):
+	if not _is_valid_mei_frame_result(result, mei_movie_width, mei_movie_height, true):
 		push_error("MEI seek I-frame %d failed: %s" % [preceding_i, result.get("error", "invalid result") if result is Dictionary else "invalid result"])
-		return
-	mei_movie_queue.clear()
-	mei_movie_anchor_index = preceding_i
-	mei_movie_anchor_rgba = result.get("reference_rgba", result.get("rgba", PackedByteArray()))
-	mei_movie_elapsed = 0.0
+		return false
+	var candidate_anchor_index := preceding_i
+	var candidate_anchor_rgba: PackedByteArray = result.get("reference_rgba", result.get("rgba", PackedByteArray()))
+	var candidate_queue: Array[Dictionary] = []
+	var selected_frame: Dictionary = {
+		"rgba": result["rgba"],
+		"width": mei_movie_width,
+		"height": mei_movie_height,
+		"index": target_index
+	}
 	if target_index == preceding_i:
-		_show_mei_frame(result.get("rgba", PackedByteArray()), mei_movie_width, mei_movie_height, target_index)
+		pass
 	else:
-		while mei_movie_anchor_index < target_index:
-			if not _prepare_next_mei_group():
-				push_error("MEI seek could not decode display frame %d" % target_index)
-				return
-			var target_queue_index := -1
-			for queue_index: int in mei_movie_queue.size():
-				if int(mei_movie_queue[queue_index].get("index", -1)) == target_index:
-					target_queue_index = queue_index
+		var target_found := false
+		while candidate_anchor_index < target_index:
+			var group: Dictionary = _decode_next_mei_group(candidate_anchor_index, candidate_anchor_rgba)
+			var group_status := int(group.get("status", MEI_GROUP_DECODE_ERROR))
+			if group_status != MEI_GROUP_READY:
+				push_error("MEI seek could not decode display frame %d: %s" % [target_index, group.get("error", "unexpected end of stream")])
+				return false
+			candidate_anchor_index = int(group["anchor_index"])
+			candidate_anchor_rgba = group["anchor_rgba"]
+			var group_frames: Array = group["frames"]
+			for queue_index: int in group_frames.size():
+				if int(group_frames[queue_index].get("index", -1)) == target_index:
+					selected_frame = group_frames[queue_index]
+					for remaining_index: int in range(queue_index + 1, group_frames.size()):
+						candidate_queue.append(group_frames[remaining_index])
+					target_found = true
 					break
-			if target_queue_index >= 0:
-				for _discard: int in target_queue_index:
-					mei_movie_queue.pop_front()
-				var selected: Dictionary = mei_movie_queue.pop_front()
-				_show_mei_frame(selected["rgba"], int(selected["width"]), int(selected["height"]), target_index)
+			if target_found:
 				break
-			mei_movie_queue.clear()
+		if not target_found:
+			return false
+	mei_movie_queue = candidate_queue
+	mei_movie_anchor_index = candidate_anchor_index
+	mei_movie_anchor_rgba = candidate_anchor_rgba
+	mei_movie_elapsed = 0.0
+	_show_mei_frame(selected_frame["rgba"], int(selected_frame["width"]), int(selected_frame["height"]), target_index)
+	if mei_movie_displayed_index != target_index:
+		return false
 	if was_playing and mei_audio_player != null and mei_audio_player.stream != null:
 		mei_audio_player.stop()
-		mei_audio_player.play(_mei_frame_position_seconds(frame_index))
+		mei_audio_player.play(_mei_frame_position_seconds(target_index))
+		mei_movie_audio_clock_frame = target_index
+	if host != null:
+		host.movie_seek_result = true
+	return true
 
 
-func _prepare_next_mei_group() -> bool:
+func _prepare_next_mei_group() -> int:
+	mei_movie_last_decode_error = ""
+	var group: Dictionary = _decode_next_mei_group(mei_movie_anchor_index, mei_movie_anchor_rgba)
+	var status := int(group.get("status", MEI_GROUP_DECODE_ERROR))
+	if status == MEI_GROUP_DECODE_ERROR:
+		mei_movie_last_decode_error = str(group.get("error", "invalid frame group"))
+		return status
+	if status == MEI_GROUP_END_OF_STREAM:
+		return status
+	mei_movie_queue.append_array(group["frames"])
+	mei_movie_anchor_index = int(group["anchor_index"])
+	mei_movie_anchor_rgba = group["anchor_rgba"]
+	return MEI_GROUP_READY
+
+
+func _decode_next_mei_group(anchor_index: int, anchor_rgba: PackedByteArray) -> Dictionary:
+	if mei_movie_codec == null or mei_movie_frames.is_empty():
+		return {"status": MEI_GROUP_DECODE_ERROR, "error": "decoder or frame index is unavailable"}
 	var next_anchor_index := -1
 	var b_indices: Array[int] = []
-	for index: int in range(mei_movie_anchor_index + 1, mei_movie_frames.size()):
+	for index: int in range(anchor_index + 1, mei_movie_frames.size()):
 		var kind := str(mei_movie_frames[index].get("picture_type", ""))
 		if kind == "B":
 			b_indices.append(index)
@@ -1628,44 +1765,68 @@ func _prepare_next_mei_group() -> bool:
 			next_anchor_index = index
 			break
 	if next_anchor_index < 0:
-		return false
+		if not b_indices.is_empty():
+			return {"status": MEI_GROUP_DECODE_ERROR, "error": "orphan B-frames without a following reference frame"}
+		return {"status": MEI_GROUP_END_OF_STREAM}
 	var kind := str(mei_movie_frames[next_anchor_index].get("picture_type", ""))
 	var anchor_result: Variant
 	if kind == "I":
 		anchor_result = mei_movie_codec.call("decode_mei_i_frame", mei_movie_bytes, next_anchor_index, mei_movie_decode_flags)
 	elif kind == "P":
-		anchor_result = mei_movie_codec.call("decode_mei_p_frame", mei_movie_bytes, next_anchor_index, mei_movie_anchor_rgba, mei_movie_decode_flags)
+		anchor_result = mei_movie_codec.call("decode_mei_p_frame", mei_movie_bytes, next_anchor_index, anchor_rgba, mei_movie_decode_flags)
 	else:
-		push_error("MEI stream has an unsupported reference frame at %d" % next_anchor_index)
-		return false
+		return {"status": MEI_GROUP_DECODE_ERROR, "error": "unsupported reference frame type '%s' at %d" % [kind, next_anchor_index]}
 	if not anchor_result is Dictionary or not anchor_result.get("ok", false):
-		push_error("MEI anchor frame %d failed: %s" % [next_anchor_index, anchor_result.get("error", "invalid result") if anchor_result is Dictionary else "invalid result"])
-		return false
-	var next_rgba: PackedByteArray = anchor_result.get("rgba", PackedByteArray())
-	var next_reference_rgba: PackedByteArray = anchor_result.get("reference_rgba", next_rgba)
+		return {"status": MEI_GROUP_DECODE_ERROR, "error": "reference frame %d failed: %s" % [next_anchor_index, anchor_result.get("error", "invalid result") if anchor_result is Dictionary else "invalid result"]}
 	var width := int(anchor_result.get("width", 0))
 	var height := int(anchor_result.get("height", 0))
+	if not _is_valid_mei_frame_result(anchor_result, width, height, kind == "I"):
+		return {"status": MEI_GROUP_DECODE_ERROR, "error": "reference frame %d failed: %s" % [next_anchor_index, anchor_result.get("error", "invalid pixel data") if anchor_result is Dictionary else "invalid result"]}
+	var frame_buffer_bytes := int(width) * int(height) * 4 * (b_indices.size() + 1)
+	if frame_buffer_bytes > MAX_MEI_GOP_BUFFER_BYTES:
+		return {"status": MEI_GROUP_DECODE_ERROR, "error": "reference group would exceed the %d MiB frame queue budget" % (MAX_MEI_GOP_BUFFER_BYTES / (1024 * 1024))}
+	var next_rgba: PackedByteArray = anchor_result["rgba"]
+	var next_reference_rgba: PackedByteArray = anchor_result.get("reference_rgba", next_rgba)
+	if next_reference_rgba.is_empty():
+		next_reference_rgba = next_rgba
+	var decoded_frames: Array[Dictionary] = []
 	for b_index: int in b_indices:
-		var b_result: Variant = mei_movie_codec.call("decode_mei_b_frame", mei_movie_bytes, b_index, mei_movie_anchor_rgba, next_reference_rgba, mei_movie_decode_flags)
-		if not b_result is Dictionary or not b_result.get("ok", false):
-			push_error("MEI B-frame %d failed: %s" % [b_index, b_result.get("error", "invalid result") if b_result is Dictionary else "invalid result"])
+		var b_result: Variant = mei_movie_codec.call("decode_mei_b_frame", mei_movie_bytes, b_index, anchor_rgba, next_reference_rgba, mei_movie_decode_flags)
+		if not _is_valid_mei_frame_result(b_result, width, height):
+			return {"status": MEI_GROUP_DECODE_ERROR, "error": "B-frame %d failed: %s" % [b_index, b_result.get("error", "invalid pixel data") if b_result is Dictionary else "invalid result"]}
+		decoded_frames.append({"rgba": b_result["rgba"], "width": width, "height": height, "index": b_index})
+	decoded_frames.append({"rgba": next_rgba, "width": width, "height": height, "index": next_anchor_index})
+	return {
+		"status": MEI_GROUP_READY,
+		"anchor_index": next_anchor_index,
+		"anchor_rgba": next_reference_rgba,
+		"frames": decoded_frames
+	}
+
+
+func _is_valid_mei_frame_result(result: Variant, width: int, height: int, require_reference: bool = false) -> bool:
+	if not result is Dictionary or not result.get("ok", false) or width <= 0 or height <= 0:
+		return false
+	var rgba: Variant = result.get("rgba", PackedByteArray())
+	if not rgba is PackedByteArray or rgba.size() != width * height * 4:
+		return false
+	if require_reference:
+		var reference_rgba: Variant = result.get("reference_rgba", rgba)
+		if not reference_rgba is PackedByteArray or (not reference_rgba.is_empty() and reference_rgba.size() != width * height * 4):
 			return false
-		mei_movie_queue.append({"rgba": b_result["rgba"], "width": width, "height": height, "index": b_index})
-	mei_movie_queue.append({"rgba": next_rgba, "width": width, "height": height, "index": next_anchor_index})
-	mei_movie_anchor_index = next_anchor_index
-	mei_movie_anchor_rgba = next_reference_rgba
 	return true
 
 
 func _show_mei_frame(rgba: PackedByteArray, width: int, height: int, frame_index: int) -> void:
 	if width <= 0 or height <= 0 or rgba.size() != width * height * 4:
 		return
-	var image := Image.create_from_data(width, height, false, Image.FORMAT_RGBA8, rgba)
-	if mei_movie_texture == null or mei_movie_texture.get_width() != width or mei_movie_texture.get_height() != height:
-		mei_movie_texture = ImageTexture.create_from_image(image)
+	if mei_movie_image == null or mei_movie_image.get_width() != width or mei_movie_image.get_height() != height:
+		mei_movie_image = Image.create_from_data(width, height, false, Image.FORMAT_RGBA8, rgba)
+		mei_movie_texture = ImageTexture.create_from_image(mei_movie_image)
 		mei_video_rect.texture = mei_movie_texture
 	else:
-		mei_movie_texture.update(image)
+		mei_movie_image.set_data(width, height, false, Image.FORMAT_RGBA8, rgba)
+		mei_movie_texture.update(mei_movie_image)
 	mei_movie_displayed_index = frame_index
 	if host != null:
 		host.movie_current_frame = frame_index
@@ -1689,9 +1850,18 @@ func _stop_mei_movie() -> void:
 
 func _close_native_mei_movie() -> void:
 	_stop_mei_movie()
+	if mei_audio_player != null:
+		# AudioStreamWAV owns a PackedByteArray copy of the decoded MIO PCM.
+		# Dropping only mei_movie_decoded would otherwise retain that full audio
+		# buffer in the player after MovieSprite.CloseMovie.
+		mei_audio_player.stream = null
 	mei_movie_open_path = ""
 	mei_movie_decoded.clear()
 	mei_movie_codec = null
+	mei_movie_image = null
+	mei_movie_texture = null
+	if mei_video_rect != null:
+		mei_video_rect.texture = null
 	mei_movie_bytes = PackedByteArray()
 	mei_movie_frames.clear()
 	mei_movie_queue.clear()
@@ -1702,7 +1872,9 @@ func _close_native_mei_movie() -> void:
 	mei_movie_displayed_index = -1
 	mei_movie_width = 0
 	mei_movie_height = 0
+	mei_movie_audio_clock_frame = 0
 	mei_movie_decode_flags = 0
+	mei_movie_last_decode_error = ""
 	if host != null:
 		host.movie_opened = false
 		host.movie_current_frame = -1
@@ -1721,6 +1893,7 @@ func _restart_mei_movie() -> void:
 	mei_movie_anchor_index = 0
 	mei_movie_anchor_rgba = mei_movie_first_reference_rgba
 	mei_movie_elapsed = 0.0
+	mei_movie_audio_clock_frame = 0
 	if mei_audio_player != null and mei_audio_player.stream != null:
 		mei_audio_player.stop()
 		mei_audio_player.play()
@@ -1735,6 +1908,8 @@ func _on_video_finished() -> void:
 
 
 func _on_movie_stop_requested() -> void:
+	if host != null and host.movie_owner_instance_id != -1 and host.movie_resource_request_instance_id != host.movie_owner_instance_id:
+		return
 	_stop_mei_movie()
 	if video_player != null:
 		video_player.stop()
@@ -1744,6 +1919,8 @@ func _on_movie_stop_requested() -> void:
 
 
 func _on_movie_close_requested() -> void:
+	if host != null and host.movie_owner_instance_id != -1 and host.movie_resource_request_instance_id != host.movie_owner_instance_id:
+		return
 	_close_native_mei_movie()
 
 
@@ -2265,20 +2442,20 @@ func _build_title_screen_ui() -> void:
 
 	# The original CSX Title() function owns the title-window tree. Render that
 	# HostWindow separately from the legacy fallback menu above.
-	native_title_layer = Control.new()
-	native_title_layer.name = "NativeTitleLayer"
-	native_title_layer.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	native_title_layer.visible = false
-	native_title_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(native_title_layer)
+	host_window_layer = Control.new()
+	host_window_layer.name = "HostWindowLayer"
+	host_window_layer.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	host_window_layer.visible = false
+	host_window_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(host_window_layer)
 
-	native_title_canvas = Control.new()
-	native_title_canvas.name = "NativeTitleCanvas"
-	native_title_canvas.position = Vector2.ZERO
-	native_title_canvas.size = Vector2(800, 600)
-	native_title_canvas.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	native_title_canvas.clip_contents = true
-	native_title_layer.add_child(native_title_canvas)
+	host_window_canvas = Control.new()
+	host_window_canvas.name = "HostWindowCanvas"
+	host_window_canvas.position = Vector2.ZERO
+	host_window_canvas.size = Vector2(800, 600)
+	host_window_canvas.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	host_window_canvas.clip_contents = true
+	host_window_layer.add_child(host_window_canvas)
 
 
 func _load_title_assets() -> void:
@@ -2361,6 +2538,30 @@ func _apply_native_title_skin() -> void:
 		title_panel.add_child(ver_label)
 
 
+func _reset_story_interaction_state(context_id: String = "story-transition") -> void:
+	auto_mode = false
+	skip_mode = false
+	auto_timer = 0.0
+	if auto_button is TextureButton:
+		auto_button.modulate = Color.WHITE
+	if skip_button is TextureButton:
+		skip_button.modulate = Color.WHITE
+	if host == null:
+		return
+	host.advance_requested = false
+	host.advance_ticks = 0
+	host.skip_input_pending = false
+	host.advance_query_count = 0
+	host.is_waiting_input = false
+	host.yield_for_sprite_activation = false
+	host.begin_command_scope(context_id)
+	if host.active_input_filter_ref != null:
+		var active_filter: Variant = host.active_input_filter_ref.get_ref()
+		if active_filter != null and active_filter.has_method("close_filter"):
+			active_filter.close_filter()
+		host.active_input_filter_ref = null
+
+
 func _show_title_screen() -> void:
 	if title_bg != null: title_bg.visible = false
 	if title_logo != null: title_logo.visible = false
@@ -2371,6 +2572,7 @@ func _show_title_screen() -> void:
 	if old_version is Control: old_version.visible = false
 	title_panel.visible = true
 	if not _start_native_title_script():
+		_reset_story_interaction_state("title-fallback")
 		# Keep a visible fallback if this CSX build has no native Title function.
 		_load_title_assets()
 		if title_bg != null: title_bg.visible = true
@@ -2384,17 +2586,17 @@ func _show_title_screen() -> void:
 func _start_native_title_script() -> bool:
 	if vm == null or host == null or not vm.functions.has("Title"):
 		return false
-	if native_title_layer != null:
-		native_title_layer.visible = true
-	if native_title_canvas != null:
-		for old_child in native_title_canvas.get_children():
-			native_title_canvas.remove_child(old_child)
+	_reset_story_interaction_state("native-title")
+	if host_window_layer != null:
+		host_window_layer.visible = true
+	if host_window_canvas != null:
+		for old_child in host_window_canvas.get_children():
+			host_window_canvas.remove_child(old_child)
 			old_child.queue_free()
-	native_title_controls.clear()
+	host_sprite_controls.clear()
 	native_appreciation_mode = false
 	if title_panel != null:
 		title_panel.visible = true
-	host.command_queue.clear()
 	vm.ip = vm.functions["Title"]
 	vm.is_halted = false
 	vm.pending_call_args.clear()
@@ -2412,14 +2614,14 @@ func _start_native_title_script() -> bool:
 func _start_native_appreciation_script() -> bool:
 	if vm == null or host == null or not vm.functions.has("Appreciation"):
 		return false
-	if native_title_layer != null:
-		native_title_layer.visible = true
-	if native_title_canvas != null:
-		for old_child in native_title_canvas.get_children():
-			native_title_canvas.remove_child(old_child)
+	_reset_story_interaction_state("native-appreciation")
+	if host_window_layer != null:
+		host_window_layer.visible = true
+	if host_window_canvas != null:
+		for old_child in host_window_canvas.get_children():
+			host_window_canvas.remove_child(old_child)
 			old_child.queue_free()
-	native_title_controls.clear()
-	host.command_queue.clear()
+	host_sprite_controls.clear()
 	vm.ip = vm.functions["Appreciation"]
 	vm.is_halted = false
 	vm.pending_call_args.clear()
@@ -2445,7 +2647,7 @@ func _close_native_appreciation() -> void:
 func _process_native_title() -> void:
 	if vm == null or host == null:
 		return
-	_sync_native_title_canvas()
+	_sync_host_window_canvas()
 	if vm.is_halted:
 		if native_appreciation_mode:
 			_start_native_title_script()
@@ -2464,7 +2666,7 @@ func _process_native_title() -> void:
 			push_error("[AdvPlayer] Native screen stopped at 0x%X (%s): %s" % [vm.ip, " > ".join(frames), vm.last_error])
 			return
 		executed += 1
-	_sync_native_title_canvas()
+	_sync_host_window_canvas()
 	if vm.is_halted:
 		if native_appreciation_mode:
 			_start_native_title_script()
@@ -2489,41 +2691,97 @@ func _handle_native_title_return() -> void:
 			_start_native_title_script()
 
 
-func _sync_native_title_canvas() -> void:
-	if native_title_canvas == null or vm == null or vm.data_vars.size() <= 4:
-		return
+func _sync_host_window_canvas() -> bool:
+	if host_window_canvas == null or vm == null or vm.data_vars.size() <= 4:
+		_set_story_window_compositor_active(false)
+		return false
 	var viewport_size := get_viewport_rect().size
-	if viewport_size != native_title_last_viewport_size:
-		native_title_last_viewport_size = viewport_size
+	if viewport_size != host_window_last_viewport_size:
+		host_window_last_viewport_size = viewport_size
 		var scale_factor := minf(viewport_size.x / 800.0, viewport_size.y / 600.0)
-		native_title_canvas.scale = Vector2.ONE * scale_factor
-		native_title_canvas.position = (viewport_size - Vector2(800, 600) * scale_factor) * 0.5
-		native_title_canvas.size = Vector2(800, 600)
-	var window = vm.data_vars[4].get("value", null)
-	if not (window is CsxHostClass.HostWindow):
-		return
+		host_window_canvas.scale = Vector2.ONE * scale_factor
+		host_window_canvas.position = (viewport_size - Vector2(800, 600) * scale_factor) * 0.5
+		host_window_canvas.size = Vector2(800, 600)
+	var window_value: Variant = vm.data_vars[4].get("value", null)
+	if not (window_value is CsxHostClass.HostWindow):
+		_set_story_window_compositor_active(false)
+		return false
+	var window: CsxHostClass.HostWindow = window_value as CsxHostClass.HostWindow
 	var filter_title_depth := is_title_mode and not native_appreciation_mode
 	var seen: Dictionary = {}
-	_sync_native_sprite_children(window.root_sprites, native_title_canvas, seen, filter_title_depth)
+	_sync_host_sprite_children(window.root_sprites, host_window_canvas, seen, filter_title_depth)
+	var has_story_tree := not is_title_mode and not window.root_sprites.is_empty()
+	_set_story_window_compositor_active(has_story_tree)
+	if not is_title_mode:
+		host_window_layer.visible = has_story_tree
 	if window.focused_sprite != null:
-		var focused_wrapper: Control = native_title_controls.get(window.focused_sprite.get_instance_id(), null)
+		var focused_wrapper: Control = host_sprite_controls.get(window.focused_sprite.get_instance_id(), null)
 		if focused_wrapper != null:
 			var focused_button: TextureButton = focused_wrapper.get_node_or_null("NativeButton")
 			if focused_button != null and focused_button.is_visible_in_tree() and not focused_button.disabled and not focused_button.has_focus():
 				focused_button.grab_focus()
 	else:
 		var current_focus := get_viewport().gui_get_focus_owner()
-		if current_focus != null and native_title_canvas.is_ancestor_of(current_focus):
+		if current_focus != null and host_window_canvas.is_ancestor_of(current_focus):
 			current_focus.release_focus()
-	for instance_id in native_title_controls.keys():
+	for instance_id in host_sprite_controls.keys():
 		if not seen.has(instance_id):
-			var stale_node: Node = native_title_controls[instance_id]
+			var stale_node: Node = host_sprite_controls[instance_id]
 			if is_instance_valid(stale_node):
 				stale_node.queue_free()
-			native_title_controls.erase(instance_id)
+			host_sprite_controls.erase(instance_id)
+	return true
 
 
-func _get_native_cursor_position() -> Vector2i:
+func _set_story_window_compositor_active(active: bool) -> void:
+	var was_active := story_window_compositor_active
+	story_window_compositor_active = active
+	if active:
+		# Original CSX Story surfaces are rendered by the same HostWindow tree
+		# used for Title, Config, Save/Load and appreciation windows.
+		if dialogue_box != null:
+			dialogue_box.hide()
+		if indicator != null:
+			indicator.hide()
+		if bg_rect != null:
+			bg_rect.visible = not _host_window_has_viewport_surface()
+		return
+	if not was_active or is_title_mode:
+		return
+	if host_window_layer != null:
+		host_window_layer.hide()
+	if dialogue_box != null:
+		dialogue_box.show()
+	if indicator != null:
+		indicator.hide()
+	if bg_rect != null:
+		bg_rect.show()
+
+
+func _host_window_has_viewport_surface() -> bool:
+	if vm == null or vm.data_vars.size() <= 4:
+		return false
+	var window: Variant = vm.data_vars[4].get("value", null)
+	if not window is CsxHostClass.HostWindow:
+		return false
+	var viewport_size := Vector2(window.get_display_size())
+	for sprite: CsxHostClass.HostSprite in window.root_sprites:
+		if _host_sprite_covers_viewport(sprite, viewport_size):
+			return true
+	return false
+
+
+func _host_sprite_covers_viewport(sprite: CsxHostClass.HostSprite, viewport_size: Vector2) -> bool:
+	var render_size := Vector2(sprite.get_render_size())
+	if sprite.is_visible and render_size.x >= viewport_size.x and render_size.y >= viewport_size.y:
+		return true
+	for child: CsxHostClass.HostSprite in sprite.children:
+		if _host_sprite_covers_viewport(child, viewport_size):
+			return true
+	return false
+
+
+func _get_host_cursor_position() -> Vector2i:
 	var viewport_size := get_viewport_rect().size
 	var scale_factor := minf(viewport_size.x / 800.0, viewport_size.y / 600.0)
 	if scale_factor <= 0.0:
@@ -2533,7 +2791,7 @@ func _get_native_cursor_position() -> Vector2i:
 	return Vector2i(roundi(logical_position.x), roundi(logical_position.y))
 
 
-func _sync_native_sprite_children(sprites: Array, parent: Control, seen: Dictionary, filter_title_depth: bool) -> void:
+func _sync_host_sprite_children(sprites: Array, parent: Control, seen: Dictionary, filter_title_depth: bool) -> void:
 	# Keep painting and mouse hit order consistent with the source depth.
 	var ordered := sprites.duplicate()
 	ordered.sort_custom(func(a: CsxHostClass.HostSprite, b: CsxHostClass.HostSprite): return a.z_order > b.z_order)
@@ -2543,24 +2801,24 @@ func _sync_native_sprite_children(sprites: Array, parent: Control, seen: Diction
 			next_index = child.get_index()
 			break
 	for sprite: CsxHostClass.HostSprite in ordered:
-		_sync_native_title_sprite(sprite, parent, seen, filter_title_depth)
-		var wrapper: Control = native_title_controls[sprite.get_instance_id()]
+		_sync_host_sprite(sprite, parent, seen, filter_title_depth)
+		var wrapper: Control = host_sprite_controls[sprite.get_instance_id()]
 		if wrapper.get_index() != next_index:
 			parent.move_child(wrapper, next_index)
 		next_index += 1
 
 
-func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control, seen: Dictionary, filter_title_depth: bool) -> void:
+func _sync_host_sprite(sprite: CsxHostClass.HostSprite, parent: Control, seen: Dictionary, filter_title_depth: bool) -> void:
 	var instance_id := sprite.get_instance_id()
 	seen[instance_id] = true
-	var wrapper: Control = native_title_controls.get(instance_id, null)
+	var wrapper: Control = host_sprite_controls.get(instance_id, null)
 	if wrapper == null or not is_instance_valid(wrapper):
 		wrapper = Control.new()
 		wrapper.name = "NativeSprite_%d" % sprite.sprite_id
 		wrapper.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		wrapper.z_as_relative = true
 		wrapper.set_meta("native_sprite_id", instance_id)
-		native_title_controls[instance_id] = wrapper
+		host_sprite_controls[instance_id] = wrapper
 		var back_color_rect := ColorRect.new()
 		back_color_rect.name = "NativeBackColor"
 		back_color_rect.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -2574,8 +2832,8 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 			button.stretch_mode = TextureButton.STRETCH_SCALE
 			button.focus_mode = Control.FOCUS_ALL
 			button.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-			button.pressed.connect(_on_native_title_button_pressed.bind(sprite))
-			button.focus_entered.connect(_on_native_title_focus_entered.bind(sprite))
+			button.pressed.connect(_on_host_sprite_button_pressed.bind(sprite))
+			button.focus_entered.connect(_on_host_sprite_focus_entered.bind(sprite))
 			wrapper.add_child(button)
 		elif sprite.fields.get("control_type", "") == "scroll_bar":
 			var scroll_control: Range = VSlider.new() if str(sprite.fields.get("scroll_axis", "horz")) == "vert" else HSlider.new()
@@ -2594,11 +2852,16 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 			texture_rect.stretch_mode = TextureRect.STRETCH_SCALE
 			texture_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			wrapper.add_child(texture_rect)
-		var label := Label.new()
+		var label := RichTextLabel.new()
 		label.name = "NativeText"
 		label.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 		label.add_theme_font_size_override("font_size", 13)
-		label.add_theme_color_override("font_color", Color(1, 1, 1, 0.86))
+		label.add_theme_font_size_override("normal_font_size", 13)
+		label.add_theme_color_override("default_color", Color(1, 1, 1, 0.86))
+		label.bbcode_enabled = false
+		label.scroll_active = false
+		label.fit_content = false
+		label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 		label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		wrapper.add_child(label)
@@ -2647,7 +2910,7 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 		and sprite.size.y >= 500 and sprite.size.y <= 600
 		and _native_sprite_contains_button(sprite, "ID_QSAVE")
 	)
-	if parent == native_title_canvas and ((filter_title_depth and sprite.z_order < 52000 and not is_native_form_page and not is_native_confirm_window and not is_native_save_load_window)
+	if parent == host_window_canvas and ((filter_title_depth and sprite.z_order < 52000 and not is_native_form_page and not is_native_confirm_window and not is_native_save_load_window)
 			or (native_appreciation_mode and sprite.z_order >= 52000)):
 		wrapper.visible = false
 	else:
@@ -2859,15 +3122,34 @@ func _sync_native_title_sprite(sprite: CsxHostClass.HostSprite, parent: Control,
 			track.texture_margin_bottom = 2.0
 			native_scroll.add_theme_stylebox_override("slider", track)
 			native_scroll.set_meta("native_scroll_track", column_texture)
-	var native_label: Label = wrapper.get_node_or_null("NativeText")
+	var native_label: RichTextLabel = wrapper.get_node_or_null("NativeText")
 	if native_label != null:
-		native_label.text = display_text
+		if sprite.is_message_sprite:
+			native_label.bbcode_enabled = true
+			native_label.text = _format_host_message(sprite, native_label)
+			native_label.visible_characters = sprite.message_visible_count
+		else:
+			native_label.bbcode_enabled = false
+			native_label.text = display_text
+			native_label.visible_characters = -1
 		native_label.visible = not display_text.is_empty()
 		if not sprite.message_style.is_empty() and native_label.get_meta("message_style", {}) != sprite.message_style:
-			_apply_native_text_style(native_label, sprite.message_style)
+			_apply_native_text_style(native_label, sprite.message_style, sprite.font_bordering)
 			native_label.set_meta("message_style", sprite.message_style)
 	if not sprite.children.is_empty():
-		_sync_native_sprite_children(sprite.children, wrapper, seen, filter_title_depth)
+		_sync_host_sprite_children(sprite.children, wrapper, seen, filter_title_depth)
+
+
+func _format_host_message(sprite: CsxHostClass.HostSprite, label: RichTextLabel) -> String:
+	var content := sprite.display_text().replace("[", "[lb]").replace("]", "[rb]")
+	if sprite.message_pending and sprite.message_fade_ms > 0:
+		if label.custom_effects.is_empty():
+			label.install_effect(NativeMessageFadeEffect.new())
+		return "[native_fade interval_ms=%d fade_ms=%d]%s[/native_fade]" % [sprite.message_char_speed_ms, sprite.message_fade_ms, content]
+	if not label.custom_effects.is_empty():
+		label.custom_effects = []
+		label.reload_effects()
+	return content
 
 
 func _native_sprite_contains_button(sprite: CsxHostClass.HostSprite, button_id: String) -> bool:
@@ -2945,7 +3227,17 @@ func _on_native_scroll_changed(value: float, sprite: CsxHostClass.HostSprite) ->
 	sprite.fields["scroll_%s_pos" % axis] = int(round(value))
 	var id := str(sprite.fields.get("form_item_id", ""))
 	if host != null and not id.is_empty():
-		host.push_command(id, id, 4, int(round(value)))
+		host.push_command(
+			id,
+			id,
+			4,
+			int(round(value)),
+			null,
+			sprite.get_root_window(),
+			host.current_command_scope(),
+			"scroll:%s:%s" % [id, axis],
+			sprite
+		)
 
 
 func _apply_native_text_style(label: Control, style: Dictionary, font_bordering: bool = false) -> void:
@@ -2990,7 +3282,7 @@ func _native_text_color(attributes: Dictionary) -> Color:
 	return color
 
 
-func _on_native_title_focus_entered(sprite: CsxHostClass.HostSprite) -> void:
+func _on_host_sprite_focus_entered(sprite: CsxHostClass.HostSprite) -> void:
 	if vm == null or vm.data_vars.size() <= 4:
 		return
 	var window: Variant = vm.data_vars[4].get("value", null)
@@ -2998,7 +3290,7 @@ func _on_native_title_focus_entered(sprite: CsxHostClass.HostSprite) -> void:
 		window.focus_sprite(sprite)
 
 
-func _on_native_title_button_pressed(sprite: CsxHostClass.HostSprite) -> void:
+func _on_host_sprite_button_pressed(sprite: CsxHostClass.HostSprite) -> void:
 	if not sprite.is_enabled:
 		return
 	if is_config_open or is_save_load_open or is_appreciation_open or confirm_panel.visible:
@@ -3019,7 +3311,34 @@ func _on_native_title_button_pressed(sprite: CsxHostClass.HostSprite) -> void:
 		# IsButtonChecked() branches and pushed artwork stay in sync.
 		if not sprite.full_btn_id.is_empty() or sprite.btn_id in ["ID_REC", "ID_PAGE1", "ID_PAGE2", "ID_TAG"]:
 			sprite.set_button_state("pushed")
-		host.push_command(sprite.btn_id, sprite.full_btn_id)
+		var cursor_position := _host_sprite_logical_center(sprite)
+		if last_host_input_was_pointer:
+			# Read the physical pointer directly. CsxHost.get_cursor_position()
+			# may still hold a one-shot point from the previous CSX GetCommand.
+			cursor_position = _get_host_cursor_position()
+		host.push_command(
+			sprite.btn_id,
+			sprite.full_btn_id,
+			0,
+			0,
+			cursor_position,
+			sprite.get_root_window(),
+			host.current_command_scope(),
+			"",
+			sprite
+		)
+
+
+func _host_sprite_logical_center(sprite: CsxHostClass.HostSprite) -> Vector2i:
+	var wrapper: Control = host_sprite_controls.get(sprite.get_instance_id(), null)
+	if wrapper != null and is_instance_valid(wrapper) and wrapper.is_inside_tree() and host_window_canvas != null:
+		var canvas_transform := host_window_canvas.get_global_transform_with_canvas()
+		var sprite_transform := wrapper.get_global_transform_with_canvas()
+		var canvas_position := canvas_transform.affine_inverse() * (sprite_transform * (wrapper.size * 0.5))
+		return Vector2i(roundi(canvas_position.x), roundi(canvas_position.y))
+	var render_size := Vector2(sprite.get_render_size())
+	var sprite_position := Vector2(sprite.position - sprite.rev_center) + render_size * 0.5
+	return Vector2i(roundi(sprite_position.x), roundi(sprite_position.y))
 
 
 func _apply_dialogue_skin() -> void:
@@ -3480,6 +3799,73 @@ func _notification(what: int) -> void:
 		_persist_player_settings()
 
 
+func _exit_tree() -> void:
+	_shutdown_runtime_session()
+
+
+func _shutdown_runtime_session() -> void:
+	if runtime_shutdown:
+		return
+	runtime_shutdown = true
+	# This player owns a terminal runtime session. Stop the scheduler before
+	# releasing the host graph so no queued input or deferred frame can resume it.
+	is_running = false
+	if vm != null:
+		vm.is_halted = true
+	if host != null:
+		host.is_waiting_input = false
+		host.yield_for_sprite_activation = false
+		host.advance_requested = false
+		host.skip_input_pending = false
+	if not mei_movie_open_path.is_empty() or mei_movie_codec != null:
+		_close_native_mei_movie()
+	if host != null:
+		host.cursor_position_provider = Callable()
+		_disconnect_host_callback("dialogue_updated", "_on_dialogue_updated")
+		_disconnect_host_callback("message_output", "_on_message_output")
+		_disconnect_host_callback("message_progress", "_on_message_progress")
+		_disconnect_host_callback("bg_updated", "_on_bg_updated")
+		_disconnect_host_callback("movie_requested", "_on_movie_requested")
+		_disconnect_host_callback("movie_loop_portion_requested", "_on_movie_loop_portion_requested")
+		_disconnect_host_callback("movie_open_requested", "_on_movie_open_requested")
+		_disconnect_host_callback("movie_stop_requested", "_on_movie_stop_requested")
+		_disconnect_host_callback("movie_close_requested", "_on_movie_close_requested")
+		_disconnect_host_callback("movie_seek_requested", "_on_movie_seek_requested")
+		_disconnect_host_callback("tone_filter_updated", "_on_tone_filter_updated")
+	# HostWindow wrappers own textures and button signal closures. Remove the
+	# renderer's strong references before tearing down the CSX HostSprite graph.
+	if host_window_canvas != null and is_instance_valid(host_window_canvas):
+		for child in host_window_canvas.get_children():
+			host_window_canvas.remove_child(child)
+			child.queue_free()
+	host_sprite_controls.clear()
+	adv_temp_controls.clear()
+	adv_temp_materials.clear()
+	for bustup: TextureRect in bustup_rects:
+		if is_instance_valid(bustup):
+			bustup.texture = null
+	bustup_rects.clear()
+	if adv_cg_rect != null and is_instance_valid(adv_cg_rect):
+		adv_cg_rect.texture = null
+	if bg_rect != null and is_instance_valid(bg_rect):
+		bg_rect.texture = null
+	if vm != null and vm.has_method("shutdown_runtime"):
+		vm.call("shutdown_runtime")
+	if host != null and host.has_method("shutdown_runtime"):
+		host.call("shutdown_runtime")
+	vm = null
+	host = null
+
+
+func _disconnect_host_callback(signal_name: String, method_name: String) -> void:
+	if host == null:
+		return
+	var source_signal := Signal(host, StringName(signal_name))
+	var callback := Callable(self, method_name)
+	if source_signal.is_connected(callback):
+		source_signal.disconnect(callback)
+
+
 func _open_config_modal() -> void:
 	if config_panel == null:
 		return
@@ -3500,13 +3886,14 @@ func _close_config_modal() -> void:
 func _exit_title_to_game() -> void:
 	is_title_mode = false
 	title_panel.visible = false
-	if native_title_layer != null:
-		native_title_layer.visible = false
+	if host_window_layer != null:
+		host_window_layer.visible = false
 	print("[AdvPlayer] Exited Title Screen.")
 
 
 func _on_title_start_game() -> void:
 	_exit_title_to_game()
+	_reset_story_interaction_state("new-game")
 	if vm != null and vm.functions.has("ScenarioLoop"):
 		vm.ip = vm.functions["ScenarioLoop"]
 		vm.is_halted = false
@@ -4015,11 +4402,12 @@ func get_slot_info(slot: int) -> Dictionary:
 				if bookmark is CsxVMReader.CsxInstance and bookmark.get_field("fSave") != 0 and not save_path.ends_with(".bak"):
 					info["comment"] = str(bookmark.get_field("comment"))
 
-	var thumb_path := host.get_thumbnail_path(_slot_save_path(slot).get_file())
-	if not save_path.ends_with(".bak") and FileAccess.file_exists(thumb_path):
-		var img := Image.load_from_file(thumb_path)
-		if img != null:
-			info["thumbnail"] = ImageTexture.create_from_image(img)
+	if not save_path.ends_with(".bak"):
+		var thumbnail_result: Dictionary = host.load_thumbnail_image(_slot_save_path(slot).get_file())
+		if thumbnail_result.get("ok", false):
+			var thumbnail_image: Image = thumbnail_result.get("image")
+			if thumbnail_image != null:
+				info["thumbnail"] = ImageTexture.create_from_image(thumbnail_image)
 	return info
 
 
@@ -4193,6 +4581,7 @@ func load_from_slot(slot: int) -> bool:
 		return false
 
 	print("[AdvPlayer] Successfully loaded from Slot %02d" % slot)
+	_reset_story_interaction_state("load-slot:%d" % slot)
 	_close_save_load_modal()
 
 	var sc_obj = vm.globals_by_name.get("scObj", null)
@@ -4741,7 +5130,7 @@ func _open_appreciation_modal() -> void:
 	is_appreciation_open = true
 	appreciation_panel.visible = true
 	if is_title_mode:
-		native_title_layer.hide()
+		host_window_layer.hide()
 
 	bgm_vol_slider.set_value_no_signal(settings_state.audio_volume("bgm") * 100.0)
 	bgm_vol_label.text = "%d%%" % roundi(bgm_vol_slider.value)
@@ -4760,7 +5149,7 @@ func _close_appreciation_modal() -> void:
 			if vm.is_halted or restore_music:
 				_start_native_title_script()
 			else:
-				native_title_layer.show()
+				host_window_layer.show()
 		elif restore_music:
 			host.play_bgm("BGM07.mio")
 	current_bgm_track_index = -1
@@ -4917,17 +5306,24 @@ func _create_recollect_card(scene_info: Dictionary, heroine_idx: int) -> Control
 func _start_scene_recollection(scenario_name: String, heroine_idx: int) -> void:
 	if vm == null or not vm.functions.has("ScenarioLoop"):
 		return
+	if vm.functions.has("EnterRecollectMode"):
+		var enter_result: Dictionary = vm.call_function_sync("EnterRecollectMode", [], 1000)
+		if not _is_csx_operation_success(enter_result):
+			var enter_error := _csx_operation_error(enter_result)
+			push_error("[AdvPlayer] EnterRecollectMode failed: %s" % enter_error)
+			if message_label != null:
+				message_label.text = "[color=#e06c75]无法进入场景回想: %s[/color]" % enter_error
+			return
 
 	is_recollect_mode = true
+	recollect_exit_failed = false
 	recollect_return_tag = heroine_idx
 
 	_exit_title_to_game()
 	_close_appreciation_modal()
 
-	if vm.functions.has("EnterRecollectMode"):
-		vm.call_function_sync("EnterRecollectMode", [], 1000)
-
 	if host != null:
+		_reset_story_interaction_state("recollection-start")
 		host.stop_bgm()
 	if bg_rect != null:
 		bg_rect.texture = null
@@ -4954,13 +5350,22 @@ func _start_scene_recollection(scenario_name: String, heroine_idx: int) -> void:
 func _end_scene_recollection() -> void:
 	if not is_recollect_mode:
 		return
+	if vm != null and vm.functions.has("LeaveRecollectMode"):
+		var leave_result: Dictionary = vm.call_function_sync("LeaveRecollectMode", [], 1000)
+		if not _is_csx_operation_success(leave_result):
+			recollect_exit_failed = true
+			is_running = false
+			var leave_error := _csx_operation_error(leave_result)
+			push_error("[AdvPlayer] LeaveRecollectMode failed: %s" % leave_error)
+			if message_label != null:
+				message_label.text = "[color=#e06c75]退出场景回想失败: %s[/color]" % leave_error
+			return
 	is_recollect_mode = false
+	recollect_exit_failed = false
 	is_running = false
 
-	if vm != null and vm.functions.has("LeaveRecollectMode"):
-		vm.call_function_sync("LeaveRecollectMode", [], 1000)
-
 	if host != null:
+		_reset_story_interaction_state("recollection-end")
 		host.stop_bgm()
 	if bg_rect != null:
 		bg_rect.texture = null

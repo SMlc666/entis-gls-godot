@@ -13,19 +13,26 @@ signal message_output(sprite: HostSprite)
 signal message_progress(sprite: HostSprite)
 signal bg_updated(bg_name: String, texture: Texture2D)
 signal bgm_updated(bgm_name: String)
-signal movie_requested(movie_file: String, play_mode: int, rewind_frame: int, end_frame: int, repeat: bool, sprite_id: int)
-signal movie_loop_portion_requested(rewind_frame: int, end_frame: int, repeat: bool, sprite_id: int)
+signal movie_requested(movie_file: String, play_mode: int, rewind_frame: int, end_frame: int, repeat: bool, movie_instance_id: int)
+signal movie_loop_portion_requested(rewind_frame: int, end_frame: int, repeat: bool, movie_instance_id: int)
 signal movie_open_requested(movie_file: String)
 signal movie_stop_requested
 signal movie_close_requested
 signal movie_seek_requested(frame_index: int)
-signal choices_updated(choices: Array)
 signal tone_filter_updated(filter_type: String)
 
 const NoaArchiveReader = preload("res://scripts/noa_archive.gd")
 const EriDecoder = preload("res://scripts/eri_decoder.gd")
 const MioDecoder = preload("res://scripts/mio_decoder.gd")
 const Cp932Decoder = preload("res://scripts/cp932_decoder.gd")
+const BoundedFileReader = preload("res://scripts/bounded_file_reader.gd")
+const HostCommandQueueClass = preload("res://scripts/host_command_queue.gd")
+const MAX_INPUT_CONFIG_BYTES := 4 * 1024 * 1024
+const MAX_TONE_FILTER_BYTES := 32 * 1024 * 1024
+const MAX_THUMBNAIL_BYTES := 16 * 1024 * 1024
+const MAX_THUMBNAIL_DIMENSION := 4096
+const MAX_THUMBNAIL_PIXELS := 4 * 1024 * 1024
+const DEFAULT_CACHED_MEDIA_BUDGET_BYTES := 192 * 1024 * 1024
 
 var game_dir: String = ""
 var archives: Dictionary = {} # canonical archive path -> NoaArchiveReader
@@ -40,6 +47,7 @@ var image_cache_bytes := 0
 var sound_cache_bytes := 0
 var image_cache_budget_bytes := 256 * 1024 * 1024
 var sound_cache_budget_bytes := 64 * 1024 * 1024
+var cached_media_budget_bytes := DEFAULT_CACHED_MEDIA_BUDGET_BYTES
 
 var audio_players: Dictionary = {}
 var audio_right_players: Dictionary = {}
@@ -86,14 +94,21 @@ var movie_total_frames: int = 0
 var movie_stored_frame_count: int = 0
 var movie_total_time_ms: int = 0
 var movie_opened: bool = false
-var active_movie_sprite_id: int = -1
-var current_choices: Array[String] = []
-var is_waiting_choice: bool = false
-var selected_choice: int = -1
+var active_movie_instance_id: int = -1
+var movie_owner_instance_id: int = -1
+var movie_owner_ref: WeakRef = null
+var movie_resource_request_instance_id: int = -1
+var movie_play_result: bool = false
+var movie_seek_result: bool = false
 var current_tone_filter: String = "NORMAL"
-var command_queue: Array = []
+var _command_events = HostCommandQueueClass.new()
+var command_overflow_count: int = 0
+var command_overflow_reported: bool = false
 var virtual_time_ms: int = 1000
 var cursor_position_provider: Callable = Callable()
+var command_cursor_override: Vector2i = Vector2i.ZERO
+var command_cursor_override_valid: bool = false
+var command_cursor_override_expires_usec: int = 0
 var active_input_filter_ref: WeakRef = null
 var active_sprites: Dictionary[int, WeakRef] = {}
 var active_messages: Dictionary[int, WeakRef] = {}
@@ -102,8 +117,13 @@ var active_animated_sprites: Dictionary[int, WeakRef] = {}
 # EntisGLS initializes AnimationFlag to animeFull (Normal | Action | Effect).
 var sprite_animation_flags: int = 7
 var active_volume_envelopes: Dictionary[int, WeakRef] = {}
+var runtime_sprites: Dictionary[int, WeakRef] = {}
+var runtime_resources: Dictionary[int, WeakRef] = {}
+var runtime_windows: Dictionary[int, WeakRef] = {}
+var runtime_services: Dictionary[int, WeakRef] = {}
+var runtime_shutdown: bool = false
 var save_dir: String = "user://saves"
-const SAVE_SCHEMA_VERSION := 2
+const SAVE_SCHEMA_VERSION := 6
 const MAX_SAVE_DOCUMENT_BYTES := 16 * 1024 * 1024
 const MAX_SERIALIZATION_DEPTH := 256
 
@@ -147,6 +167,8 @@ class HostResource extends RefCounted:
 		unpacked_size = p_size
 		payload_offset = p_offset
 		host = p_host
+		if host != null and not host.runtime_shutdown:
+			host.runtime_resources[get_instance_id()] = weakref(self)
 
 	func load_sound(filename: String, _threshold: int = -1) -> int:
 		name = filename
@@ -464,6 +486,8 @@ class HostInputFilter extends RefCounted:
 
 	func _init(p_host: CsxHost) -> void:
 		host = p_host
+		if host != null and not host.runtime_shutdown:
+			host.runtime_services[get_instance_id()] = weakref(self)
 
 	func load_input_filter(filename: String) -> int:
 		filter_file = filename
@@ -473,13 +497,20 @@ class HostInputFilter extends RefCounted:
 		var input_bytes := PackedByteArray()
 		var path := host.game_dir.path_join("system").path_join(filename)
 		if FileAccess.file_exists(path):
-			input_bytes = FileAccess.get_file_as_bytes(path)
+			var file_result: Dictionary = BoundedFileReader.read(path, MAX_INPUT_CONFIG_BYTES)
+			if not file_result.get("ok", false):
+				host.last_error = str(file_result.get("error", "无法读取输入过滤器。"))
+				return 0
+			input_bytes = file_result.get("data", PackedByteArray())
 		else:
 			var entry := host.read_vfs_entry("system/".path_join(filename))
 			if not entry.get("ok", false):
 				entry = host.read_vfs_entry(filename)
 			if entry.get("ok", false):
 				input_bytes = entry.get("data", PackedByteArray())
+		if input_bytes.size() > MAX_INPUT_CONFIG_BYTES:
+			host.last_error = "输入过滤器超过读取上限 (%d bytes)。" % MAX_INPUT_CONFIG_BYTES
+			return 0
 		if input_bytes.is_empty():
 			return 0
 		var parser := XMLParser.new()
@@ -550,8 +581,6 @@ class HostInputFilter extends RefCounted:
 		return false
 
 	func _is_button_pressed(key: int) -> bool:
-		if not is_open:
-			return false
 		var mappings: Array = input_assignments.get("button:%d" % key, [])
 		for assignment: Dictionary in mappings:
 			if _is_assignment_pressed(assignment):
@@ -654,6 +683,8 @@ class HostToneFilter extends RefCounted:
 
 	func _init(p_host: CsxHost) -> void:
 		host = p_host
+		if host != null and not host.runtime_shutdown:
+			host.runtime_services[get_instance_id()] = weakref(self)
 		red_table = _tone_table(0, 0)
 		green_table = _tone_table(0, 0)
 		blue_table = _tone_table(0, 0)
@@ -722,13 +753,20 @@ class HostToneFilter extends RefCounted:
 		var data := PackedByteArray()
 		var local_path := host.game_dir.path_join("system").path_join(filename)
 		if FileAccess.file_exists(local_path):
-			data = FileAccess.get_file_as_bytes(local_path)
+			var file_result: Dictionary = BoundedFileReader.read(local_path, MAX_TONE_FILTER_BYTES)
+			if not file_result.get("ok", false):
+				host.last_error = str(file_result.get("error", "无法读取 tone filter。"))
+				return 0
+			data = file_result.get("data", PackedByteArray())
 		else:
 			var entry := host.read_vfs_entry("system/".path_join(filename))
 			if not entry.get("ok", false):
 				entry = host.read_vfs_entry(filename)
 			if entry.get("ok", false):
 				data = entry.get("data", PackedByteArray())
+		if data.size() > MAX_TONE_FILTER_BYTES:
+			host.last_error = "Tone filter 超过读取上限 (%d bytes)。" % MAX_TONE_FILTER_BYTES
+			return 0
 		if data.size() < 80 or data.slice(0, 8) != PackedByteArray([69, 110, 116, 105, 115, 26, 0, 0]):
 			return 1
 		var tables := {"red": PackedByteArray(), "green": PackedByteArray(), "blue": PackedByteArray(), "alpha": PackedByteArray()}
@@ -830,6 +868,8 @@ class HostResourceManager extends RefCounted:
 
 	func _init(p_host: CsxHost) -> void:
 		host = p_host
+		if host != null and not host.runtime_shutdown:
+			host.runtime_services[get_instance_id()] = weakref(self)
 
 	func load_resource(archive_filename: String) -> int:
 		loaded_archive_name = archive_filename
@@ -1052,6 +1092,24 @@ class HostResourceManager extends RefCounted:
 		var tex := ImageTexture.create_from_image(final_img)
 		return {"image": final_img, "texture": tex}
 
+	func _skin_image_descriptor(spec: String) -> Dictionary:
+		if spec.is_empty():
+			return {}
+		var resource_id := spec
+		var crop := [0, 0, 0, 0]
+		var rect_pos := spec.find(":RECT(")
+		if rect_pos != -1:
+			resource_id = spec.substr(0, rect_pos)
+			var parts := spec.substr(rect_pos + 6).trim_suffix(")").split(",")
+			if parts.size() >= 4:
+				crop = [int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])]
+		var src_file: String = skin_resources.get(resource_id, "")
+		if src_file.is_empty():
+			src_file = resource_id.trim_prefix("ID_")
+			if not src_file.get_extension().to_lower() == "eri":
+				src_file += ".eri"
+		return {"filename": src_file, "archive_hint": loaded_archive_name, "crop": crop}
+
 	func create_form_page(parent_sprite: HostSprite, page_id: String) -> int:
 		if parent_sprite == null or not skin_pages.has(page_id):
 			return 0
@@ -1085,6 +1143,12 @@ class HostResourceManager extends RefCounted:
 
 			var style_id: String = btn.get("style", "")
 			var style: Dictionary = skin_styles.get(style_id, {})
+			btn_spr.button_image_sources = {
+				"normal": _skin_image_descriptor(str(style.get("normal", ""))),
+				"focus": _skin_image_descriptor(str(style.get("focus", ""))),
+				"pushed": _skin_image_descriptor(str(style.get("pushed", ""))),
+				"disabled": _skin_image_descriptor(str(style.get("disabled", "")))
+			}
 
 			var normal_info := _resolve_skin_image(style.get("normal", ""))
 			if not normal_info.is_empty():
@@ -1204,6 +1268,7 @@ class HostSprite extends RefCounted:
 	var back_color: int = 0
 	var fill_back_color: bool = true
 	var animation_frames: Array[Image] = []
+	var animation_frame_sizes: Array[Vector2i] = []
 	var animation_sequence: Array[int] = []
 	var animation_total_time_ms: int = 0
 	var animation_loop_count: int = 0
@@ -1215,6 +1280,7 @@ class HostSprite extends RefCounted:
 	var animation_rewind_sequence: int = 0
 	var animation_view_frame: int = -1
 	var tone_filter: HostToneFilter = null
+	var button_image_sources: Dictionary = {}
 	var is_activating: bool = false
 	var activation_duration_ms: float = 0.0
 	var activation_elapsed_ms: float = 0.0
@@ -1224,7 +1290,19 @@ class HostSprite extends RefCounted:
 	var activation_fade_enabled: bool = false
 	var activation_action_type: int = 0
 	var activation_durations: Array[float] = []
-	var children: Array[HostSprite] = []
+	var children: Array = []
+	var _parent_sprite_ref: WeakRef = null
+	var parent_sprite: HostSprite:
+		get:
+			return _parent_sprite_ref.get_ref() as HostSprite if _parent_sprite_ref != null else null
+		set(value):
+			_parent_sprite_ref = weakref(value) if value != null else null
+	var _root_window_ref: WeakRef = null
+	var root_window: Variant:
+		get:
+			return _root_window_ref.get_ref() if _root_window_ref != null else null
+		set(value):
+			_root_window_ref = weakref(value) if value != null else null
 	var form_resources: HostResourceManager
 	var text_content: String = ""
 	var message_style: Dictionary = {}
@@ -1253,6 +1331,24 @@ class HostSprite extends RefCounted:
 	func _init(p_id: int = 0, p_host: CsxHost = null) -> void:
 		sprite_id = p_id
 		host = p_host
+		if host != null and not host.runtime_shutdown:
+			host.runtime_sprites[get_instance_id()] = weakref(self)
+
+	func _release_owned_movie() -> void:
+		if host == null or host.movie_owner_instance_id != get_instance_id():
+			return
+		host.movie_resource_request_instance_id = get_instance_id()
+		host.emit_signal("movie_stop_requested")
+		host.emit_signal("movie_close_requested")
+		host.is_movie_playing = false
+		host.movie_opened = false
+		host.active_movie_instance_id = -1
+		host.movie_owner_instance_id = -1
+		host.movie_owner_ref = null
+		host.movie_current_frame = -1
+		host.movie_total_frames = 0
+		host.movie_stored_frame_count = 0
+		host.movie_total_time_ms = 0
 
 	func set_button_state(p_state: String) -> void:
 		btn_state = p_state
@@ -1377,6 +1473,9 @@ class HostSprite extends RefCounted:
 				image = res["image"]
 				texture = res["texture"]
 				animation_frames = res.get("frames", [image]).duplicate()
+				animation_frame_sizes.clear()
+				for frame: Image in animation_frames:
+					animation_frame_sizes.append(Vector2i(frame.get_size()))
 				animation_sequence = res.get("frame_sequence", []).duplicate()
 				animation_total_time_ms = int(res.get("total_time_ms", 0))
 				if animation_sequence.is_empty():
@@ -1403,6 +1502,9 @@ class HostSprite extends RefCounted:
 				texture = res.texture
 				size = Vector2i(image.get_width(), image.get_height())
 				animation_frames = res.image_frames.duplicate()
+				animation_frame_sizes.clear()
+				for frame: Image in animation_frames:
+					animation_frame_sizes.append(Vector2i(frame.get_size()))
 				animation_sequence = res.image_frame_sequence.duplicate()
 				animation_total_time_ms = res.image_total_time_ms
 				if animation_sequence.is_empty():
@@ -1848,8 +1950,32 @@ class HostSprite extends RefCounted:
 		var rect_size := Vector2(absf(second_corner.x - first_corner.x), absf(second_corner.y - first_corner.y))
 		return Rect2(rect_position, rect_size)
 
+	func get_root_window() -> Variant:
+		if root_window != null:
+			return root_window
+		var ancestor := parent_sprite
+		while ancestor != null:
+			if ancestor.root_window != null:
+				return ancestor.root_window
+			ancestor = ancestor.parent_sprite
+		return null
+
 	func add_sprite(z: int, child: Variant) -> void:
-		if child is HostSprite:
+		if child is HostSprite and child != self:
+			var ancestor: HostSprite = self
+			while ancestor != null:
+				if ancestor == child:
+					return
+				ancestor = ancestor.parent_sprite
+			if child.parent_sprite != null and child.parent_sprite != self:
+				if child.host != null:
+					child.host.flush_sprite_commands(child.get_instance_id())
+				child.parent_sprite.children.erase(child)
+			if child.root_window != null:
+				if child.host != null:
+					child.host.flush_sprite_commands(child.get_instance_id())
+				child.root_window.root_sprites.erase(child)
+				child.root_window = null
 			child.z_order = z
 			var item_id: String = child.btn_id if not child.btn_id.is_empty() else str(child.fields.get("form_item_id", ""))
 			var enabled_items: Dictionary = fields.get("item_enabled_status", {})
@@ -1857,6 +1983,7 @@ class HostSprite extends RefCounted:
 				child.is_enabled = bool(enabled_items[item_id])
 			if not children.has(child):
 				children.append(child)
+			child.parent_sprite = self
 			child.refresh_command_ids()
 
 	func find_form_item(item_id: String) -> HostSprite:
@@ -1972,14 +2099,22 @@ class HostSprite extends RefCounted:
 
 	func detach_sprite(child: Variant) -> void:
 		if child is HostSprite:
+			if host != null:
+				host.flush_sprite_commands(child.get_instance_id())
 			children.erase(child)
+			if child.parent_sprite == self:
+				child.parent_sprite = null
 
 	func detach_all_sprites() -> void:
+		for child: HostSprite in children:
+			if child.parent_sprite == self:
+				child.parent_sprite = null
 		children.clear()
 
 	func release() -> int:
 		is_activating = false
 		if host != null:
+			host.flush_sprite_commands(get_instance_id())
 			host.active_sprites.erase(get_instance_id())
 		is_visible = false
 		attached_resource = null
@@ -2198,68 +2333,102 @@ class HostSprite extends RefCounted:
 
 	func open_movie(p_filename: String) -> int:
 		filename = p_filename
+		var movie_instance_id := get_instance_id()
 		if host != null and not filename.is_empty():
+			if host.movie_owner_instance_id != -1 and host.movie_owner_instance_id != movie_instance_id:
+				var prior_owner: Variant = host.movie_owner_ref.get_ref() if host.movie_owner_ref != null else null
+				if prior_owner != null:
+					return 0
+				# Recover if a script dropped its last MovieSprite reference before
+				# the media owner was explicitly closed.
+				host.movie_resource_request_instance_id = host.movie_owner_instance_id
+				host.emit_signal("movie_close_requested")
+				host.movie_owner_instance_id = -1
+				host.movie_owner_ref = null
+			host.movie_resource_request_instance_id = movie_instance_id
 			host.movie_opened = false
 			host.emit_signal("movie_open_requested", filename)
-			return 1 if host.movie_opened else 0
+			if host.movie_opened:
+				host.movie_owner_instance_id = movie_instance_id
+				host.movie_owner_ref = weakref(self)
+				return 1
+			host.movie_owner_instance_id = -1
+			return 0
 		return 0
 
 	func play_movie(mode: int = 0) -> int:
-		if host == null or filename.is_empty():
+		if host == null or filename.is_empty() or host.movie_owner_instance_id != get_instance_id():
 			return 0
-		host.emit_signal("movie_requested", filename, mode, movie_rewind_frame, movie_end_frame, movie_repeat, sprite_id)
-		return 1
+		host.movie_play_result = false
+		host.emit_signal("movie_requested", filename, mode, movie_rewind_frame, movie_end_frame, movie_repeat, get_instance_id())
+		return 1 if host.movie_play_result else 0
 
 	func set_rewinding_portion(rewind_pos: int = -1, end_pos: int = -1, repeat: bool = false) -> int:
 		if rewind_pos < -1 or end_pos < -1:
 			return 0
 		var resolved_start := 0 if rewind_pos < 0 else rewind_pos
-		var resolved_end := host.movie_total_frames if end_pos < 0 and host != null and host.movie_total_frames > 0 else end_pos
-		var stored_count := host.movie_stored_frame_count if host != null and host.movie_stored_frame_count > 0 else (host.movie_total_frames if host != null else 0)
+		var movie_instance_id := get_instance_id()
+		var owns_open_movie := host != null and host.movie_owner_instance_id == movie_instance_id
+		var total_frames := host.movie_total_frames if owns_open_movie else 0
+		var resolved_end := total_frames if end_pos < 0 and total_frames > 0 else end_pos
+		var stored_count := host.movie_stored_frame_count if owns_open_movie else 0
 		if resolved_end >= 0 and (
 			resolved_start >= resolved_end
-			or (host != null and host.movie_total_frames > 0 and resolved_end > host.movie_total_frames)
+			or (total_frames > 0 and resolved_end > total_frames)
 			or (stored_count > 0 and resolved_start >= stored_count)
 		):
 			return 0
 		movie_rewind_frame = rewind_pos
 		movie_end_frame = end_pos
 		movie_repeat = repeat
-		if host != null and host.is_movie_playing and host.active_movie_sprite_id == sprite_id:
-			host.emit_signal("movie_loop_portion_requested", rewind_pos, end_pos, repeat, sprite_id)
+		if host != null and host.is_movie_playing and host.active_movie_instance_id == movie_instance_id:
+			host.emit_signal("movie_loop_portion_requested", rewind_pos, end_pos, repeat, movie_instance_id)
 		return 1
 
 	func is_movie_playing() -> int:
-		if host != null and host.is_movie_playing:
+		if host != null and host.is_movie_playing and host.active_movie_instance_id == get_instance_id():
 			return 1
 		return 0
 
 	func seek_frame(frame_index: int) -> int:
-		if host == null or host.movie_total_frames <= 0 or frame_index < 0 or frame_index >= host.movie_total_frames:
+		if host == null or host.movie_owner_instance_id != get_instance_id() or host.movie_total_frames <= 0 or frame_index < 0 or frame_index >= host.movie_total_frames:
 			return 0
+		host.movie_resource_request_instance_id = get_instance_id()
+		host.movie_seek_result = false
 		host.emit_signal("movie_seek_requested", frame_index)
-		return 1
+		return 1 if host.movie_seek_result else 0
 
 	func get_current_frame() -> int:
-		return host.movie_current_frame if host != null else -1
+		return host.movie_current_frame if host != null and host.movie_owner_instance_id == get_instance_id() else -1
 
 	func get_total_frame() -> int:
-		return host.movie_total_frames if host != null else 0
+		return host.movie_total_frames if host != null and host.movie_owner_instance_id == get_instance_id() else 0
 
 	func get_total_time() -> int:
-		return host.movie_total_time_ms if host != null else 0
+		return host.movie_total_time_ms if host != null and host.movie_owner_instance_id == get_instance_id() else 0
 
 	func stop_movie() -> int:
-		if host != null:
+		if host != null and host.movie_owner_instance_id == get_instance_id():
+			host.movie_resource_request_instance_id = get_instance_id()
 			host.is_movie_playing = false
 			host.emit_signal("movie_stop_requested")
 		return 0
 
 	func close_movie() -> int:
+		if host != null and host.movie_owner_instance_id != get_instance_id():
+			return 0
 		stop_movie()
 		if host != null:
+			host.movie_resource_request_instance_id = get_instance_id()
 			host.emit_signal("movie_close_requested")
 			host.movie_opened = false
+			host.active_movie_instance_id = -1
+			host.movie_owner_instance_id = -1
+			host.movie_owner_ref = null
+			host.movie_total_frames = 0
+			host.movie_stored_frame_count = 0
+			host.movie_total_time_ms = 0
+			host.movie_current_frame = -1
 		filename = ""
 		return 0
 
@@ -2275,18 +2444,32 @@ class HostWindow extends RefCounted:
 
 	func _init(p_host: CsxHost) -> void:
 		host = p_host
+		if host != null and not host.runtime_shutdown:
+			host.runtime_windows[get_instance_id()] = weakref(self)
 
 	func add_sprite(z: int, spr: Variant) -> void:
 		if spr is HostSprite:
+			if spr.root_window != null and spr.root_window != self and spr.host != null:
+				spr.host.flush_sprite_commands(spr.get_instance_id())
+			if spr.parent_sprite != null:
+				spr.parent_sprite.children.erase(spr)
+				spr.parent_sprite = null
+			if spr.root_window != null and spr.root_window != self:
+				spr.root_window.root_sprites.erase(spr)
 			spr.z_order = z
 			if not root_sprites.has(spr):
 				root_sprites.append(spr)
+			spr.root_window = self
 
 	func detach_sprite(spr: Variant) -> void:
 		if spr is HostSprite:
+			if host != null:
+				host.flush_sprite_commands(spr.get_instance_id())
 			if _contains_focused_sprite(spr):
 				set_focus("")
 			root_sprites.erase(spr)
+			if spr.root_window == self:
+				spr.root_window = null
 
 	func _contains_focused_sprite(sprite: HostSprite) -> bool:
 		if sprite == focused_sprite:
@@ -2297,6 +2480,11 @@ class HostWindow extends RefCounted:
 		return false
 
 	func detach_all_sprites() -> void:
+		if host != null:
+			host.flush_window_commands(get_instance_id())
+		for sprite: HostSprite in root_sprites:
+			if sprite.root_window == self:
+				sprite.root_window = null
 		root_sprites.clear()
 		set_focus("")
 
@@ -2434,12 +2622,17 @@ class HostWindow extends RefCounted:
 	func flush_command_queue(_flag: int = -1) -> int:
 		# This queue contains complete UI commands already received by Godot,
 		# not raw OS input waiting to be sampled. Dropping it here races clicks
-		# against the original CSX poll/flush loop. Screen transitions clear it.
+		# against the original CSX poll/flush loop. Runtime page transitions use
+		# begin_command_scope(); this API is kept separate until its original
+		# Entis semantics are confirmed against the native runtime.
 		return 0
 
 	func get_command(p_cmd: Variant = null, _p1: int = 0, _p2: int = 0, _p3: int = 0) -> int:
-		if host != null and host.command_queue.size() > 0:
-			var event = host.command_queue.pop_front()
+		if host != null:
+			var event: Dictionary = host.pop_command_for_window(get_instance_id())
+			if event.is_empty():
+				return 0
+			host.clear_command_cursor_override()
 			var cmd_id: String = ""
 			var full_id: String = ""
 			var notification: int = 0
@@ -2449,9 +2642,9 @@ class HostWindow extends RefCounted:
 				full_id = event.get("full_id", cmd_id)
 				notification = int(event.get("notification", event.get("command", 0)))
 				parameter = int(event.get("parameter", 0))
-			elif event is String:
-				cmd_id = event
-				full_id = cmd_id
+				var event_cursor: Variant = event.get("cursor_position", null)
+				if event_cursor is Vector2i or event_cursor is Vector2:
+					host.set_command_cursor_override(event_cursor)
 			if p_cmd != null:
 				if p_cmd.has_method("set_field"):
 					p_cmd.set_field("strID", cmd_id)
@@ -2468,26 +2661,34 @@ class HostWindow extends RefCounted:
 
 
 class HostFile extends RefCounted:
+	const MODE_READ := 0
+	const MODE_WRITE := 1
+	const MODE_READ_WRITE := 2
 	var host: CsxHost = null
+	var vm: RefCounted = null
 	var current_path: String = ""
 	var current_mode: int = 0
 	var is_open: bool = false
 
-	func _init(p_host: CsxHost) -> void:
+	func _init(p_host: CsxHost, p_vm: RefCounted = null) -> void:
 		host = p_host
+		vm = p_vm
+		if host != null and not host.runtime_shutdown:
+			host.runtime_services[get_instance_id()] = weakref(self)
 
 	func open(path: String, mode: int = 2) -> int:
+		is_open = false
+		current_path = ""
+		if mode not in [MODE_READ, MODE_WRITE, MODE_READ_WRITE]:
+			return 1
+		if host == null or path.is_empty():
+			return 1
+		if mode in [MODE_READ, MODE_READ_WRITE] and not host.is_file_existing(path):
+			return 1
 		current_path = path
 		current_mode = mode
-		if host != null:
-			if mode == 2:
-				if not host.is_file_existing(path):
-					is_open = false
-					return 1
-			is_open = true
-			return 0
-		is_open = false
-		return 1
+		is_open = true
+		return 0
 
 	func close() -> int:
 		is_open = false
@@ -2495,21 +2696,21 @@ class HostFile extends RefCounted:
 		return 0
 
 	func save_object(obj: Variant) -> int:
-		if not is_open or host == null or current_path.is_empty():
+		if not is_open or current_mode == MODE_READ or host == null or current_path.is_empty():
 			return 1
 		var ok: bool = host.save_object_file(current_path, obj)
 		return 0 if ok else 1
 
 	func load_object(obj: Variant) -> int:
-		if not is_open or host == null or current_path.is_empty():
+		if not is_open or current_mode == MODE_WRITE or host == null or current_path.is_empty():
 			return 1
-		var ok: bool = host.load_object_file(current_path, obj)
+		var ok: bool = host.load_object_file(current_path, obj, vm)
 		return 0 if ok else 1
 
 	func save_thumbnail_image(spr: Variant, w: int = 120, h: int = 90) -> int:
-		if host != null and not current_path.is_empty():
-			host.save_thumbnail(current_path, spr, w, h)
-		return 0
+		if not is_open or current_mode == MODE_READ or host == null or current_path.is_empty():
+			return 1
+		return 0 if host.save_thumbnail(current_path, spr, w, h) else 1
 
 	func is_existing(path: String) -> int:
 		if host != null:
@@ -2520,12 +2721,34 @@ class HostFile extends RefCounted:
 		return 0
 
 	func output_log_text(path: String, text: String) -> int:
-		if host != null:
-			var sp := host.get_save_path(path)
-			var f := FileAccess.open(sp, FileAccess.WRITE_READ)
-			if f != null:
-				f.seek_end()
-				f.store_line(text)
+		if not is_open or current_mode == MODE_READ or host == null:
+			return 1
+		var sp := host.get_save_path(path)
+		var absolute_path := ProjectSettings.globalize_path(sp)
+		var directory := absolute_path.get_base_dir()
+		if not DirAccess.dir_exists_absolute(directory):
+			var directory_error := DirAccess.make_dir_recursive_absolute(directory)
+			if directory_error != OK:
+				host.last_error = "无法创建日志目录: %s (%s)" % [directory, error_string(directory_error)]
+				return 1
+		if not FileAccess.file_exists(sp):
+			var created := FileAccess.open(sp, FileAccess.WRITE)
+			if created == null:
+				host.last_error = "无法创建日志文件: %s (%s)" % [sp, error_string(FileAccess.get_open_error())]
+				return 1
+			created.close()
+		var f := FileAccess.open(sp, FileAccess.READ_WRITE)
+		if f == null:
+			host.last_error = "无法打开日志文件: %s (%s)" % [sp, error_string(FileAccess.get_open_error())]
+			return 1
+		f.seek_end()
+		f.store_line(text)
+		f.flush()
+		var write_error := f.get_error()
+		f.close()
+		if write_error != OK:
+			host.last_error = "日志写入失败: %s (%s)" % [sp, error_string(write_error)]
+			return 1
 		return 0
 
 
@@ -2616,13 +2839,113 @@ func advance_audio_envelopes(delta: float) -> void:
 			resource.advance_volume_envelope(delta * 1000.0)
 
 
-func push_command(cmd: String, full_id: String = "", notification: int = 0, parameter: int = 0) -> void:
-	command_queue.append({
+func begin_command_scope(context_id: String) -> int:
+	if runtime_shutdown:
+		return -1
+	var scope := _command_events.begin_scope(context_id)
+	clear_command_cursor_override()
+	command_overflow_reported = false
+	return scope
+
+
+func pending_command_count() -> int:
+	return _command_events.pending_count
+
+
+func current_command_scope() -> int:
+	return _command_events.scope_generation
+
+
+func has_pending_commands() -> bool:
+	return _command_events.pending_count > 0
+
+
+func has_pending_commands_for_window(window_id: int) -> bool:
+	return not _command_events.peek_for_window(window_id, _command_events.scope_generation).is_empty()
+
+
+func peek_command_for_window(window_id: int) -> Dictionary:
+	return _command_events.peek_for_window(window_id, _command_events.scope_generation)
+
+
+func peek_last_command_for_window(window_id: int) -> Dictionary:
+	return _command_events.peek_last_for_window(window_id, _command_events.scope_generation)
+
+
+func pending_commands_snapshot() -> Array[Dictionary]:
+	return _command_events.snapshot(_command_events.scope_generation)
+
+
+func pop_command_for_window(window_id: int) -> Dictionary:
+	return _command_events.pop_for_window(window_id, _command_events.scope_generation)
+
+
+func flush_window_commands(window_id: int) -> int:
+	return _command_events.flush_window(window_id, _command_events.scope_generation)
+
+
+func flush_sprite_commands(sprite_id: int) -> int:
+	return _command_events.flush_source_sprite(sprite_id, _command_events.scope_generation)
+
+
+func push_command(
+	cmd: String,
+	full_id: String = "",
+	notification: int = 0,
+	parameter: int = 0,
+	cursor_pos: Variant = null,
+	source_window: Variant = null,
+	expected_scope: int = -1,
+	coalesce_key: String = "",
+	source_sprite: Variant = null
+) -> bool:
+	if runtime_shutdown:
+		return false
+	var command := {
 		"id": cmd,
 		"full_id": full_id if not full_id.is_empty() else cmd,
 		"notification": notification,
 		"parameter": parameter,
-	})
+	}
+	if cursor_pos is Vector2i or cursor_pos is Vector2:
+		command["cursor_position"] = Vector2i(roundi(cursor_pos.x), roundi(cursor_pos.y))
+	var source_window_id := -1
+	if source_window is HostWindow:
+		if source_window.host != self or not runtime_windows.has(source_window.get_instance_id()):
+			return false
+		source_window_id = source_window.get_instance_id()
+	if source_sprite is HostSprite:
+		command["source_sprite_id"] = source_sprite.get_instance_id()
+	if coalesce_key.is_empty() and notification == 4:
+		coalesce_key = "notification:%s" % cmd
+	var scope: int = _command_events.scope_generation if expected_scope < 0 else expected_scope
+	var sequence := _command_events.enqueue(command, scope, source_window_id, coalesce_key)
+	if sequence < 0:
+		command_overflow_count += 1
+		if not command_overflow_reported:
+			command_overflow_reported = true
+			push_warning("Host command queue rejected an event (capacity=%d, scope=%d, rejected=%d)" % [_command_events.capacity, _command_events.scope_generation, command_overflow_count])
+		return false
+	# The Story scheduler pauses the VM after an empty advance-button poll.
+	# A native window command must resume the original CSX command loop without
+	# synthesizing an advance tick; the script decides what that command means.
+	if is_waiting_input:
+		is_waiting_input = false
+	return true
+
+
+func set_command_cursor_override(position: Variant) -> void:
+	if not (position is Vector2i or position is Vector2):
+		clear_command_cursor_override()
+		return
+	command_cursor_override = Vector2i(roundi(position.x), roundi(position.y))
+	command_cursor_override_valid = true
+	command_cursor_override_expires_usec = Time.get_ticks_usec() + 500000
+
+
+func clear_command_cursor_override() -> void:
+	command_cursor_override_valid = false
+	command_cursor_override_expires_usec = 0
 
 
 func set_tone_filter(type_name: String) -> void:
@@ -2634,6 +2957,136 @@ func _init(p_game_dir: String = "") -> void:
 	game_dir = p_game_dir
 	if not game_dir.is_empty():
 		init_vfs()
+
+
+func shutdown_runtime() -> void:
+	if runtime_shutdown:
+		return
+	runtime_shutdown = true
+	if active_input_filter_ref != null:
+		var active_filter: Variant = active_input_filter_ref.get_ref()
+		if active_filter != null and active_filter.has_method("close_filter"):
+			active_filter.close_filter()
+	active_input_filter_ref = null
+	cursor_position_provider = Callable()
+	_command_events.shutdown()
+	clear_command_cursor_override()
+	movie_owner_ref = null
+	movie_owner_instance_id = -1
+	active_movie_instance_id = -1
+	is_movie_playing = false
+	for window_ref: WeakRef in runtime_windows.values():
+		var window: Variant = window_ref.get_ref()
+		if window is HostWindow:
+			window.detach_all_sprites()
+			window.focused_sprite = null
+			window.fields.clear()
+			window.host = null
+	for sprite_ref: WeakRef in runtime_sprites.values():
+		var sprite: Variant = sprite_ref.get_ref()
+		if not sprite is HostSprite:
+			continue
+		sprite.detach_all_sprites()
+		sprite.parent_sprite = null
+		sprite.root_window = null
+		sprite.release()
+		sprite.fields.clear()
+		sprite.sprite_parameters.clear()
+		sprite.message_style.clear()
+		sprite.activation_curves = [[], [], []]
+		sprite.activation_durations.clear()
+		sprite.animation_frames.clear()
+		sprite.animation_sequence.clear()
+		sprite.image = null
+		sprite.texture = null
+		sprite.alpha_image = null
+		sprite.alpha_texture = null
+		sprite.attached_resource = null
+		sprite.alpha_resource = null
+		sprite.tone_filter = null
+		sprite.form_resources = null
+		sprite.btn_normal_tex = null
+		sprite.btn_focus_tex = null
+		sprite.btn_pushed_tex = null
+		sprite.btn_disabled_tex = null
+		sprite.btn_normal_img = null
+		sprite.btn_focus_img = null
+		sprite.btn_pushed_img = null
+		sprite.btn_disabled_img = null
+		sprite.host = null
+	for resource_ref: WeakRef in runtime_resources.values():
+		var resource: Variant = resource_ref.get_ref()
+		if not resource is HostResource:
+			continue
+		resource.volume_envelope.clear()
+		resource.fields.clear()
+		resource.audio_stream = null
+		resource.image = null
+		resource.texture = null
+		resource.image_frames.clear()
+		resource.image_frame_sequence.clear()
+		resource.host = null
+	for service_ref: WeakRef in runtime_services.values():
+		var service: Variant = service_ref.get_ref()
+		if service is HostInputFilter:
+			service.close_filter()
+			service.host = null
+			service.window_ref = null
+			service.input_queue.clear()
+			service.input_assignments.clear()
+			service.joy_buttons.clear()
+			service.fields.clear()
+		elif service is HostToneFilter:
+			service.host = null
+			service.tone_texture = null
+			service.fields.clear()
+			service.red_table.clear()
+			service.green_table.clear()
+			service.blue_table.clear()
+			service.alpha_table.clear()
+		elif service is HostResourceManager:
+			service.host = null
+			service.resource_cache.clear()
+			service.skin_resources.clear()
+			service.skin_styles.clear()
+			service.skin_pages.clear()
+			service.fields.clear()
+		elif service is HostFile:
+			service.close()
+			service.host = null
+			service.vm = null
+	for player: Variant in [bgm_player, env_se_player, se_player, voice_player, system_player]:
+		if player is AudioStreamPlayer:
+			player.stop()
+			player.stream_paused = false
+			player.stream = null
+	for player_value: Variant in audio_players.values() + audio_right_players.values():
+		if player_value is AudioStreamPlayer:
+			player_value.stop()
+			player_value.stream_paused = false
+			player_value.stream = null
+	audio_players.clear()
+	audio_right_players.clear()
+	bgm_player = null
+	env_se_player = null
+	se_player = null
+	voice_player = null
+	system_player = null
+	active_sprites.clear()
+	active_messages.clear()
+	active_effect_sprites.clear()
+	active_animated_sprites.clear()
+	active_volume_envelopes.clear()
+	runtime_windows.clear()
+	runtime_services.clear()
+	runtime_sprites.clear()
+	runtime_resources.clear()
+	archives.clear()
+	vfs_index.clear()
+	vfs_conflicts.clear()
+	vfs_warned_conflicts.clear()
+	clear_resource_caches()
+	current_bg_texture = null
 
 
 func init_vfs() -> void:
@@ -2651,8 +3104,15 @@ func init_vfs() -> void:
 
 
 func get_or_open_archive(archive_filename: String) -> NoaArchiveReader:
-	var archive_file := archive_filename.replace("\\", "/").get_file()
-	var candidate_paths: Array[String] = [
+	var normalized_request := archive_filename.replace("\\", "/")
+	var archive_file := normalized_request.get_file()
+	var candidate_paths: Array[String] = []
+	# An explicitly supplied path is authoritative. Searching the standard
+	# basename fallbacks first can silently open a different archive with the
+	# same filename (for example game_dir/system/foo.noa instead of game_dir/foo.noa).
+	if normalized_request.is_absolute_path() or normalized_request.begins_with("res://") or normalized_request.begins_with("user://"):
+		candidate_paths.append(normalized_request)
+	candidate_paths.append_array([
 		game_dir.path_join("system").path_join(archive_file),
 		game_dir.path_join(archive_file),
 		"res://assets/system/".path_join(archive_file),
@@ -2660,9 +3120,10 @@ func get_or_open_archive(archive_filename: String) -> NoaArchiveReader:
 		"user://game/system/".path_join(archive_file),
 		"user://game/".path_join(archive_file),
 		"user://assets/system/".path_join(archive_file),
-		"user://assets/".path_join(archive_file),
-		archive_filename
-	]
+		"user://assets/".path_join(archive_file)
+	])
+	if not candidate_paths.has(normalized_request):
+		candidate_paths.append(normalized_request)
 	var found_path := ""
 	for path in candidate_paths:
 		if FileAccess.file_exists(path):
@@ -2672,7 +3133,9 @@ func get_or_open_archive(archive_filename: String) -> NoaArchiveReader:
 	if found_path.is_empty():
 		last_error = "未找到资源归档: %s" % archive_filename
 		return null
-	var canonical_path := ProjectSettings.globalize_path(found_path).simplify_path().to_lower()
+	# Keep filesystem identity case-sensitive. Virtual entry names are normalized
+	# separately; lowercasing a physical archive path aliases distinct Linux files.
+	var canonical_path := ProjectSettings.globalize_path(found_path).simplify_path()
 	if archives.has(canonical_path):
 		return archives[canonical_path]
 
@@ -2744,18 +3207,22 @@ func _vfs_cache_key(entry: Dictionary) -> String:
 
 
 func _archive_matches_hint(archive_path: String, archive_hint: String) -> bool:
-	var hint := archive_hint.replace("\\", "/").simplify_path().to_lower()
-	if hint.begins_with("res://") or hint.begins_with("user://"):
-		hint = ProjectSettings.globalize_path(hint).simplify_path().to_lower()
-	var canonical_archive := archive_path.replace("\\", "/").simplify_path().to_lower()
-	if hint.is_empty():
+	var normalized_hint := archive_hint.replace("\\", "/").simplify_path()
+	if normalized_hint.is_empty():
 		return false
-	if hint.contains("/"):
-		return canonical_archive == hint or canonical_archive.ends_with("/" + hint)
-	return canonical_archive.get_file() == hint.get_file()
+	var canonical_archive := archive_path.replace("\\", "/").simplify_path()
+	var is_physical_hint := normalized_hint.is_absolute_path() or normalized_hint.begins_with("res://") or normalized_hint.begins_with("user://") or FileAccess.file_exists(normalized_hint)
+	if is_physical_hint:
+		var physical_hint := ProjectSettings.globalize_path(normalized_hint).replace("\\", "/").simplify_path()
+		return canonical_archive == physical_hint
+	var folded_hint := normalized_hint.to_lower()
+	var folded_archive := canonical_archive.to_lower()
+	if folded_hint.contains("/"):
+		return folded_archive == folded_hint or folded_archive.ends_with("/" + folded_hint)
+	return folded_archive.get_file() == folded_hint.get_file()
 
 
-func find_vfs_entry(filename: String, archive_hint: String = "") -> Dictionary:
+func find_vfs_entries(filename: String, archive_hint: String = "") -> Array[Dictionary]:
 	var raw := _normalize_vfs_path(filename)
 	var base := raw.get_file()
 	var candidates: Array[String] = [
@@ -2766,21 +3233,34 @@ func find_vfs_entry(filename: String, archive_hint: String = "") -> Dictionary:
 		base + ".eri",
 		base + ".mio"
 	]
+	var matches: Array[Dictionary] = []
+	var seen: Dictionary = {}
+	var saw_candidate := false
 	for c in candidates:
 		if vfs_index.has(c):
+			saw_candidate = true
 			var entries: Array = vfs_index[c] if vfs_index[c] is Array else [vfs_index[c]]
-			if not archive_hint.is_empty():
-				for entry: Dictionary in entries:
-					if _archive_matches_hint(str(entry.get("archive", "")), archive_hint):
-						return entry
-				last_error = "VFS 归档提示与条目候选不匹配: %s (%s)" % [filename, archive_hint]
-				return {}
-			if entries.size() > 1 and not vfs_warned_conflicts.has(c):
+			if archive_hint.is_empty() and entries.size() > 1 and not vfs_warned_conflicts.has(c):
 				vfs_warned_conflicts[c] = true
 				push_warning("VFS 条目有多个归档候选，按加载顺序选择首项: %s；请查阅 get_vfs_conflict_report()" % c)
-			return entries[0] if not entries.is_empty() else {}
-	last_error = "VFS entry not found: %s" % filename
-	return {}
+			for entry: Dictionary in entries:
+				if not archive_hint.is_empty() and not _archive_matches_hint(str(entry.get("archive", "")), archive_hint):
+					continue
+				var cache_key := _vfs_cache_key(entry)
+				if not seen.has(cache_key):
+					seen[cache_key] = true
+					matches.append(entry)
+	if matches.is_empty():
+		if not archive_hint.is_empty() and saw_candidate:
+			last_error = "VFS 归档提示与条目候选不匹配: %s (%s)" % [filename, archive_hint]
+		else:
+			last_error = "VFS entry not found: %s" % filename
+	return matches
+
+
+func find_vfs_entry(filename: String, archive_hint: String = "") -> Dictionary:
+	var entries := find_vfs_entries(filename, archive_hint)
+	return entries[0] if not entries.is_empty() else {}
 
 
 func _read_vfs_candidate(entry: Dictionary) -> Dictionary:
@@ -2797,10 +3277,17 @@ func _read_vfs_candidate(entry: Dictionary) -> Dictionary:
 
 
 func read_vfs_entry(filename: String, archive_hint: String = "") -> Dictionary:
-	var entry := find_vfs_entry(filename, archive_hint)
-	if entry.is_empty():
+	var entries := find_vfs_entries(filename, archive_hint)
+	if entries.is_empty():
 		return {"ok": false, "error": last_error if not last_error.is_empty() else "VFS entry not found: %s" % filename}
-	return _read_vfs_candidate(entry)
+	var last_read_error := ""
+	for entry in entries:
+		var result := _read_vfs_candidate(entry)
+		if result.get("ok", false):
+			return result
+		last_read_error = str(result.get("error", "VFS candidate read failed"))
+	last_error = last_read_error
+	return {"ok": false, "error": last_read_error}
 
 
 func get_save_path(filename: String) -> String:
@@ -2808,8 +3295,38 @@ func get_save_path(filename: String) -> String:
 
 
 func get_thumbnail_path(filename: String) -> String:
-	var base := filename.get_file().get_basename()
-	return save_dir.path_join(base + ".png")
+	var save_path := get_save_path(filename)
+	var thumbnail_document := _read_thumbnail_document(save_path)
+	if thumbnail_document.get("ok", false):
+		var document: Dictionary = thumbnail_document["document"]
+		if document.has("thumbnail_file"):
+			var referenced_file := str(document.get("thumbnail_file", ""))
+			if referenced_file.is_empty():
+				return ""
+			if not _is_safe_thumbnail_filename(referenced_file):
+				return ""
+			return save_dir.path_join(referenced_file)
+	return _legacy_thumbnail_path(filename)
+
+
+func _legacy_thumbnail_path(filename: String) -> String:
+	return save_dir.path_join(filename.get_file().get_basename() + ".png")
+
+
+func _is_safe_thumbnail_filename(filename: String) -> bool:
+	return not filename.is_empty() and filename == filename.get_file() and not filename.contains("..") and filename.to_lower().ends_with(".png")
+
+
+func _read_thumbnail_document(save_path: String) -> Dictionary:
+	var save_data: Dictionary = BoundedFileReader.read(save_path, MAX_SAVE_DOCUMENT_BYTES)
+	if not save_data.get("ok", false):
+		return {}
+	var parser := JSON.new()
+	if parser.parse((save_data.get("data", PackedByteArray()) as PackedByteArray).get_string_from_utf8()) != OK:
+		return {}
+	if not parser.data is Dictionary or not parser.data.get("__yzk_save_document__", false):
+		return {}
+	return {"ok": true, "document": parser.data}
 
 
 func _is_story_save(path: String) -> bool:
@@ -2835,79 +3352,76 @@ func load_image(filename: String, archive_hint: String = "") -> Dictionary:
 	var norm := _normalize_vfs_path(filename)
 	if not norm.ends_with(".eri"):
 		norm += ".eri"
-	var entry := find_vfs_entry(norm, archive_hint)
-	if entry.is_empty():
+	var entries := find_vfs_entries(norm, archive_hint)
+	if entries.is_empty():
 		return {"ok": false, "error": last_error if not last_error.is_empty() else "无法在 VFS 中找到图片: %s" % norm}
-	var cache_key := _vfs_cache_key(entry)
-	if image_cache.has(cache_key):
-		var item: Dictionary = image_cache[cache_key]
-		image_cache_lru.erase(cache_key)
-		image_cache_lru.append(cache_key)
-		return item.duplicate()
-
-	var entry_res := _read_vfs_candidate(entry)
-	if not entry_res.get("ok", false):
-		return {"ok": false, "error": "无法在 VFS 中找到图片: %s" % norm}
-
-	var dec_res := EriDecoder.decode(entry_res["data"])
-	if not dec_res.get("ok", false):
-		return dec_res
-
-	var img: Image = dec_res["image"]
-	var tex := ImageTexture.create_from_image(img)
-	var frames: Array = dec_res.get("frames", [img])
-	var frame_sequence: Array = dec_res.get("frame_sequence", [])
-	var total_time_ms := int(dec_res.get("total_time_ms", 0))
-	var estimated_bytes := img.get_data().size() * maxi(2, frames.size())
-	var image_result := {"ok": true, "image": img, "texture": tex, "frames": frames, "frame_sequence": frame_sequence, "total_time_ms": total_time_ms}
-	if estimated_bytes <= image_cache_budget_bytes:
-		image_cache[cache_key] = image_result.merged({"bytes": estimated_bytes})
-		image_cache_lru.append(cache_key)
-		image_cache_bytes += estimated_bytes
-		_trim_image_cache()
-	return image_result
+	var candidate_error := ""
+	for entry in entries:
+		var cache_key := _vfs_cache_key(entry)
+		if image_cache.has(cache_key):
+			var item: Dictionary = image_cache[cache_key]
+			image_cache_lru.erase(cache_key)
+			image_cache_lru.append(cache_key)
+			return item.duplicate()
+		var entry_res := _read_vfs_candidate(entry)
+		if not entry_res.get("ok", false):
+			candidate_error = str(entry_res.get("error", "VFS image candidate read failed"))
+			continue
+		var dec_res := EriDecoder.decode(entry_res["data"])
+		if not dec_res.get("ok", false):
+			candidate_error = str(dec_res.get("error", "ERI image decode failed"))
+			continue
+		var img: Image = dec_res["image"]
+		var tex := ImageTexture.create_from_image(img)
+		var frames: Array = dec_res.get("frames", [img])
+		var frame_sequence: Array = dec_res.get("frame_sequence", [])
+		var total_time_ms := int(dec_res.get("total_time_ms", 0))
+		var estimated_bytes := img.get_data().size() * maxi(2, frames.size())
+		var image_result := {"ok": true, "image": img, "texture": tex, "frames": frames, "frame_sequence": frame_sequence, "total_time_ms": total_time_ms}
+		if estimated_bytes <= image_cache_budget_bytes:
+			image_cache[cache_key] = image_result.merged({"bytes": estimated_bytes})
+			image_cache_lru.append(cache_key)
+			image_cache_bytes += estimated_bytes
+			_trim_image_cache()
+			_trim_combined_media_cache()
+		return image_result
+	last_error = candidate_error
+	return {"ok": false, "error": candidate_error if not candidate_error.is_empty() else "无法在 VFS 中找到图片: %s" % norm}
 
 
 func load_sound(filename: String, archive_hint: String = "") -> Dictionary:
 	var norm := _normalize_vfs_path(filename)
 	if not norm.ends_with(".mio"):
 		norm += ".mio"
-	var entry := find_vfs_entry(norm, archive_hint)
-	if entry.is_empty():
+	var entries := find_vfs_entries(norm, archive_hint)
+	if entries.is_empty():
 		return {"ok": false, "error": last_error if not last_error.is_empty() else "无法在 VFS 中找到音频: %s" % norm}
-	var cache_key := _vfs_cache_key(entry)
-	if sound_cache.has(cache_key):
-		sound_cache_lru.erase(cache_key)
-		sound_cache_lru.append(cache_key)
-		return {
-			"ok": true,
-			"stream": sound_cache[cache_key],
-			"archive": str(entry.get("archive", "")),
-			"entry_name": str(entry.get("entry_name", norm)),
-		}
-
-	var entry_res := _read_vfs_candidate(entry)
-	if not entry_res.get("ok", false):
-		return {"ok": false, "error": "无法在 VFS 中找到音频: %s" % norm}
-
-	var dec_res := MioDecoder.decode(entry_res["data"])
-	if not dec_res.get("ok", false):
-		last_error = str(dec_res.get("error", "MIO 音频解码失败: %s" % norm))
-		return dec_res
-
-	var stream: AudioStreamWAV = dec_res["stream"]
-	var stream_bytes := stream.data.size()
-	if stream_bytes <= sound_cache_budget_bytes:
-		sound_cache[cache_key] = stream
-		sound_cache_lru.append(cache_key)
-		sound_cache_bytes += stream_bytes
-		_trim_sound_cache()
-	return {
-		"ok": true,
-		"stream": stream,
-		"archive": str(entry_res.get("archive", entry.get("archive", ""))),
-		"entry_name": str(entry_res.get("entry_name", norm)),
-	}
+	var candidate_error := ""
+	for entry in entries:
+		var cache_key := _vfs_cache_key(entry)
+		if sound_cache.has(cache_key):
+			sound_cache_lru.erase(cache_key)
+			sound_cache_lru.append(cache_key)
+			return {"ok": true, "stream": sound_cache[cache_key], "archive": str(entry.get("archive", "")), "entry_name": str(entry.get("entry_name", norm))}
+		var entry_res := _read_vfs_candidate(entry)
+		if not entry_res.get("ok", false):
+			candidate_error = str(entry_res.get("error", "VFS audio candidate read failed"))
+			continue
+		var dec_res := MioDecoder.decode(entry_res["data"])
+		if not dec_res.get("ok", false):
+			candidate_error = str(dec_res.get("error", "MIO 音频解码失败: %s" % norm))
+			continue
+		var stream: AudioStreamWAV = dec_res["stream"]
+		var stream_bytes := stream.data.size()
+		if stream_bytes <= sound_cache_budget_bytes:
+			sound_cache[cache_key] = stream
+			sound_cache_lru.append(cache_key)
+			sound_cache_bytes += stream_bytes
+			_trim_sound_cache()
+			_trim_combined_media_cache()
+		return {"ok": true, "stream": stream, "archive": str(entry_res.get("archive", entry.get("archive", ""))), "entry_name": str(entry_res.get("entry_name", norm))}
+	last_error = candidate_error
+	return {"ok": false, "error": candidate_error if not candidate_error.is_empty() else "无法在 VFS 中找到音频: %s" % norm}
 
 
 func _trim_image_cache() -> void:
@@ -2928,6 +3442,26 @@ func _trim_sound_cache() -> void:
 		var cached: AudioStreamWAV = sound_cache[oldest]
 		sound_cache_bytes = maxi(0, sound_cache_bytes - cached.data.size())
 		sound_cache.erase(oldest)
+
+
+func _trim_combined_media_cache() -> void:
+	# This budget covers only entries still owned by the decode caches. Sprites,
+	# players, GPU textures, and active decoder buffers can extend their lifetime.
+	while image_cache_bytes + sound_cache_bytes > cached_media_budget_bytes:
+		if image_cache_bytes >= sound_cache_bytes and not image_cache_lru.is_empty():
+			var oldest_image: String = image_cache_lru.pop_front()
+			if image_cache.has(oldest_image):
+				var cached_image: Dictionary = image_cache[oldest_image]
+				image_cache_bytes = maxi(0, image_cache_bytes - int(cached_image.get("bytes", 0)))
+				image_cache.erase(oldest_image)
+		elif not sound_cache_lru.is_empty():
+			var oldest_sound: String = sound_cache_lru.pop_front()
+			if sound_cache.has(oldest_sound):
+				var cached_sound: AudioStreamWAV = sound_cache[oldest_sound]
+				sound_cache_bytes = maxi(0, sound_cache_bytes - cached_sound.data.size())
+				sound_cache.erase(oldest_sound)
+		else:
+			break
 
 
 func clear_resource_caches() -> void:
@@ -2958,6 +3492,13 @@ func resolve_audio_channel(name: String, archive_hint: String = "") -> String:
 
 
 func get_cursor_position() -> Vector2i:
+	if command_cursor_override_valid:
+		var now_usec := Time.get_ticks_usec()
+		if now_usec <= command_cursor_override_expires_usec:
+			var position := command_cursor_override
+			clear_command_cursor_override()
+			return position
+		clear_command_cursor_override()
 	if cursor_position_provider.is_valid():
 		var value: Variant = cursor_position_provider.call()
 		if value is Vector2i:
@@ -3534,12 +4075,38 @@ func call_host_function(func_name: String, args: Array, vm: RefCounted) -> Dicti
 			return {"handled": false}
 
 
-func save_thumbnail(filename: String, spr: Variant, w: int = 120, h: int = 90) -> void:
-	var tp := get_thumbnail_path(filename)
-	var dir := tp.get_base_dir()
-	if not DirAccess.dir_exists_absolute(dir):
-		DirAccess.make_dir_recursive_absolute(dir)
+func save_thumbnail(filename: String, spr: Variant, w: int = 120, h: int = 90) -> bool:
+	var thumbnail_data := _make_thumbnail_png(spr, w, h)
+	if not thumbnail_data.get("ok", false):
+		last_error = str(thumbnail_data.get("error", "无法生成缩略图"))
+		return false
+	var save_path := get_save_path(filename)
+	var thumbnail_document := _read_thumbnail_document(save_path)
+	if not thumbnail_document.get("ok", false):
+		return _commit_thumbnail_data(filename, thumbnail_data, _legacy_thumbnail_path(filename))
+	var document: Dictionary = thumbnail_document["document"].duplicate(true)
+	var thumbnail_file := ""
+	var thumbnail_hash := ""
+	if thumbnail_data.get("has_image", false):
+		thumbnail_file = _new_thumbnail_filename(filename)
+		thumbnail_hash = _sha256_bytes(thumbnail_data.get("bytes", PackedByteArray()))
+		if thumbnail_hash.is_empty() or not _write_thumbnail_file(save_dir.path_join(thumbnail_file), thumbnail_data.get("bytes", PackedByteArray())):
+			last_error = "无法在提交缩略图元数据前写入图像。"
+			return false
+	document["thumbnail_file"] = thumbnail_file
+	document["thumbnail_sha256"] = thumbnail_hash
+	var encoded_document := JSON.stringify(document)
+	if encoded_document.to_utf8_buffer().size() > MAX_SAVE_DOCUMENT_BYTES or not write_save_atomically(save_path, encoded_document):
+		if not thumbnail_file.is_empty():
+			DirAccess.remove_absolute(ProjectSettings.globalize_path(save_dir.path_join(thumbnail_file)))
+		return false
+	_cleanup_unreferenced_thumbnails(filename)
+	return true
 
+
+func _make_thumbnail_png(spr: Variant, w: int, h: int) -> Dictionary:
+	if w <= 0 or h <= 0:
+		return {"ok": false, "error": "缩略图尺寸必须为正数。"}
 	var img: Image = null
 	if spr is HostSprite and spr.texture != null:
 		img = spr.texture.get_image()
@@ -3547,36 +4114,241 @@ func save_thumbnail(filename: String, spr: Variant, w: int = 120, h: int = 90) -
 		img = spr.image
 	elif current_bg_texture != null:
 		img = current_bg_texture.get_image()
+	if img == null:
+		return {"ok": true, "has_image": false, "bytes": PackedByteArray()}
+	var copy := img.duplicate()
+	copy.resize(w, h, Image.INTERPOLATE_BILINEAR)
+	var png_bytes: PackedByteArray = copy.save_png_to_buffer()
+	if png_bytes.is_empty():
+		return {"ok": false, "error": "Godot 无法编码存档缩略图。"}
+	return {"ok": true, "has_image": true, "bytes": png_bytes}
 
-	if img != null:
-		var copy := img.duplicate()
-		copy.resize(w, h, Image.INTERPOLATE_BILINEAR)
-		copy.save_png(tp)
-		print("[CSX Host] Saved thumbnail to: ", tp)
+
+func _commit_thumbnail_data(filename: String, thumbnail_data: Dictionary, output_path: String = "") -> bool:
+	var tp := output_path if not output_path.is_empty() else get_thumbnail_path(filename)
+	var dir := tp.get_base_dir()
+	if not DirAccess.dir_exists_absolute(dir):
+		if DirAccess.make_dir_recursive_absolute(dir) != OK:
+			return false
+	if not thumbnail_data.get("ok", false):
+		return false
+	if not thumbnail_data.get("has_image", false):
+		if FileAccess.file_exists(tp):
+			return DirAccess.remove_absolute(ProjectSettings.globalize_path(tp)) == OK
+		return true
+	var temporary_path := tp + ".tmp.png"
+	var backup_path := tp + ".bak.png"
+	if FileAccess.file_exists(temporary_path):
+		if DirAccess.remove_absolute(ProjectSettings.globalize_path(temporary_path)) != OK:
+			return false
+	if FileAccess.file_exists(backup_path):
+		if DirAccess.remove_absolute(ProjectSettings.globalize_path(backup_path)) != OK:
+			return false
+	var temporary := FileAccess.open(temporary_path, FileAccess.WRITE)
+	if temporary == null:
+		return false
+	temporary.store_buffer(thumbnail_data.get("bytes", PackedByteArray()))
+	temporary.flush()
+	var temporary_error := temporary.get_error()
+	temporary.close()
+	if temporary_error != OK:
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(temporary_path))
+		return false
+	var absolute_thumbnail := ProjectSettings.globalize_path(tp)
+	var absolute_temporary := ProjectSettings.globalize_path(temporary_path)
+	var absolute_backup := ProjectSettings.globalize_path(backup_path)
+	var had_previous := FileAccess.file_exists(tp)
+	if had_previous and DirAccess.rename_absolute(absolute_thumbnail, absolute_backup) != OK:
+		DirAccess.remove_absolute(absolute_temporary)
+		return false
+	if DirAccess.rename_absolute(absolute_temporary, absolute_thumbnail) != OK:
+		if had_previous:
+			DirAccess.rename_absolute(absolute_backup, absolute_thumbnail)
+		DirAccess.remove_absolute(absolute_temporary)
+		return false
+	if had_previous:
+		DirAccess.remove_absolute(absolute_backup)
+	print("[CSX Host] Saved thumbnail to: ", tp)
+	return true
 
 
+func _sha256_bytes(bytes: PackedByteArray) -> String:
+	var hasher := HashingContext.new()
+	if hasher.start(HashingContext.HASH_SHA256) != OK or hasher.update(bytes) != OK:
+		return ""
+	return hasher.finish().hex_encode()
+
+
+func _new_thumbnail_filename(filename: String) -> String:
+	var save_filename := get_save_path(filename).get_file()
+	return "%s.%d_%d.png" % [save_filename, Time.get_ticks_usec(), randi()]
+
+
+func _write_thumbnail_file(path: String, png_bytes: PackedByteArray) -> bool:
+	if path.is_empty() or png_bytes.is_empty() or not _is_safe_thumbnail_filename(path.get_file()):
+		return false
+	var directory := ProjectSettings.globalize_path(path.get_base_dir())
+	if not DirAccess.dir_exists_absolute(directory) and DirAccess.make_dir_recursive_absolute(directory) != OK:
+		return false
+	if FileAccess.file_exists(path):
+		return false
+	var temporary_path := path + ".tmp"
+	if FileAccess.file_exists(temporary_path) and DirAccess.remove_absolute(ProjectSettings.globalize_path(temporary_path)) != OK:
+		return false
+	var temporary := FileAccess.open(temporary_path, FileAccess.WRITE)
+	if temporary == null:
+		return false
+	temporary.store_buffer(png_bytes)
+	temporary.flush()
+	var write_error := temporary.get_error()
+	temporary.close()
+	if write_error != OK:
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(temporary_path))
+		return false
+	var verification: Dictionary = BoundedFileReader.read(temporary_path, MAX_THUMBNAIL_BYTES)
+	if not verification.get("ok", false) or _sha256_bytes(verification.get("data", PackedByteArray())) != _sha256_bytes(png_bytes):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(temporary_path))
+		return false
+	if DirAccess.rename_absolute(ProjectSettings.globalize_path(temporary_path), ProjectSettings.globalize_path(path)) != OK:
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(temporary_path))
+		return false
+	return true
+
+
+func _thumbnail_reference_for_save(save_path: String) -> String:
+	var thumbnail_document := _read_thumbnail_document(save_path)
+	if not thumbnail_document.get("ok", false):
+		return ""
+	var document: Dictionary = thumbnail_document["document"]
+	if document.has("thumbnail_file"):
+		var referenced_file := str(document.get("thumbnail_file", ""))
+		return referenced_file if _is_safe_thumbnail_filename(referenced_file) else ""
+	return save_path.get_file().trim_suffix(".bak").get_basename() + ".png"
+
+
+func _cleanup_unreferenced_thumbnails(filename: String) -> void:
+	var referenced := {}
+	for save_path in [get_save_path(filename), get_save_path(filename) + ".bak"]:
+		var reference := _thumbnail_reference_for_save(save_path)
+		if not reference.is_empty():
+			referenced[reference] = true
+	var directory := DirAccess.open(save_dir)
+	if directory == null:
+		return
+	var prefix := get_save_path(filename).get_file() + "."
+	for child_name in directory.get_files():
+		if not child_name.begins_with(prefix) or not child_name.to_lower().ends_with(".png"):
+			continue
+		if not referenced.has(child_name):
+			DirAccess.remove_absolute(ProjectSettings.globalize_path(save_dir.path_join(child_name)))
+
+
+func is_thumbnail_current(filename: String) -> bool:
+	var thumbnail_document := _read_thumbnail_document(get_save_path(filename))
+	if not thumbnail_document.get("ok", false):
+		return false
+	var document: Dictionary = thumbnail_document["document"]
+	var thumbnail_path := get_thumbnail_path(filename)
+	if not document.has("thumbnail_sha256"):
+		if thumbnail_path.is_empty():
+			return true
+		var legacy_read := _read_bounded_thumbnail(thumbnail_path)
+		return bool(legacy_read.get("ok", false)) # Legacy metadata has no hash; still bound the PNG before use.
+	var expected_hash := str(document.get("thumbnail_sha256", ""))
+	if expected_hash.is_empty():
+		return thumbnail_path.is_empty() or not FileAccess.file_exists(thumbnail_path)
+	var thumbnail_data := _read_bounded_thumbnail(thumbnail_path)
+	if not thumbnail_data.get("ok", false):
+		return false
+	return _sha256_bytes(thumbnail_data.get("data", PackedByteArray())) == expected_hash
+
+
+func load_thumbnail_image(filename: String) -> Dictionary:
+	var thumbnail_path := get_thumbnail_path(filename)
+	if thumbnail_path.is_empty():
+		return {"ok": false, "error": "存档没有缩略图。"}
+	var thumbnail_document := _read_thumbnail_document(get_save_path(filename))
+	if not thumbnail_document.get("ok", false):
+		return {"ok": false, "error": "缩略图清单无效。"}
+	var document: Dictionary = thumbnail_document["document"]
+	var thumbnail_data := _read_bounded_thumbnail(thumbnail_path)
+	if not thumbnail_data.get("ok", false):
+		return thumbnail_data
+	if document.has("thumbnail_sha256"):
+		var expected_hash := str(document.get("thumbnail_sha256", ""))
+		if expected_hash.is_empty() or _sha256_bytes(thumbnail_data["data"]) != expected_hash:
+			return {"ok": false, "error": "缩略图哈希与存档清单不匹配。"}
+	var image := Image.new()
+	var decode_error := image.load_png_from_buffer(thumbnail_data["data"])
+	if decode_error != OK:
+		return {"ok": false, "error": "PNG 缩略图解码失败: %s" % error_string(decode_error)}
+	if not _thumbnail_dimensions_allowed(image.get_width(), image.get_height()):
+		return {"ok": false, "error": "缩略图解码尺寸超过限制。"}
+	return {"ok": true, "image": image}
+
+
+func _read_bounded_thumbnail(path: String) -> Dictionary:
+	var read_result: Dictionary = BoundedFileReader.read(path, MAX_THUMBNAIL_BYTES)
+	if not read_result.get("ok", false):
+		return read_result
+	var bytes: PackedByteArray = read_result["data"]
+	if bytes.size() < 24 or bytes.slice(0, 8) != PackedByteArray([137, 80, 78, 71, 13, 10, 26, 10]):
+		return {"ok": false, "error": "缩略图不是有效 PNG 文件。"}
+	if _read_png_u32(bytes, 8) != 13 or bytes.slice(12, 16).get_string_from_ascii() != "IHDR":
+		return {"ok": false, "error": "PNG 缩略图缺少规范 IHDR 头。"}
+	var width := _read_png_u32(bytes, 16)
+	var height := _read_png_u32(bytes, 20)
+	if not _thumbnail_dimensions_allowed(width, height):
+		return {"ok": false, "error": "PNG 缩略图声明尺寸超过限制 (%d x %d)。" % [width, height]}
+	return {"ok": true, "data": bytes, "width": width, "height": height}
+
+
+func _read_png_u32(bytes: PackedByteArray, offset: int) -> int:
+	return (int(bytes[offset]) << 24) | (int(bytes[offset + 1]) << 16) | (int(bytes[offset + 2]) << 8) | int(bytes[offset + 3])
+
+
+func _thumbnail_dimensions_allowed(width: int, height: int) -> bool:
+	return width > 0 and height > 0 and width <= MAX_THUMBNAIL_DIMENSION and height <= MAX_THUMBNAIL_DIMENSION and width <= MAX_THUMBNAIL_PIXELS / height
 func save_object_file(filename: String, obj: Variant) -> bool:
 	var sp := get_save_path(filename)
+	var thumbnail_data := _make_thumbnail_png(null, 120, 90)
+	if not thumbnail_data.get("ok", false):
+		last_error = "无法生成存档缩略图: %s" % thumbnail_data.get("error", "未知错误")
+		return false
 	var serialization_state := {"error": "", "objects": [], "next_id": 1, "count": 0}
 	var s_data = _serialize_value_checked(obj, [], 0, serialization_state)
 	if not str(serialization_state.error).is_empty():
 		last_error = "存档对象无法序列化: %s" % serialization_state.error
 		push_error(last_error)
 		return false
+	var thumbnail_file := ""
+	var thumbnail_hash := ""
+	if thumbnail_data.get("has_image", false):
+		thumbnail_file = _new_thumbnail_filename(filename)
+		thumbnail_hash = _sha256_bytes(thumbnail_data.get("bytes", PackedByteArray()))
+		if thumbnail_hash.is_empty() or not _write_thumbnail_file(save_dir.path_join(thumbnail_file), thumbnail_data.get("bytes", PackedByteArray())):
+			last_error = "无法在提交存档前写入校验过的缩略图: %s" % thumbnail_file
+			push_error(last_error)
+			return false
 	var document := {
 		"__yzk_save_document__": true,
 		"schema_version": SAVE_SCHEMA_VERSION,
+		"thumbnail_file": thumbnail_file,
+		"thumbnail_sha256": thumbnail_hash,
 		"payload": s_data
 	}
 	var json_str := JSON.stringify(document)
 	if json_str.to_utf8_buffer().size() > MAX_SAVE_DOCUMENT_BYTES:
+		if not thumbnail_file.is_empty():
+			DirAccess.remove_absolute(ProjectSettings.globalize_path(save_dir.path_join(thumbnail_file)))
 		last_error = "存档超过大小上限 (%d bytes)。" % MAX_SAVE_DOCUMENT_BYTES
 		push_error(last_error)
 		return false
 	if not write_save_atomically(sp, json_str):
+		if not thumbnail_file.is_empty():
+			DirAccess.remove_absolute(ProjectSettings.globalize_path(save_dir.path_join(thumbnail_file)))
 		return false
-	if not FileAccess.file_exists(get_thumbnail_path(filename)):
-		save_thumbnail(filename, null, 120, 90)
+	_cleanup_unreferenced_thumbnails(filename)
 	print("[CSX Host] Successfully saved object to: ", sp)
 	return true
 
@@ -3652,19 +4424,309 @@ func write_save_atomically(save_path: String, content: String) -> bool:
 
 func load_object_file(filename: String, target_obj: Variant, vm: RefCounted = null) -> bool:
 	var sp := get_save_path(filename)
-	var snapshot := read_save_snapshot(sp)
-	if snapshot.is_empty() and not FileAccess.file_exists(sp):
+	var candidate_paths: Array[String] = [sp, sp + ".bak"]
+	if not FileAccess.file_exists(sp) and not FileAccess.file_exists(sp + ".bak"):
 		for directory in [game_dir, game_dir.path_join("system")]:
 			if not game_dir.is_empty():
-				snapshot = read_save_snapshot(directory.path_join(filename), false)
-				if not snapshot.is_empty():
-					break
-	if snapshot.is_empty():
-		last_error = "存档不存在或内容无效: %s" % sp
+				candidate_paths.append(directory.path_join(filename))
+	var saw_document := false
+	var failures: Array[String] = []
+	for candidate_path in candidate_paths:
+		var payload: Variant = _read_save_payload(candidate_path)
+		if payload == null:
+			continue
+		saw_document = true
+		if not _validate_save_graph(payload) or not _save_payload_matches_target(payload, target_obj):
+			failures.append("%s: 存档结构或目标对象类型无效" % candidate_path)
+			continue
+		# Build and validate an isolated object graph first. Resource loading and
+		# all fallible checks finish before the caller's root is mutated.
+		var restore_context := {
+			"objects": {},
+			"strict_resources": true,
+			"defer_runtime_bindings": true,
+			"error": ""
+		}
+		var staged: Variant = deserialize_into(null, payload, vm, restore_context)
+		if staged == null or not str(restore_context.get("error", "")).is_empty():
+			failures.append("%s: %s" % [candidate_path, str(restore_context.get("error", "未知反序列化错误"))])
+			continue
+		_rebind_staged_root(staged, target_obj)
+		if not _commit_staged_root(target_obj, staged):
+			failures.append("%s: 无法提交已验证的存档对象图" % candidate_path)
+			continue
+		_register_restored_runtime_bindings(target_obj, [])
+		print("[CSX Host] Successfully loaded object from: ", candidate_path)
+		return true
+	last_error = "存档%s: %s" % ["不存在或内容无效" if not saw_document else "恢复失败", "; ".join(failures) if not failures.is_empty() else sp]
+	return false
+
+
+func _commit_staged_root(target: Variant, staged: Variant) -> bool:
+	if target == null or staged == null:
 		return false
-	deserialize_into(target_obj, snapshot["payload"], vm, {"objects": {}})
-	print("[CSX Host] Successfully loaded object from: ", snapshot["path"])
-	return true
+	if target is Array and staged is Array:
+		var destination_array: Array = target
+		if destination_array.is_typed():
+			var required_builtin := destination_array.get_typed_builtin()
+			var required_class := destination_array.get_typed_class_name()
+			var required_script: Script = destination_array.get_typed_script()
+			for item: Variant in staged:
+				if required_builtin != TYPE_NIL and typeof(item) != required_builtin:
+					return false
+				if not required_class.is_empty() and (not item is Object or item.get_class() != required_class):
+					return false
+				if required_script != null and (not item is Object or item.get_script() != required_script):
+					return false
+		destination_array.clear()
+		for item in staged:
+			destination_array.append(item)
+		return true
+	if target is Dictionary and staged is Dictionary:
+		(target as Dictionary).clear()
+		for key in staged.keys():
+			(target as Dictionary)[key] = staged[key]
+		return true
+	if target is HostSprite and staged is HostSprite:
+		var destination := target as HostSprite
+		var source := staged as HostSprite
+		var runtime_host := destination.host if destination.host != null else source.host
+		destination.filename = source.filename
+		destination.archive_hint = source.archive_hint
+		destination.position = source.position
+		destination.rev_center = source.rev_center
+		destination.magnification = source.magnification
+		destination.rotation_degrees = source.rotation_degrees
+		destination.is_enabled = source.is_enabled
+		destination.blending = source.blending
+		destination.activation_curves = source.activation_curves
+		destination.sprite_parameters = source.sprite_parameters
+		destination.message_style = source.message_style
+		destination.size = source.size
+		destination.z_order = source.z_order
+		destination.is_visible = source.is_visible
+		destination.transparency = source.transparency
+		destination.back_color = source.back_color
+		destination.fill_back_color = source.fill_back_color
+		destination.movie_rewind_frame = source.movie_rewind_frame
+		destination.movie_end_frame = source.movie_end_frame
+		destination.movie_repeat = source.movie_repeat
+		destination.attached_resource = source.attached_resource
+		destination.alpha_resource = source.alpha_resource
+		destination.alpha_image = source.alpha_image
+		destination.alpha_texture = source.alpha_texture
+		destination.alpha_range = source.alpha_range
+		destination.animation_loop_count = source.animation_loop_count
+		destination.animation_elapsed_ms = source.animation_elapsed_ms
+		destination.animation_duration_ms = source.animation_duration_ms
+		destination.animation_begin_sequence = source.animation_begin_sequence
+		destination.animation_start_sequence = source.animation_start_sequence
+		destination.animation_turn_sequence = source.animation_turn_sequence
+		destination.animation_rewind_sequence = source.animation_rewind_sequence
+		destination.animation_view_frame = source.animation_view_frame
+		destination.is_activating = source.is_activating
+		destination.activation_duration_ms = source.activation_duration_ms
+		destination.activation_elapsed_ms = source.activation_elapsed_ms
+		destination.activation_start_alpha = source.activation_start_alpha
+		destination.activation_end_alpha = source.activation_end_alpha
+		destination.activation_target_alpha = source.activation_target_alpha
+		destination.activation_fade_enabled = source.activation_fade_enabled
+		destination.activation_action_type = source.activation_action_type
+		destination.activation_durations = source.activation_durations
+		destination.btn_id = source.btn_id
+		destination.full_btn_id = source.full_btn_id
+		destination.is_button = source.is_button
+		destination.btn_state = source.btn_state
+		destination.text_content = source.text_content
+		destination.message_char_speed_ms = source.message_char_speed_ms
+		destination.message_fade_ms = source.message_fade_ms
+		destination.message_elapsed_ms = source.message_elapsed_ms
+		destination.message_visible_count = source.message_visible_count
+		destination.message_pending = source.message_pending
+		destination.is_message_sprite = source.is_message_sprite
+		destination.font_bordering = source.font_bordering
+		destination.message_cursor_position = source.message_cursor_position
+		destination.fields = source.fields
+		destination.image = source.image
+		destination.texture = source.texture
+		destination.animation_frames = source.animation_frames
+		destination.animation_frame_sizes = source.animation_frame_sizes.duplicate()
+		destination.animation_sequence = source.animation_sequence
+		destination.animation_total_time_ms = source.animation_total_time_ms
+		destination.tone_filter = source.tone_filter
+		if destination.tone_filter != null and destination.tone_filter.host == null:
+			destination.tone_filter.host = runtime_host
+		if destination.attached_resource != null and destination.attached_resource.host == null:
+			destination.attached_resource.host = runtime_host
+		if destination.alpha_resource != null and destination.alpha_resource.host == null:
+			destination.alpha_resource.host = runtime_host
+		destination.button_image_sources = source.button_image_sources
+		destination.host = runtime_host
+		destination.detach_all_sprites()
+		destination.children = source.children
+		for child: HostSprite in destination.children:
+			child.parent_sprite = destination
+		return true
+	if target is HostToneFilter and staged is HostToneFilter:
+		var destination_filter := target as HostToneFilter
+		var source_filter := staged as HostToneFilter
+		var runtime_host := destination_filter.host if destination_filter.host != null else source_filter.host
+		destination_filter.filter_type = source_filter.filter_type
+		destination_filter.tone = source_filter.tone
+		destination_filter.red_table = source_filter.red_table.duplicate()
+		destination_filter.green_table = source_filter.green_table.duplicate()
+		destination_filter.blue_table = source_filter.blue_table.duplicate()
+		destination_filter.alpha_table = source_filter.alpha_table.duplicate()
+		destination_filter.tone_flags = source_filter.tone_flags
+		destination_filter.tone_texture = null
+		destination_filter.fields = source_filter.fields
+		destination_filter.host = runtime_host
+		return true
+	if target is HostResource and staged is HostResource:
+		var destination := target as HostResource
+		var source := staged as HostResource
+		var runtime_host := destination.host if destination.host != null else source.host
+		destination.name = source.name
+		destination.archive_name = source.archive_name
+		destination.entry_index = source.entry_index
+		destination.unpacked_size = source.unpacked_size
+		destination.payload_offset = source.payload_offset
+		destination.is_playing = source.is_playing
+		destination.current_position = source.current_position
+		destination.playback_end_frame = source.playback_end_frame
+		destination.playback_rewind_frame = source.playback_rewind_frame
+		destination.is_repeating = source.is_repeating
+		destination.use_channel_default_loop = source.use_channel_default_loop
+		destination.volume_left = source.volume_left
+		destination.volume_right = source.volume_right
+		destination.fields = source.fields
+		destination.audio_stream = source.audio_stream
+		destination.audio_channel = source.audio_channel
+		destination.image = source.image
+		destination.texture = source.texture
+		destination.image_frames = source.image_frames
+		destination.image_frame_sequence = source.image_frame_sequence
+		destination.image_total_time_ms = source.image_total_time_ms
+		destination.host = runtime_host
+		return true
+	if target is RefCounted and staged is RefCounted and target.get("type_name") != null and staged.get("type_name") != null:
+		target.type_name = staged.type_name
+		target.fields = staged.fields
+		target.field_names = staged.field_names.duplicate()
+		return true
+	return false
+
+
+func _rebind_staged_root(staged: Variant, target: Variant) -> void:
+	var visited: Array = [staged]
+	if staged is Array:
+		for index in staged.size():
+			staged[index] = _replace_root_references(staged[index], staged, target, visited)
+	elif staged is Dictionary:
+		for key in staged.keys():
+			staged[key] = _replace_root_references(staged[key], staged, target, visited)
+	elif staged is HostSprite:
+		var sprite := staged as HostSprite
+		sprite.fields = _replace_root_references(sprite.fields, staged, target, visited)
+		sprite.sprite_parameters = _replace_root_references(sprite.sprite_parameters, staged, target, visited)
+		sprite.message_style = _replace_root_references(sprite.message_style, staged, target, visited)
+		sprite.activation_curves = _replace_root_references(sprite.activation_curves, staged, target, visited)
+		sprite.attached_resource = _replace_root_references(sprite.attached_resource, staged, target, visited)
+		sprite.alpha_resource = _replace_root_references(sprite.alpha_resource, staged, target, visited)
+		sprite.tone_filter = _replace_root_references(sprite.tone_filter, staged, target, visited)
+		sprite.activation_durations = _replace_root_references(sprite.activation_durations, staged, target, visited)
+		sprite.button_image_sources = _replace_root_references(sprite.button_image_sources, staged, target, visited)
+		sprite.children = _replace_root_references(sprite.children, staged, target, visited)
+	elif staged is HostToneFilter:
+		var tone_filter := staged as HostToneFilter
+		tone_filter.fields = _replace_root_references(tone_filter.fields, staged, target, visited)
+	elif staged is HostResource:
+		(staged as HostResource).fields = _replace_root_references((staged as HostResource).fields, staged, target, visited)
+	elif staged is RefCounted and staged.get("type_name") != null and staged.get("fields") is Dictionary:
+		staged.fields = _replace_root_references(staged.fields, staged, target, visited)
+
+
+func _replace_root_references(value: Variant, old_root: Variant, new_root: Variant, visited: Array) -> Variant:
+	if is_same(value, old_root):
+		return new_root
+	if value == null or not (value is Array or value is Dictionary or value is RefCounted):
+		return value
+	for seen in visited:
+		if is_same(seen, value):
+			return value
+	visited.append(value)
+	if value is Array:
+		var array_value: Array = value
+		for index in array_value.size():
+			array_value[index] = _replace_root_references(array_value[index], old_root, new_root, visited)
+	elif value is Dictionary:
+		var dictionary_value: Dictionary = value
+		for key in dictionary_value.keys():
+			dictionary_value[key] = _replace_root_references(dictionary_value[key], old_root, new_root, visited)
+	elif value is HostSprite:
+		var sprite := value as HostSprite
+		sprite.fields = _replace_root_references(sprite.fields, old_root, new_root, visited)
+		sprite.sprite_parameters = _replace_root_references(sprite.sprite_parameters, old_root, new_root, visited)
+		sprite.message_style = _replace_root_references(sprite.message_style, old_root, new_root, visited)
+		sprite.activation_curves = _replace_root_references(sprite.activation_curves, old_root, new_root, visited)
+		sprite.attached_resource = _replace_root_references(sprite.attached_resource, old_root, new_root, visited)
+		sprite.alpha_resource = _replace_root_references(sprite.alpha_resource, old_root, new_root, visited)
+		sprite.tone_filter = _replace_root_references(sprite.tone_filter, old_root, new_root, visited)
+		sprite.activation_durations = _replace_root_references(sprite.activation_durations, old_root, new_root, visited)
+		sprite.button_image_sources = _replace_root_references(sprite.button_image_sources, old_root, new_root, visited)
+		sprite.children = _replace_root_references(sprite.children, old_root, new_root, visited)
+	elif value is HostToneFilter:
+		var tone_filter := value as HostToneFilter
+		tone_filter.fields = _replace_root_references(tone_filter.fields, old_root, new_root, visited)
+	elif value is HostResource:
+		var resource := value as HostResource
+		resource.fields = _replace_root_references(resource.fields, old_root, new_root, visited)
+	elif value.get("type_name") != null and value.get("fields") is Dictionary:
+		value.fields = _replace_root_references(value.fields, old_root, new_root, visited)
+	return value
+
+
+func _register_restored_runtime_bindings(value: Variant, visited: Array) -> void:
+	if value == null or not (value is Array or value is Dictionary or value is RefCounted):
+		return
+	for seen in visited:
+		if is_same(seen, value):
+			return
+	visited.append(value)
+	if value is Array:
+		for item in value:
+			_register_restored_runtime_bindings(item, visited)
+	elif value is Dictionary:
+		for item in value.values():
+			_register_restored_runtime_bindings(item, visited)
+	elif value is HostSprite:
+		var sprite := value as HostSprite
+		if sprite.host != null:
+			sprite.host.active_messages.erase(sprite.get_instance_id())
+			sprite.host.active_sprites.erase(sprite.get_instance_id())
+			sprite.host.active_animated_sprites.erase(sprite.get_instance_id())
+			if sprite.message_pending:
+				sprite.host.active_messages[sprite.get_instance_id()] = weakref(sprite)
+			if sprite.is_activating:
+				sprite.host.active_sprites[sprite.get_instance_id()] = weakref(sprite)
+			if sprite.animation_loop_count != 0:
+				sprite.host.active_animated_sprites[sprite.get_instance_id()] = weakref(sprite)
+		_register_restored_runtime_bindings(sprite.fields, visited)
+		_register_restored_runtime_bindings(sprite.sprite_parameters, visited)
+		_register_restored_runtime_bindings(sprite.message_style, visited)
+		_register_restored_runtime_bindings(sprite.activation_curves, visited)
+		_register_restored_runtime_bindings(sprite.activation_durations, visited)
+		_register_restored_runtime_bindings(sprite.attached_resource, visited)
+		_register_restored_runtime_bindings(sprite.alpha_resource, visited)
+		_register_restored_runtime_bindings(sprite.tone_filter, visited)
+		_register_restored_runtime_bindings(sprite.button_image_sources, visited)
+		_register_restored_runtime_bindings(sprite.children, visited)
+	elif value is HostToneFilter:
+		_register_restored_runtime_bindings((value as HostToneFilter).fields, visited)
+	elif value is HostResource:
+		_register_restored_runtime_bindings((value as HostResource).fields, visited)
+	elif value.get("type_name") != null and value.get("fields") is Dictionary:
+		_register_restored_runtime_bindings(value.fields, visited)
 
 
 func read_save_snapshot(path: String, allow_backup: bool = true, object_only: bool = false) -> Dictionary:
@@ -3700,7 +4762,7 @@ func _read_save_payload(sp: String) -> Variant:
 		return null
 	if _is_story_save(sp) and not (parsed is Dictionary and parsed.get("__type__") == "CsxInstance" and parsed.get("fields") is Dictionary):
 		return null
-	if not _validate_save_tree(parsed, 0, {"count": 0}):
+	if not _validate_save_graph(parsed):
 		return null
 	return parsed
 
@@ -3724,10 +4786,396 @@ func _validate_save_tree(value: Variant, depth: int, state: Dictionary) -> bool:
 	return true
 
 
+func _validate_save_graph(value: Variant) -> bool:
+	var state := {"count": 0, "ids": {}, "nodes": {}, "refs": [], "typed_refs": []}
+	if not _validate_save_graph_node(value, 0, state):
+		return false
+	for ref_id: Variant in state.refs:
+		if not state.ids.has(ref_id):
+			return false
+	for typed_ref: Dictionary in state.typed_refs:
+		if typed_ref.type == "IntegerArray":
+			var array_node: Variant = state.nodes.get(typed_ref.id, null)
+			if not _validate_integer_array_node(array_node):
+				return false
+		elif state.ids.get(typed_ref.id, "") != typed_ref.type:
+			return false
+	return true
+
+
+static func _normalize_save_object_id(value: Variant) -> String:
+	if not (value is int or value is float):
+		return ""
+	var numeric_id := float(value)
+	if not is_finite(numeric_id) or numeric_id <= 0.0 or numeric_id > 250000.0 or numeric_id != floor(numeric_id):
+		return ""
+	return str(int(numeric_id))
+
+
+func _validate_encoded_container(value: Variant, expected_type: String, state: Dictionary) -> bool:
+	if value is Dictionary and value.has("__ref__"):
+		var reference_id := _normalize_save_object_id(value["__ref__"])
+		if reference_id.is_empty():
+			return false
+		state.typed_refs.append({"id": reference_id, "type": expected_type})
+		return true
+	if expected_type == "Dictionary" and value is Dictionary:
+		return not value.has("__type__") or value.get("__type__") == "Dictionary"
+	if expected_type == "Array" and value is Array:
+		return true
+	if not value is Dictionary or value.get("__type__") != expected_type:
+		return false
+	return true
+
+
+func _validate_encoded_integer_array(value: Variant, state: Dictionary) -> bool:
+	if value is Dictionary and value.has("__ref__"):
+		var reference_id := _normalize_save_object_id(value["__ref__"])
+		if reference_id.is_empty():
+			return false
+		state.typed_refs.append({"id": reference_id, "type": "IntegerArray"})
+		return true
+	if value is Array:
+		for item: Variant in value:
+			if not _is_save_integer(item):
+				return false
+		return true
+	if not value is Dictionary or value.get("__type__") != "Array":
+		return false
+	return _validate_integer_array_node(value)
+
+
+func _validate_integer_array_node(value: Variant) -> bool:
+	if not value is Dictionary or value.get("__type__") != "Array":
+		return false
+	var items: Variant = value.get("items", [])
+	if not items is Array:
+		return false
+	for item: Variant in items:
+		if item is Dictionary and item.get("__type__") == "Integer":
+			var integer_value: Variant = item.get("value")
+			if integer_value is String:
+				if not integer_value.is_valid_int():
+					return false
+			elif not _is_save_integer(integer_value):
+				return false
+		elif not _is_save_integer(item):
+			return false
+	return true
+
+
+func _validate_encoded_button_sources(value: Variant, state: Dictionary) -> bool:
+	if not _validate_encoded_container(value, "Dictionary", state):
+		return false
+	if value is Dictionary and value.has("__ref__"):
+		return true
+	var sources: Variant = value
+	if value is Dictionary and value.get("__type__") == "Dictionary":
+		sources = value.get("items", {})
+	if not sources is Dictionary:
+		return false
+	for state_name in sources.keys():
+		if state_name not in ["normal", "focus", "pushed", "disabled"]:
+			return false
+		var descriptor: Variant = sources[state_name]
+		if descriptor is Dictionary and descriptor.get("__type__") == "Dictionary":
+			descriptor = descriptor.get("items", {})
+		if not descriptor is Dictionary:
+			return false
+		if descriptor.has("filename") and not descriptor["filename"] is String:
+			return false
+		if descriptor.has("archive_hint") and not descriptor["archive_hint"] is String:
+			return false
+		if descriptor.has("crop"):
+			var crop: Variant = descriptor["crop"]
+			if crop is Dictionary and crop.get("__type__") == "Array":
+				crop = crop.get("items", [])
+			if not crop is Array or crop.size() != 4:
+				return false
+			for component: Variant in crop:
+				if component is Dictionary and component.get("__type__") == "Integer":
+					var encoded_value: Variant = component.get("value")
+					if encoded_value is String:
+						if not encoded_value.is_valid_int():
+							return false
+					elif not _is_save_integer(encoded_value):
+						return false
+				elif not _is_save_integer(component):
+					return false
+	return true
+
+
+func _validate_sprite_curves(value: Variant) -> bool:
+	if value is Dictionary and value.get("__type__") == "Array":
+		value = value.get("items", [])
+	if not value is Array or value.size() != 3:
+		return false
+	for curve_index in value.size():
+		var curve: Variant = value[curve_index]
+		if curve is Dictionary and curve.get("__type__") == "Array":
+			curve = curve.get("items", [])
+		if not curve is Array:
+			return false
+		for point: Variant in curve:
+			if point is Dictionary and point.get("__type__") == "Array":
+				point = point.get("items", [])
+			if curve_index == 1:
+				if not _is_save_number(point):
+					return false
+			elif not point is Array or point.size() != 2 or not _is_save_number(point[0]) or not _is_save_number(point[1]):
+				return false
+	return true
+
+
+func _validate_save_graph_node(value: Variant, depth: int, state: Dictionary) -> bool:
+	if depth > MAX_SERIALIZATION_DEPTH:
+		return false
+	state.count = int(state.count) + 1
+	if int(state.count) > 250000:
+		return false
+	if value is Array:
+		for item in value:
+			if not _validate_save_graph_node(item, depth + 1, state):
+				return false
+		return true
+	if not value is Dictionary:
+		return true
+	if value.has("__ref__"):
+		var ref_id: Variant = value["__ref__"]
+		var ref_key := _normalize_save_object_id(ref_id)
+		if ref_key.is_empty():
+			return false
+		state.refs.append(ref_key)
+		return value.size() == 1
+	if value.has("__type__"):
+		var type_name := str(value["__type__"])
+		if type_name not in ["Integer", "CsxInstance", "HostSprite", "HostToneFilter", "HostResource", "Array", "Dictionary"]:
+			return false
+		if value.has("__id__"):
+			# Integer wrappers are inline scalars, not identity-bearing objects.
+			# Accepting an ID here would allow a __ref__ that hydration can never
+			# resolve because scalar values are not registered in context.objects.
+			if type_name == "Integer":
+				return false
+			var object_id_key := _normalize_save_object_id(value["__id__"])
+			if object_id_key.is_empty():
+				return false
+			if state.ids.has(object_id_key):
+				return false
+			state.ids[object_id_key] = type_name
+			state.nodes[object_id_key] = value
+		match type_name:
+			"Integer":
+				var integer_value: Variant = value.get("value")
+				if integer_value is String:
+					return integer_value.is_valid_int()
+				return _is_save_integer(integer_value)
+			"CsxInstance":
+				if not value.get("class_name", "") is String or not value.get("fields", {}) is Dictionary:
+					return false
+				return _validate_save_graph_node(value.get("fields", {}), depth + 1, state)
+			"HostSprite":
+				for field_name in ["filename", "archive_hint", "btn_id", "full_btn_id", "btn_state", "text_content"]:
+					if value.has(field_name) and not value[field_name] is String:
+						return false
+				for field_name in ["rotation_degrees", "message_elapsed_ms", "animation_elapsed_ms", "animation_duration_ms"]:
+					if value.has(field_name) and not _is_save_number(value[field_name]):
+						return false
+				for field_name in ["z_order", "transparency", "back_color", "message_char_speed_ms", "message_fade_ms", "message_visible_count", "blending", "alpha_range", "animation_total_time_ms", "animation_begin_sequence", "animation_start_sequence", "animation_turn_sequence", "animation_rewind_sequence", "animation_view_frame", "animation_loop_count", "movie_rewind_frame", "movie_end_frame"]:
+					if value.has(field_name) and not _is_save_integer(value[field_name]):
+						return false
+				for field_name in ["is_visible", "is_enabled", "fill_back_color", "is_button", "message_pending", "movie_repeat", "is_message_sprite", "font_bordering"]:
+					if value.has(field_name) and not value[field_name] is bool:
+						return false
+				for field_name in ["children", "attached_resource", "alpha_resource", "activation_state", "tone_filter", "button_image_sources", "animation_frame_sizes", "activation_curves", "animation_sequence"]:
+					if value.has(field_name) and not _validate_save_graph_node(value[field_name], depth + 1, state):
+						return false
+				for field_name in ["sprite_parameters", "message_style", "fields", "button_image_sources"]:
+					if value.has(field_name) and not _validate_encoded_container(value[field_name], "Dictionary", state):
+						return false
+				if value.has("activation_curves") and not _validate_sprite_curves(value["activation_curves"]):
+					return false
+				if value.has("animation_sequence") and not _validate_encoded_integer_array(value["animation_sequence"], state):
+					return false
+				if value.has("button_image_sources") and not _validate_encoded_button_sources(value["button_image_sources"], state):
+					return false
+				if value.has("tone_filter") and value["tone_filter"] != null:
+					if not _validate_encoded_container(value["tone_filter"], "HostToneFilter", state):
+						return false
+				if value.has("animation_frame_sizes"):
+					var frame_sizes: Variant = value["animation_frame_sizes"]
+					if not frame_sizes is Array:
+						return false
+					for frame_size: Variant in frame_sizes:
+						if not frame_size is Array or frame_size.size() != 2 or not _is_save_integer(frame_size[0]) or not _is_save_integer(frame_size[1]) or int(frame_size[0]) <= 0 or int(frame_size[1]) <= 0:
+							return false
+				for field_name in ["attached_resource", "alpha_resource"]:
+					if value.has(field_name) and value[field_name] != null:
+						if not _validate_encoded_container(value[field_name], "HostResource", state):
+							return false
+				for field_name in ["position", "rev_center", "magnification", "size", "message_cursor_position"]:
+					if value.has(field_name):
+						var vector_value: Variant = value[field_name]
+						if not vector_value is Array or vector_value.size() != 2:
+							return false
+						for component in vector_value:
+							if not _is_save_number(component):
+								return false
+				if value.has("activation_state"):
+					var activation: Variant = value["activation_state"]
+					if not activation is Dictionary:
+						return false
+					for field_name in ["duration_ms", "elapsed_ms"]:
+						if activation.has(field_name) and not _is_save_number(activation[field_name]):
+							return false
+					for field_name in ["start_alpha", "end_alpha", "target_alpha", "action_type"]:
+						if activation.has(field_name) and not _is_save_integer(activation[field_name]):
+							return false
+					for field_name in ["is_activating", "fade_enabled"]:
+						if activation.has(field_name) and not activation[field_name] is bool:
+							return false
+				return true
+			"HostToneFilter":
+				if value.has("filter_type") and not value["filter_type"] is String:
+					return false
+				if value.has("tone_flags") and not _is_save_integer(value["tone_flags"]):
+					return false
+				if value.has("tone"):
+					var tone_values: Variant = value["tone"]
+					if not tone_values is Array or tone_values.size() != 4:
+						return false
+					for component: Variant in tone_values:
+						if not _is_save_number(component):
+							return false
+				for field_name in ["red_table", "green_table", "blue_table", "alpha_table"]:
+					if not value.has(field_name) or not value[field_name] is Array or value[field_name].size() != 256:
+						return false
+					for table_value: Variant in value[field_name]:
+						if not _is_save_integer(table_value) or int(table_value) < 0 or int(table_value) > 255:
+							return false
+				if value.has("fields"):
+					return _validate_save_graph_node(value["fields"], depth + 1, state) and _validate_encoded_container(value["fields"], "Dictionary", state)
+				return true
+			"HostResource":
+				for field_name in ["name", "archive_name"]:
+					if value.has(field_name) and not value[field_name] is String:
+						return false
+				for field_name in ["entry_index", "unpacked_size", "payload_offset", "position_frames", "current_position", "playback_end_frame", "playback_rewind_frame"]:
+					if value.has(field_name) and not _is_save_integer(value[field_name]):
+						return false
+				for field_name in ["is_playing", "is_repeating", "use_channel_default_loop"]:
+					if value.has(field_name) and not value[field_name] is bool:
+						return false
+				for field_name in ["volume_left", "volume_right"]:
+					if value.has(field_name) and not _is_save_number(value[field_name]):
+						return false
+				if value.has("fields"):
+					return value["fields"] is Dictionary and _validate_save_graph_node(value["fields"], depth + 1, state)
+				return true
+			"Array":
+				if not value.get("items", []) is Array:
+					return false
+				return _validate_save_graph_node(value.get("items", []), depth + 1, state)
+			"Dictionary":
+				if value.has("entries"):
+					var entries: Variant = value["entries"]
+					if not entries is Array:
+						return false
+					for entry in entries:
+						if not entry is Array or entry.size() != 2:
+							return false
+						if not _validate_save_graph_node(entry[0], depth + 1, state) or not _validate_save_graph_node(entry[1], depth + 1, state):
+							return false
+					return true
+				if not value.get("items", {}) is Dictionary:
+					return false
+				return _validate_save_graph_node(value.get("items", {}), depth + 1, state)
+	for key in value.keys():
+		if not _validate_save_graph_node(value[key], depth + 1, state):
+			return false
+	return true
+
+
+static func _is_save_number(value: Variant) -> bool:
+	return value is int or value is float
+
+
+static func _is_save_integer(value: Variant) -> bool:
+	return _is_save_number(value) and float(value) == floor(float(value))
+
+
+func _save_payload_matches_target(payload: Variant, target: Variant) -> bool:
+	if target == null or not payload is Dictionary or not payload.has("__type__"):
+		return true
+	match str(payload["__type__"]):
+		"CsxInstance":
+			return target is RefCounted and target.has_method("get_field") and target.has_method("set_field") and target.get("type_name") == str(payload.get("class_name", ""))
+		"HostSprite":
+			return target is HostSprite
+		"HostResource":
+			return target is HostResource
+		"HostToneFilter":
+			return target is HostToneFilter
+		"Array":
+			return target is Array
+		"Dictionary":
+			return target is Dictionary
+		"Integer":
+			return false
+	return true
+
+
 static func serialize_value(val: Variant) -> Variant:
 	var state := {"error": "", "objects": [], "next_id": 1, "count": 0}
 	var result: Variant = _serialize_value_checked(val, [], 0, state)
 	return null if not str(state.error).is_empty() else result
+
+
+static func _serialize_sprite_activation_curves(curves: Array, active_stack: Array, depth: int, state: Dictionary) -> Variant:
+	var packed_curves: Array = []
+	if curves.size() != 3:
+		state.error = "HostSprite 激活曲线必须包含三条通道。"
+		return null
+	for curve_index in curves.size():
+		var curve: Variant = curves[curve_index]
+		if not curve is Array:
+			state.error = "HostSprite 激活曲线格式无效。"
+			return null
+		var packed_curve: Array = []
+		for point: Variant in curve:
+			if point is Vector2:
+				if curve_index == 1:
+					state.error = "HostSprite 旋转曲线点必须是数字。"
+					return null
+				packed_curve.append([point.x, point.y])
+			elif point is int or point is float:
+				if curve_index != 1:
+					state.error = "HostSprite 位置和缩放曲线点必须是 Vector2。"
+					return null
+				packed_curve.append(point)
+			else:
+				state.error = "HostSprite 激活曲线点类型无效。"
+				return null
+		packed_curves.append(packed_curve)
+	return packed_curves
+
+
+static func _pack_byte_table(table: PackedByteArray) -> Array:
+	var packed: Array = []
+	for value in table:
+		packed.append(int(value))
+	return packed
+
+
+static func _serialize_sprite_frame_sizes(sprite: HostSprite) -> Array:
+	var sizes: Array = []
+	if not sprite.animation_frames.is_empty():
+		for frame: Image in sprite.animation_frames:
+			sizes.append([frame.get_width(), frame.get_height()])
+	else:
+		for frame_size: Vector2i in sprite.animation_frame_sizes:
+			sizes.append([frame_size.x, frame_size.y])
+	return sizes
 
 
 static func _serialize_value_checked(val: Variant, active_stack: Array, depth: int, state: Dictionary) -> Variant:
@@ -3743,7 +5191,7 @@ static func _serialize_value_checked(val: Variant, active_stack: Array, depth: i
 	if val == null or val is bool or val is float or val is String:
 		return val
 	if val is int:
-		return {"__type__": "Integer", "value": val}
+		return {"__type__": "Integer", "value": str(val)}
 	var track_identity := val is RefCounted or val is Array or val is Dictionary
 	var object_id := 0
 	if track_identity:
@@ -3766,6 +5214,9 @@ static func _serialize_value_checked(val: Variant, active_stack: Array, depth: i
 				"rev_center": [sprite.rev_center.x, sprite.rev_center.y],
 				"magnification": [sprite.magnification.x, sprite.magnification.y],
 				"rotation_degrees": sprite.rotation_degrees,
+				"is_enabled": sprite.is_enabled,
+				"blending": sprite.blending,
+				"activation_curves": _serialize_sprite_activation_curves(sprite.activation_curves, active_stack, depth + 1, state),
 				"sprite_parameters": _serialize_value_checked(sprite.sprite_parameters, active_stack, depth + 1, state),
 				"message_style": _serialize_value_checked(sprite.message_style, active_stack, depth + 1, state),
 				"size": [sprite.size.x, sprite.size.y],
@@ -3774,7 +5225,37 @@ static func _serialize_value_checked(val: Variant, active_stack: Array, depth: i
 				"transparency": sprite.transparency,
 				"back_color": sprite.back_color,
 				"fill_back_color": sprite.fill_back_color,
+				"movie_rewind_frame": sprite.movie_rewind_frame,
+				"movie_end_frame": sprite.movie_end_frame,
+				"movie_repeat": sprite.movie_repeat,
+				"attached_resource": _serialize_value_checked(sprite.attached_resource, active_stack, depth + 1, state),
+				"alpha_resource": _serialize_value_checked(sprite.alpha_resource, active_stack, depth + 1, state),
+				"alpha_range": sprite.alpha_range,
+				"animation_loop_count": sprite.animation_loop_count,
+				"animation_elapsed_ms": sprite.animation_elapsed_ms,
+				"animation_duration_ms": sprite.animation_duration_ms,
+				"animation_begin_sequence": sprite.animation_begin_sequence,
+				"animation_start_sequence": sprite.animation_start_sequence,
+				"animation_turn_sequence": sprite.animation_turn_sequence,
+				"animation_rewind_sequence": sprite.animation_rewind_sequence,
+				"animation_view_frame": sprite.animation_view_frame,
+				"animation_total_time_ms": sprite.animation_total_time_ms,
+				"animation_frame_sizes": _serialize_sprite_frame_sizes(sprite),
+				"animation_sequence": _serialize_value_checked(sprite.animation_sequence, active_stack, depth + 1, state),
+				"activation_state": {
+					"is_activating": sprite.is_activating,
+					"duration_ms": sprite.activation_duration_ms,
+					"elapsed_ms": sprite.activation_elapsed_ms,
+					"start_alpha": sprite.activation_start_alpha,
+					"end_alpha": sprite.activation_end_alpha,
+					"target_alpha": sprite.activation_target_alpha,
+					"fade_enabled": sprite.activation_fade_enabled,
+					"action_type": sprite.activation_action_type,
+					"durations": _serialize_value_checked(sprite.activation_durations, active_stack, depth + 1, state)
+				},
 				"btn_id": sprite.btn_id,
+				"full_btn_id": sprite.full_btn_id,
+				"button_image_sources": _serialize_value_checked(sprite.button_image_sources, active_stack, depth + 1, state),
 				"is_button": sprite.is_button,
 				"btn_state": sprite.btn_state,
 				"text_content": sprite.text_content,
@@ -3783,7 +5264,26 @@ static func _serialize_value_checked(val: Variant, active_stack: Array, depth: i
 				"message_elapsed_ms": sprite.message_elapsed_ms,
 				"message_visible_count": sprite.message_visible_count,
 				"message_pending": sprite.message_pending,
+				"is_message_sprite": sprite.is_message_sprite,
+				"font_bordering": sprite.font_bordering,
+				"message_cursor_position": [sprite.message_cursor_position.x, sprite.message_cursor_position.y],
+				"tone_filter": _serialize_value_checked(sprite.tone_filter, active_stack, depth + 1, state),
+				"children": _serialize_value_checked(sprite.children, active_stack, depth + 1, state),
 				"fields": _serialize_value_checked(sprite.fields, active_stack, depth + 1, state)
+			}
+		elif val is HostToneFilter:
+			var tone_filter: HostToneFilter = val
+			result = {
+				"__type__": "HostToneFilter",
+				"__id__": object_id,
+				"filter_type": tone_filter.filter_type,
+				"tone": [tone_filter.tone.r, tone_filter.tone.g, tone_filter.tone.b, tone_filter.tone.a],
+				"tone_flags": tone_filter.tone_flags,
+				"red_table": _pack_byte_table(tone_filter.red_table),
+				"green_table": _pack_byte_table(tone_filter.green_table),
+				"blue_table": _pack_byte_table(tone_filter.blue_table),
+				"alpha_table": _pack_byte_table(tone_filter.alpha_table),
+				"fields": _serialize_value_checked(tone_filter.fields, active_stack, depth + 1, state)
 			}
 		elif val is HostResource:
 			var resource: HostResource = val
@@ -3818,46 +5318,126 @@ static func _serialize_value_checked(val: Variant, active_stack: Array, depth: i
 			serialized_array.append(_serialize_value_checked(item, active_stack, depth + 1, state))
 		result = {"__type__": "Array", "__id__": object_id, "items": serialized_array}
 	elif val is Dictionary:
-		var serialized_dictionary: Dictionary = {}
+		var all_string_keys := true
 		for key in val.keys():
-			serialized_dictionary[str(key)] = _serialize_value_checked(val[key], active_stack, depth + 1, state)
-		result = {"__type__": "Dictionary", "__id__": object_id, "items": serialized_dictionary}
+			if not key is String:
+				all_string_keys = false
+				break
+		if all_string_keys:
+			var serialized_dictionary: Dictionary = {}
+			for key in val.keys():
+				serialized_dictionary[key] = _serialize_value_checked(val[key], active_stack, depth + 1, state)
+			result = {"__type__": "Dictionary", "__id__": object_id, "items": serialized_dictionary}
+		else:
+			var entries: Array = []
+			for key in val.keys():
+				if not (key is String or key is int or key is float or key is bool):
+					state.error = "不支持的字典键类型 %s" % type_string(typeof(key))
+					return null
+				entries.append([
+					_serialize_value_checked(key, active_stack, depth + 1, state),
+					_serialize_value_checked(val[key], active_stack, depth + 1, state)
+				])
+			result = {"__type__": "Dictionary", "__id__": object_id, "entries": entries}
 	else:
 		state.error = "不支持的 Variant 类型 %s" % type_string(typeof(val))
 	return result
 
 
+static func _prepare_deserialization_context(data: Variant, target: Variant, vm: RefCounted, context: Dictionary) -> void:
+	context["objects"] = {}
+	context["hydrating"] = {}
+	context["_prepared"] = true
+	if data is Dictionary and data.has("__id__") and target != null:
+		var target_id := _normalize_save_object_id(data["__id__"])
+		if target_id.is_empty():
+			_set_restore_error(context, "存档对象 ID 格式无效。")
+			return
+		context.objects[target_id] = target
+	_preallocate_deserialization_objects(data, vm, context)
+
+
+static func _preallocate_deserialization_objects(value: Variant, vm: RefCounted, context: Dictionary) -> void:
+	if value is Array:
+		for item in value:
+			_preallocate_deserialization_objects(item, vm, context)
+		return
+	if not value is Dictionary:
+		return
+	if value.has("__type__") and value.has("__id__"):
+		var id_key := _normalize_save_object_id(value["__id__"])
+		if id_key.is_empty():
+			_set_restore_error(context, "存档对象 ID 格式无效。")
+			return
+		if not context.objects.has(id_key):
+			var type_name := str(value["__type__"])
+			var object: Variant = null
+			match type_name:
+				"CsxInstance":
+					var saved_class_name := str(value.get("class_name", ""))
+					# Save restoration allocates a data shell; it must not execute the
+					# script constructor and repeat story side effects.
+					object = load("res://scripts/csx_vm.gd").CsxInstance.new(saved_class_name)
+				"HostSprite":
+					object = HostSprite.new(0, _host_from_vm(vm))
+				"HostToneFilter":
+					object = HostToneFilter.new(_host_from_vm(vm))
+				"HostResource":
+					object = HostResource.new(str(value.get("name", "")), str(value.get("archive_name", "")), int(value.get("entry_index", -1)), int(value.get("unpacked_size", 0)), int(value.get("payload_offset", 0)), _host_from_vm(vm))
+				"Array":
+					object = []
+				"Dictionary":
+					object = {}
+			if object != null:
+				context.objects[id_key] = object
+	for key in value.keys():
+		_preallocate_deserialization_objects(value[key], vm, context)
+
+
 static func deserialize_into(target: Variant, data: Variant, vm: RefCounted = null, context: Dictionary = {}) -> Variant:
-	if data == null:
+	if data == null or not str(context.get("error", "")).is_empty():
 		return null
-	if not context.has("objects"):
-		context.objects = {}
+	if not context.get("_prepared", false):
+		_prepare_deserialization_context(data, target, vm, context)
 	if data is Dictionary and data.has("__ref__"):
-		return context.objects.get(str(data["__ref__"]), null)
+		var reference_key := _normalize_save_object_id(data["__ref__"])
+		if reference_key.is_empty():
+			_set_restore_error(context, "存档对象引用 ID 格式无效。")
+			return null
+		return context.objects.get(reference_key, null)
 	if data is Dictionary and data.has("__type__"):
 		var t_type: String = data["__type__"]
 		if t_type == "Integer":
-			return int(data.get("value", 0))
+			var saved_integer: Variant = data.get("value", 0)
+			return int(saved_integer) if saved_integer is int or saved_integer is float or (saved_integer is String and saved_integer.is_valid_int()) else 0
 		if t_type == "CsxInstance":
 			var cname: String = data.get("class_name", "")
 			var fields_data: Dictionary = data.get("fields", {})
-			var inst = target
+			var object_key := _normalize_save_object_id(data.get("__id__", 0))
+			var inst: Variant = context.objects.get(object_key, target)
 			if not (inst != null and inst.get_script() != null and inst.get("type_name") != null):
-				if vm != null and vm.has_method("create_object"):
-					inst = vm.create_object(cname)
-				if inst == null:
-					var CsxVMClass = load("res://scripts/csx_vm.gd")
-					inst = CsxVMClass.CsxInstance.new(cname)
+				var CsxVMClass = load("res://scripts/csx_vm.gd")
+				inst = CsxVMClass.CsxInstance.new(cname)
 			if data.has("__id__"):
-				context.objects[str(data["__id__"])] = inst
+				context.objects[object_key] = inst
+				context.hydrating[object_key] = true
+			inst.type_name = cname
 			inst.fields.clear()
+			inst.field_names.clear()
 			for k in fields_data.keys():
 				inst.fields[k] = deserialize_value(fields_data[k], vm, context)
+				inst.field_names.append(str(k))
 			return inst
 		elif t_type == "HostSprite":
-			var sprite: HostSprite = target if target is HostSprite else HostSprite.new(0, _host_from_vm(vm))
+			var object_key := _normalize_save_object_id(data.get("__id__", 0))
+			var sprite: HostSprite = context.objects.get(object_key, target) as HostSprite
+			if sprite == null:
+				sprite = HostSprite.new(0, _host_from_vm(vm))
+			if vm != null:
+				sprite.host = _host_from_vm(vm)
 			if data.has("__id__"):
-				context.objects[str(data["__id__"])] = sprite
+				context.objects[object_key] = sprite
+				context.hydrating[object_key] = true
 			sprite.filename = str(data.get("filename", ""))
 			sprite.archive_hint = str(data.get("archive_hint", ""))
 			var pos: Array = data.get("position", [0, 0])
@@ -3867,10 +5447,26 @@ static func deserialize_into(target: Variant, data: Variant, vm: RefCounted = nu
 			var magnification: Array = data.get("magnification", [1.0, 1.0])
 			sprite.magnification = Vector2(float(magnification[0]), float(magnification[1])) if magnification.size() >= 2 else Vector2.ONE
 			sprite.rotation_degrees = float(data.get("rotation_degrees", 0.0))
+			sprite.is_enabled = bool(data.get("is_enabled", true))
+			sprite.blending = int(data.get("blending", 0))
+			var saved_curves: Variant = deserialize_value(data.get("activation_curves", [[], [], []]), vm, context)
+			if saved_curves is Array:
+				sprite.activation_curves = saved_curves
+				for curve_index in [0, 2]:
+					if curve_index < sprite.activation_curves.size() and sprite.activation_curves[curve_index] is Array:
+						var restored_curve: Array = sprite.activation_curves[curve_index]
+						for point_index in restored_curve.size():
+							var restored_point: Variant = restored_curve[point_index]
+							if restored_point is Array and restored_point.size() == 2:
+								restored_curve[point_index] = Vector2(float(restored_point[0]), float(restored_point[1]))
+			else:
+				sprite.activation_curves = [[], [], []]
 			if data.has("sprite_parameters"):
 				var saved_parameters: Variant = deserialize_value(data["sprite_parameters"], vm, context)
 				if saved_parameters is Dictionary:
-					sprite.sprite_parameters.merge(saved_parameters, true)
+					sprite.sprite_parameters = saved_parameters
+			else:
+				sprite.sprite_parameters = {"nFlags": 0, "rCrossingAngle": 90.0, "rgbDimColor": 0, "rgbLightColor": 0xffffff, "rZOrder": 0.0, "rgbColorParam1": 0, "rZScale": 0.0}
 			if data.has("message_style"):
 				var style = deserialize_value(data["message_style"], vm, context)
 				if style is Dictionary:
@@ -3882,7 +5478,59 @@ static func deserialize_into(target: Variant, data: Variant, vm: RefCounted = nu
 			sprite.transparency = int(data.get("transparency", 0))
 			sprite.back_color = int(data.get("back_color", 0)) & 0xffffff
 			sprite.fill_back_color = bool(data.get("fill_back_color", true))
+			sprite.movie_rewind_frame = int(data.get("movie_rewind_frame", -1))
+			sprite.movie_end_frame = int(data.get("movie_end_frame", -1))
+			sprite.movie_repeat = bool(data.get("movie_repeat", false))
+			var attached: Variant = deserialize_value(data.get("attached_resource"), vm, context)
+			sprite.attached_resource = attached as HostResource if attached is HostResource else null
+			if data.get("attached_resource") != null and not attached is HostResource:
+				_set_restore_error(context, "HostSprite attached_resource 不是 HostResource。")
+			var alpha: Variant = deserialize_value(data.get("alpha_resource"), vm, context)
+			sprite.alpha_resource = alpha as HostResource if alpha is HostResource else null
+			if data.get("alpha_resource") != null and not alpha is HostResource:
+				_set_restore_error(context, "HostSprite alpha_resource 不是 HostResource。")
+			sprite.alpha_range = int(data.get("alpha_range", 256))
+			sprite.animation_loop_count = int(data.get("animation_loop_count", 0))
+			sprite.animation_elapsed_ms = maxf(0.0, float(data.get("animation_elapsed_ms", 0.0)))
+			sprite.animation_duration_ms = maxf(0.0, float(data.get("animation_duration_ms", 0.0)))
+			sprite.animation_begin_sequence = int(data.get("animation_begin_sequence", 0))
+			sprite.animation_start_sequence = int(data.get("animation_start_sequence", sprite.animation_begin_sequence))
+			sprite.animation_turn_sequence = int(data.get("animation_turn_sequence", -1))
+			sprite.animation_rewind_sequence = int(data.get("animation_rewind_sequence", 0))
+			sprite.animation_view_frame = int(data.get("animation_view_frame", -1))
+			sprite.animation_total_time_ms = int(data.get("animation_total_time_ms", sprite.animation_total_time_ms))
+			var saved_frame_sizes: Variant = data.get("animation_frame_sizes", [])
+			if saved_frame_sizes is Array:
+				sprite.animation_frame_sizes.clear()
+				for frame_size: Array in saved_frame_sizes:
+					sprite.animation_frame_sizes.append(Vector2i(int(frame_size[0]), int(frame_size[1])))
+			var expected_frame_sizes: Array[Vector2i] = sprite.animation_frame_sizes.duplicate()
+			var saved_sequence: Variant = deserialize_value(data.get("animation_sequence", sprite.animation_sequence), vm, context)
+			if saved_sequence is Array:
+				sprite.animation_sequence.assign(saved_sequence)
+			var activation_state: Variant = data.get("activation_state", {})
+			if activation_state is Dictionary:
+				sprite.is_activating = bool(activation_state.get("is_activating", false))
+				sprite.activation_duration_ms = maxf(0.0, float(activation_state.get("duration_ms", 0.0)))
+				sprite.activation_elapsed_ms = maxf(0.0, float(activation_state.get("elapsed_ms", 0.0)))
+				sprite.activation_start_alpha = int(activation_state.get("start_alpha", 0))
+				sprite.activation_end_alpha = int(activation_state.get("end_alpha", 0))
+				sprite.activation_target_alpha = int(activation_state.get("target_alpha", 0))
+				sprite.activation_fade_enabled = bool(activation_state.get("fade_enabled", false))
+				sprite.activation_action_type = int(activation_state.get("action_type", 0))
+				var saved_durations: Variant = deserialize_value(activation_state.get("durations", []), vm, context)
+				if saved_durations is Array:
+					for duration: Variant in saved_durations:
+						if not _is_save_number(duration):
+							_set_restore_error(context, "HostSprite 激活时长列表包含非数字值。")
+							break
+						sprite.activation_durations.append(float(duration))
+				else:
+					_set_restore_error(context, "HostSprite 激活时长列表格式无效。")
 			sprite.btn_id = str(data.get("btn_id", ""))
+			sprite.full_btn_id = str(data.get("full_btn_id", sprite.btn_id))
+			var saved_button_sources: Variant = deserialize_value(data.get("button_image_sources", {}), vm, context)
+			sprite.button_image_sources = saved_button_sources if saved_button_sources is Dictionary else {}
 			sprite.is_button = bool(data.get("is_button", false))
 			sprite.btn_state = str(data.get("btn_state", "normal"))
 			sprite.text_content = str(data.get("text_content", ""))
@@ -3891,28 +5539,143 @@ static func deserialize_into(target: Variant, data: Variant, vm: RefCounted = nu
 			sprite.message_elapsed_ms = maxf(0.0, float(data.get("message_elapsed_ms", 0.0)))
 			sprite.message_visible_count = clampi(int(data.get("message_visible_count", sprite.display_text().length())), -1, sprite.display_text().length())
 			sprite.message_pending = bool(data.get("message_pending", false))
-			if sprite.message_pending and sprite.host != null:
+			sprite.is_message_sprite = bool(data.get("is_message_sprite", false))
+			sprite.font_bordering = bool(data.get("font_bordering", false))
+			var cursor_position: Array = data.get("message_cursor_position", [0, 0])
+			sprite.message_cursor_position = Vector2i(int(cursor_position[0]), int(cursor_position[1])) if cursor_position.size() >= 2 else Vector2i.ZERO
+			var saved_tone_filter: Variant = deserialize_value(data.get("tone_filter"), vm, context)
+			if saved_tone_filter is HostToneFilter:
+				sprite.tone_filter = saved_tone_filter
+				if sprite.tone_filter.host == null:
+					sprite.tone_filter.host = sprite.host
+			elif data.get("tone_filter") != null:
+				_set_restore_error(context, "HostSprite tone_filter 不是 HostToneFilter。")
+			if sprite.message_pending and sprite.host != null and not context.get("defer_runtime_bindings", false):
 				sprite.host.active_messages[sprite.get_instance_id()] = weakref(sprite)
 			sprite.fields = deserialize_value(data.get("fields", {}), vm, context) if data.get("fields", {}) is Dictionary else {}
+			sprite.detach_all_sprites()
+			var saved_children: Variant = deserialize_value(data.get("children", {"__type__": "Array", "items": []}), vm, context)
+			if saved_children is Array:
+				sprite.children = saved_children
+				for child: Variant in saved_children:
+					if not child is HostSprite:
+						_set_restore_error(context, "HostSprite 子节点不是有效精灵对象。")
+						break
+					if child.parent_sprite != null and child.parent_sprite != sprite:
+						_set_restore_error(context, "HostSprite 子节点被多个父精灵引用。")
+						break
+					sprite.add_sprite(child.z_order, child)
+					if child.parent_sprite != sprite:
+						_set_restore_error(context, "HostSprite 子节点关系形成循环。")
+						break
+			elif data.has("children"):
+				_set_restore_error(context, "HostSprite 子节点列表格式无效。")
 			if not sprite.filename.is_empty() and sprite.host != null and sprite.filename.get_extension().to_lower() == "eri":
 				var image_res := sprite.host.load_image(sprite.filename, sprite.archive_hint)
 				if image_res.get("ok", false):
 					sprite.image = image_res["image"]
 					sprite.texture = image_res["texture"]
+					sprite.animation_frames.clear()
+					for frame: Variant in image_res.get("frames", [sprite.image]):
+						if frame is Image:
+							sprite.animation_frames.append(frame)
+					sprite.animation_frame_sizes.clear()
+					for frame: Image in sprite.animation_frames:
+						sprite.animation_frame_sizes.append(Vector2i(frame.get_size()))
+					if not data.has("animation_sequence"):
+						sprite.animation_sequence.assign(image_res.get("frame_sequence", []))
+						sprite.animation_total_time_ms = int(image_res.get("total_time_ms", sprite.animation_total_time_ms))
+				elif context.get("strict_resources", false):
+					_set_restore_error(context, "无法恢复 HostSprite 图像 %s: %s" % [sprite.filename, image_res.get("error", "资源缺失或解码失败")])
+			elif not sprite.filename.is_empty() and sprite.filename.get_extension().to_lower() == "eri" and context.get("strict_resources", false):
+				_set_restore_error(context, "无法恢复 HostSprite 图像 %s: VM 未绑定 Host" % sprite.filename)
+			if sprite.attached_resource != null:
+				if sprite.attached_resource.image == null and not sprite.attached_resource.name.is_empty():
+					sprite.attached_resource.load_image(sprite.attached_resource.name)
+				if sprite.attached_resource.image != null:
+					sprite.image = sprite.attached_resource.image
+					sprite.texture = sprite.attached_resource.texture
+					sprite.animation_frames.assign(sprite.attached_resource.image_frames)
+					sprite.animation_frame_sizes.clear()
+					for frame: Image in sprite.animation_frames:
+						sprite.animation_frame_sizes.append(Vector2i(frame.get_size()))
+					if not data.has("animation_sequence"):
+						sprite.animation_sequence.assign(sprite.attached_resource.image_frame_sequence)
+						sprite.animation_total_time_ms = sprite.attached_resource.image_total_time_ms
+			if not expected_frame_sizes.is_empty():
+				if sprite.animation_frames.size() != expected_frame_sizes.size():
+					sprite.animation_frame_sizes = expected_frame_sizes
+					if context.get("strict_resources", false):
+						_set_restore_error(context, "HostSprite 动画帧像素无法从存档资源描述符恢复。")
+				else:
+					for frame_index in sprite.animation_frames.size():
+						var frame: Image = sprite.animation_frames[frame_index]
+						if Vector2i(frame.get_size()) != expected_frame_sizes[frame_index] and context.get("strict_resources", false):
+							_set_restore_error(context, "HostSprite 动画帧尺寸与保存的元数据不符。")
+					sprite.animation_frame_sizes = expected_frame_sizes
+			if sprite.animation_view_frame >= 0:
+				if sprite.animation_view_frame < sprite.animation_frames.size():
+					sprite.image = sprite.animation_frames[sprite.animation_view_frame]
+					sprite.texture = ImageTexture.create_from_image(sprite.image)
+				elif context.get("strict_resources", false):
+					_set_restore_error(context, "HostSprite 当前动画帧索引越界。")
+			if sprite.alpha_resource != null:
+				sprite.set_alpha_image(sprite.alpha_resource, sprite.alpha_range)
+			_restore_sprite_button_images(sprite, context)
+			if sprite.animation_loop_count != 0 and sprite.host != null and not context.get("defer_runtime_bindings", false):
+				sprite.host.active_animated_sprites[sprite.get_instance_id()] = weakref(sprite)
+			if sprite.is_activating and sprite.host != null and not context.get("defer_runtime_bindings", false):
+				sprite.host.active_sprites[sprite.get_instance_id()] = weakref(sprite)
 			return sprite
+		elif t_type == "HostToneFilter":
+			var object_key := _normalize_save_object_id(data.get("__id__", 0))
+			var tone_filter: HostToneFilter = context.objects.get(object_key, target) as HostToneFilter
+			if tone_filter == null:
+				tone_filter = HostToneFilter.new(_host_from_vm(vm))
+			if data.has("__id__"):
+				context.objects[object_key] = tone_filter
+				context.hydrating[object_key] = true
+			tone_filter.host = _host_from_vm(vm) if _host_from_vm(vm) != null else tone_filter.host
+			tone_filter.filter_type = str(data.get("filter_type", "NORMAL")).to_upper()
+			var tone_values: Array = data.get("tone", [1.0, 1.0, 1.0, 1.0])
+			if tone_values.size() == 4:
+				tone_filter.tone = Color(float(tone_values[0]), float(tone_values[1]), float(tone_values[2]), float(tone_values[3]))
+			for channel_name in ["red_table", "green_table", "blue_table", "alpha_table"]:
+				var table_values: Variant = data.get(channel_name, [])
+				var restored_table := PackedByteArray()
+				if not table_values is Array or table_values.size() != 256:
+					_set_restore_error(context, "HostToneFilter %s 表格长度无效。" % channel_name)
+					continue
+				for table_value: Variant in table_values:
+					if not _is_save_integer(table_value) or int(table_value) < 0 or int(table_value) > 255:
+						_set_restore_error(context, "HostToneFilter %s 表格含无效值。" % channel_name)
+						break
+					restored_table.append(int(table_value))
+				if restored_table.size() == 256:
+					tone_filter.set(channel_name, restored_table)
+			tone_filter.tone_flags = int(data.get("tone_flags", 0))
+			var saved_fields: Variant = deserialize_value(data.get("fields", {}), vm, context)
+			if saved_fields is Dictionary:
+				tone_filter.fields = saved_fields
+			tone_filter.tone_texture = null
+			return tone_filter
 		elif t_type == "HostResource":
 			var resource_host := _host_from_vm(vm)
-			var resource: HostResource = target if target is HostResource else HostResource.new(
+			var object_key := _normalize_save_object_id(data.get("__id__", 0))
+			var resource: HostResource = context.objects.get(object_key, target) as HostResource
+			if resource == null:
+				resource = HostResource.new(
 				str(data.get("name", "")),
 				str(data.get("archive_name", "")),
 				int(data.get("entry_index", -1)),
 				int(data.get("unpacked_size", 0)),
 				int(data.get("payload_offset", 0)),
 				resource_host
-			)
+				)
 			resource.host = resource_host if resource_host != null else resource.host
 			if data.has("__id__"):
-				context.objects[str(data["__id__"])] = resource
+				context.objects[object_key] = resource
+				context.hydrating[object_key] = true
 			resource.name = str(data.get("name", ""))
 			resource.archive_name = str(data.get("archive_name", ""))
 			resource.entry_index = int(data.get("entry_index", -1))
@@ -3930,26 +5693,41 @@ static func deserialize_into(target: Variant, data: Variant, vm: RefCounted = nu
 			if resource_host != null:
 				var extension := resource.name.get_extension().to_lower()
 				if extension == "mio":
-					resource.load_sound(resource.name)
+					var sound_loaded := resource.load_sound(resource.name) != 0
+					if not sound_loaded and context.get("strict_resources", false):
+						_set_restore_error(context, "无法恢复 HostResource 音频 %s: %s" % [resource.name, resource_host.last_error])
 					if not data.has("position_frames") and resource.audio_stream != null:
 						var legacy_msec := float(data.get("current_position", 0))
 						resource.current_position = roundi(legacy_msec * resource.audio_stream.mix_rate / 1000.0)
 				elif extension == "eri":
-					resource.load_image(resource.name)
+					if resource.load_image(resource.name) == 0 and context.get("strict_resources", false):
+						_set_restore_error(context, "无法恢复 HostResource 图像 %s" % resource.name)
+			elif not resource.name.is_empty() and resource.name.get_extension().to_lower() in ["mio", "eri"] and context.get("strict_resources", false):
+				_set_restore_error(context, "无法恢复 HostResource %s: VM 未绑定 Host" % resource.name)
 			return resource
 		elif t_type == "Array":
-			var array_value: Array = []
+			var object_key := _normalize_save_object_id(data.get("__id__", 0))
+			var array_value: Array = context.objects.get(object_key, [])
+			array_value.clear()
 			if data.has("__id__"):
-				context.objects[str(data["__id__"])] = array_value
+				context.objects[object_key] = array_value
+				context.hydrating[object_key] = true
 			for item in data.get("items", []):
 				array_value.append(deserialize_value(item, vm, context))
 			return array_value
 		elif t_type == "Dictionary":
-			var dictionary_value: Dictionary = {}
+			var object_key := _normalize_save_object_id(data.get("__id__", 0))
+			var dictionary_value: Dictionary = context.objects.get(object_key, {})
+			dictionary_value.clear()
 			if data.has("__id__"):
-				context.objects[str(data["__id__"])] = dictionary_value
+				context.objects[object_key] = dictionary_value
+				context.hydrating[object_key] = true
 			var items: Variant = data.get("items", {})
-			if items is Dictionary:
+			if data.has("entries") and data["entries"] is Array:
+				for entry: Array in data["entries"]:
+					var restored_key: Variant = deserialize_value(entry[0], vm, context)
+					dictionary_value[restored_key] = deserialize_value(entry[1], vm, context)
+			elif items is Dictionary:
 				for key in items.keys():
 					dictionary_value[key] = deserialize_value(items[key], vm, context)
 			return dictionary_value
@@ -3969,6 +5747,8 @@ static func deserialize_into(target: Variant, data: Variant, vm: RefCounted = nu
 
 
 static func deserialize_value(data: Variant, vm: RefCounted = null, context: Dictionary = {}) -> Variant:
+	if not str(context.get("error", "")).is_empty():
+		return null
 	if data is Dictionary and data.has("__type__"):
 		return deserialize_into(null, data, vm, context)
 	elif data is Dictionary and data.has("__ref__"):
@@ -3993,6 +5773,52 @@ static func _host_from_vm(vm: RefCounted) -> CsxHost:
 	return candidate if candidate is CsxHost else null
 
 
+static func _set_restore_error(context: Dictionary, message: String) -> void:
+	if str(context.get("error", "")).is_empty():
+		context["error"] = message
+
+
+static func _restore_sprite_button_images(sprite: HostSprite, context: Dictionary) -> void:
+	if sprite.button_image_sources.is_empty():
+		return
+	if sprite.host == null:
+		if context.get("strict_resources", false):
+			_set_restore_error(context, "无法恢复 HostSprite 按钮图像：VM 未绑定 Host。")
+		return
+	for state_name in ["normal", "focus", "pushed", "disabled"]:
+		var descriptor: Variant = sprite.button_image_sources.get(state_name, {})
+		if not descriptor is Dictionary or descriptor.is_empty():
+			continue
+		var filename := str(descriptor.get("filename", ""))
+		var archive_hint := str(descriptor.get("archive_hint", ""))
+		var image_result := sprite.host.load_image(filename, archive_hint)
+		if not image_result.get("ok", false):
+			if context.get("strict_resources", false):
+				_set_restore_error(context, "无法恢复 HostSprite %s 按钮图像 %s。" % [state_name, filename])
+			continue
+		var restored_image: Image = image_result.get("image")
+		var crop: Variant = descriptor.get("crop", [0, 0, 0, 0])
+		if crop is Array and crop.size() == 4 and int(crop[2]) > 0 and int(crop[3]) > 0:
+			var bounded := Rect2i(int(crop[0]), int(crop[1]), int(crop[2]), int(crop[3])).intersection(Rect2i(Vector2i.ZERO, restored_image.get_size()))
+			if bounded.size.x > 0 and bounded.size.y > 0:
+				restored_image = restored_image.get_region(bounded)
+		var restored_texture := ImageTexture.create_from_image(restored_image)
+		match state_name:
+			"normal":
+				sprite.btn_normal_img = restored_image
+				sprite.btn_normal_tex = restored_texture
+			"focus":
+				sprite.btn_focus_img = restored_image
+				sprite.btn_focus_tex = restored_texture
+			"pushed":
+				sprite.btn_pushed_img = restored_image
+				sprite.btn_pushed_tex = restored_texture
+			"disabled":
+				sprite.btn_disabled_img = restored_image
+				sprite.btn_disabled_tex = restored_texture
+	sprite.set_button_state(sprite.btn_state)
+
+
 
 func record_dialogue(speaker: String, text: String, voice: String = "") -> void:
 	var entry := {
@@ -4009,11 +5835,3 @@ func record_dialogue(speaker: String, text: String, voice: String = "") -> void:
 		play_voice(voice)
 	emit_signal("dialogue_updated", entry)
 	print("[CSX Dialogue] [%s] %s%s" % [speaker, text, (" (voice: %s)" % voice) if not voice.is_empty() else ""])
-
-
-func record_choices(items: Array) -> void:
-	current_choices.clear()
-	for it in items:
-		current_choices.append(str(it))
-	emit_signal("choices_updated", current_choices)
-	print("[CSX Host] Choices presented: %s" % str(current_choices))

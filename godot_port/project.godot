@@ -5,7 +5,7 @@ config_version=5
 
 [application]
 
-config/name="Yosuga Port Prototype"
+config/name="EntisGLS Godot Runtime"
 run/main_scene="res://scenes/adv_player.tscn"
 
 [display]
