@@ -212,6 +212,7 @@ var host_texture_opacity_cache: Dictionary = {}
 var host_texture_opacity_cache_sweep_ticks: int = 0
 var last_host_input_was_pointer: bool = false
 var native_title_result_handled: bool = false
+var native_title_load_pending: bool = false
 var host_window_last_viewport_size: Vector2 = Vector2.ZERO
 
 # Confirmation Dialog
@@ -2646,6 +2647,7 @@ func _start_native_title_script() -> bool:
 	vm.last_return_value = null
 	vm.last_error = ""
 	native_title_result_handled = false
+	native_title_load_pending = false
 	is_title_mode = true
 	is_running = true
 	return true
@@ -2689,6 +2691,8 @@ func _process_native_title() -> void:
 		return
 	_sync_host_window_canvas()
 	vm.refresh_cooperative_sleep()
+	if _try_resume_native_title_load():
+		return
 	if vm.is_halted:
 		if native_appreciation_mode:
 			_start_native_title_script()
@@ -2707,12 +2711,36 @@ func _process_native_title() -> void:
 			push_error("[AdvPlayer] Native screen stopped at 0x%X (%s): %s" % [vm.ip, " > ".join(frames), vm.last_error])
 			return
 		executed += 1
+		if _try_resume_native_title_load():
+			return
 	_sync_host_window_canvas()
 	if vm.is_halted:
 		if native_appreciation_mode:
 			_start_native_title_script()
 		else:
 			_handle_native_title_return()
+
+
+func _try_resume_native_title_load() -> bool:
+	if not is_title_mode or native_appreciation_mode or vm == null:
+		native_title_load_pending = false
+		return false
+	if not native_title_load_pending and not _native_stack_contains("EnterLoad"):
+		return false
+	var sc_obj: Variant = vm.globals_by_name.get("scObj", null)
+	if not sc_obj is CsxVMReader.CsxInstance:
+		return false
+	var is_load: Variant = sc_obj.get_field("isLoad")
+	if is_load != -1:
+		native_title_load_pending = false
+		return false
+	native_title_load_pending = true
+	for active_load_frame in ["EnterLoad", "Load", "NormalLoad", "QuickLoad", "LoadSaveWindow::loadsave", "LoadSaveWindow::run", "Confirm"]:
+		if _native_stack_contains(active_load_frame):
+			return false
+	native_title_load_pending = false
+	_resume_loaded_scenario_from_current_state("native-title-load")
+	return true
 
 
 func _handle_native_title_return() -> void:
@@ -4005,7 +4033,7 @@ func _open_config_modal() -> void:
 		return
 	is_config_open = true
 	config_panel.visible = true
-	print("[AdvPlayer] Opened native Config Window.")
+	print("[AdvPlayer] Opened project-owned Config fallback modal.")
 
 
 func _close_config_modal() -> void:
@@ -4014,15 +4042,57 @@ func _close_config_modal() -> void:
 	_persist_player_settings()
 	is_config_open = false
 	config_panel.visible = false
-	print("[AdvPlayer] Closed native Config Window.")
+	print("[AdvPlayer] Closed project-owned Config fallback modal.")
 
 
 func _exit_title_to_game() -> void:
+	native_title_load_pending = false
 	is_title_mode = false
 	title_panel.visible = false
 	if host_window_layer != null:
 		host_window_layer.visible = false
 	print("[AdvPlayer] Exited Title Screen.")
+
+
+func _resume_loaded_scenario_from_current_state(context_id: String) -> bool:
+	if vm == null or host == null or not vm.functions.has("ScenarioLoop"):
+		var error_text := "读档后未找到 ScenarioLoop，无法恢复剧情。"
+		push_error("[AdvPlayer] " + error_text)
+		if message_label != null:
+			message_label.text = "[color=#e06c75]%s[/color]" % error_text
+		is_running = false
+		return false
+	var sc_obj: Variant = vm.globals_by_name.get("scObj", null)
+	var saved_scenario_value: Variant = sc_obj.get_field("scenarioCall") if sc_obj is CsxVMReader.CsxInstance else null
+	var saved_scenario_call := str(saved_scenario_value) if saved_scenario_value != null else ""
+	if saved_scenario_call.is_empty():
+		var error_text := "读档未恢复有效的 scObj.scenarioCall，无法继续原存档剧情。"
+		push_error("[AdvPlayer] " + error_text)
+		if message_label != null:
+			message_label.text = "[color=#e06c75]%s[/color]" % error_text
+		is_running = false
+		return false
+	var current_sc: String = saved_scenario_call
+	if is_title_mode:
+		_exit_title_to_game()
+	_reset_story_interaction_state(context_id)
+	vm.ip = vm.functions["ScenarioLoop"]
+	vm.is_halted = false
+	vm.pending_call_args = [current_sc]
+	vm.pending_return_ip = -1
+	vm.call_stack.clear()
+	vm.eval_stack.clear()
+	vm.last_return_value = null
+	vm.last_error = ""
+	is_running = true
+	if host.current_bg_texture != null and bg_rect != null:
+		bg_rect.texture = host.current_bg_texture
+	if speaker_label != null:
+		speaker_label.text = host.current_speaker
+	if message_label != null:
+		message_label.text = host.current_dialogue
+	print("[AdvPlayer] Resumed loaded scenario '%s' via ScenarioLoop (%s)." % [current_sc, context_id])
+	return true
 
 
 func _on_title_start_game() -> void:
@@ -4717,33 +4787,11 @@ func load_from_slot(slot: int) -> bool:
 		return false
 
 	print("[AdvPlayer] Successfully loaded from Slot %02d" % slot)
-	_reset_story_interaction_state("load-slot:%d" % slot)
 	_close_save_load_modal()
-
-	var sc_obj = vm.globals_by_name.get("scObj", null)
-	var current_sc: String = start_scenario
-	if sc_obj is CsxVMReader.CsxInstance:
-		var sc_call: String = str(sc_obj.get_field("scenarioCall"))
-		if not sc_call.is_empty():
-			current_sc = sc_call
-
-	if is_title_mode:
-		_exit_title_to_game()
-
-	# Re-enter ScenarioLoop
-	if vm.functions.has("ScenarioLoop"):
-		vm.ip = vm.functions["ScenarioLoop"]
-		vm.is_halted = false
-		vm.pending_call_args = [current_sc]
-		vm.pending_return_ip = -1
-		vm.call_stack.clear()
-		vm.eval_stack.clear()
-		is_running = true
-
-	if host.current_bg_texture != null:
-		bg_rect.texture = host.current_bg_texture
-	speaker_label.text = host.current_speaker
-	message_label.text = "[color=#98c379]★ 已读取存档 (Slot %02d)[/color]\n" % slot + host.current_dialogue
+	if not _resume_loaded_scenario_from_current_state("load-slot:%d" % slot):
+		return false
+	if message_label != null:
+		message_label.text = "[color=#98c379]★ 已读取存档 (Slot %02d)[/color]\n" % slot + host.current_dialogue
 	return true
 
 

@@ -31,7 +31,7 @@
    - `File::Open` 成功返回 0（符合 C 规范 0=OK），失败返回非 0 错误码；条件跳转（`op7`）依据条件 0 进行错误分支短路。
    - 存档文件存放于 `user://saves/` 下，支持生成 120x90 预览缩略图，在重新启动游戏时自动恢复系统设置（`gameClear`、已读文本标记等）及场景状态。
    - 常规存档 `NormalSave(id, hideSpr, showSpr)`（1 <= id <= 60）序列化生成 `Save%03d.dat` 与 `Save%03d.png`，并同步更新全局 `sysObj.bookmark[id]`（包含 `fSave = -1`、`comment` 对话截取与 `Time` 结构体：年/月/日/时/分/秒），最后保存 `system.dat`。
-   - `NormalLoad(id)` 读取对应的 `Save%03d.dat` 并反序列化 `scObj`，重置 `isLoad = -1`，重启 `ScenarioLoop` 即可直接从存档点无缝续播。
+   - `NormalLoad(id)` 读取并反序列化 `Save%03d.dat`；原版脚本的 `EnterLoad` 在恢复后设置 `scObj.isLoad = -1`。本移植的 `AdvPlayer` 等待 Title 的 Confirm / LoadSaveWindow / Load 函数退出后，要求恢复的 `scObj.scenarioCall` 非空，再清理旧 VM 栈并从 `ScenarioLoop` 继续。该调度交接有原始 CSX 在自研 VM 上的回归；官方 Cotopha 何时转移调用栈、原生 SaveObject 格式是否一致仍未对照。
 
 5. **标题画面系统（Title Screen）**：
    - 原版标题画面入口 `Title()`（@ 0x025EEB），使用 `titleSkin` 挂载 `system/title.noa`。

@@ -1650,8 +1650,9 @@ func _is_match_usage(value: String, usage: String, captures: Variant) -> String:
 	if captures is Array:
 		captures.clear()
 		for index in range(capture_count):
-			var group_value := result.get_string(index + 1)
-			captures.append(int(group_value) if group_value.is_valid_int() else 0)
+			# The original CSX callers compare captures against string constants;
+			# keep the matched text verbatim, including zero padding and empties.
+			captures.append(result.get_string(index + 1))
 	# CSX callers use `IsMatchUsage(...) == ""` as their match test.
 	return ""
 

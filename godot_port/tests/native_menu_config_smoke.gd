@@ -216,4 +216,4 @@ func _init() -> void:
 	print("  Original game archives remain 100% pristine and unmodified.")
 
 	TestSupport.remove_test_saves(test_save_dir)
-	finish_success("PASS Native Dialogue Menu & Config Modal Smoke Test!")
+	finish_success("PASS project-owned Config fallback modal and audio settings smoke test!")

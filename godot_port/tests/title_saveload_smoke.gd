@@ -177,6 +177,16 @@ func _run() -> void:
 		printerr("FAIL save_to_slot(3) failed")
 		quit(1)
 		return
+	var saved_sc_obj: Variant = player.vm.globals_by_name.get("scObj", null)
+	if not saved_sc_obj is CsxVMReader.CsxInstance:
+		printerr("FAIL Original scObj must remain available after Save003")
+		quit(1)
+		return
+	var saved_native_scenario_call := str(saved_sc_obj.get_field("scenarioCall"))
+	if saved_native_scenario_call.is_empty():
+		printerr("FAIL Save003 must retain its original scenarioCall")
+		quit(1)
+		return
 
 	var info3: Dictionary = player.get_slot_info(3)
 	print("  Slot 3 Info: exists=%s, timestamp='%s', comment='%s', has_thumbnail=%s" % [
@@ -301,8 +311,8 @@ func _run() -> void:
 		return
 	var native_slot_captures: Array = []
 	var native_slot_usage: String = player.vm._is_match_usage(native_slot_button_sprite.full_btn_id, "%s&\\\\ID_SELECT&(<0-9>*)&\\\\ID_SELECT&", native_slot_captures)
-	if native_slot_usage != "" or native_slot_captures != [4]:
-		printerr("FAIL Original LoadSaveWindow slot selector must capture index 4: usage='%s' captures=%s" % [native_slot_usage, str(native_slot_captures)])
+	if native_slot_usage != "" or native_slot_captures != ["04"]:
+		printerr("FAIL Original LoadSaveWindow selector must preserve its zero-padded slot capture: usage='%s' captures=%s" % [native_slot_usage, str(native_slot_captures)])
 		quit(1)
 		return
 	if native_slot_number.text_content != "０４" or native_slot_date.text_content.is_empty() or native_slot_comment.text_content != str(info3["comment"]):
@@ -347,25 +357,52 @@ func _run() -> void:
 		quit(1)
 		return
 	_click(native_slot_button)
+	var native_confirm_window: CsxHostClass.HostWindow = null
+	var native_confirm_page: CsxHostClass.HostSprite = null
+	var native_confirm_yes_sprite: CsxHostClass.HostSprite = null
+	var native_confirm_no_sprite: CsxHostClass.HostSprite = null
+	var native_confirm_yes_wrapper: Control = null
+	var native_confirm_no_wrapper: Control = null
+	var native_confirm_yes_button: TextureButton = null
+	var native_confirm_no_button: TextureButton = null
 	for frame in range(120):
 		await process_frame
-		if player.confirm_panel.is_visible_in_tree():
+		var active_window: Variant = player.vm.data_vars[4].get("value", null) if player.vm.data_vars.size() > 4 else null
+		if active_window is CsxHostClass.HostWindow:
+			native_confirm_window = active_window
+			native_confirm_page = _find_host_sprite_by_form_page(native_confirm_window.root_sprites, "ID_PAGE_CONFIRM")
+			native_confirm_yes_sprite = _find_button_sprite(native_confirm_window.root_sprites, "ID_YES")
+			native_confirm_no_sprite = _find_button_sprite(native_confirm_window.root_sprites, "ID_NO")
+			native_confirm_yes_wrapper = player.host_sprite_controls.get(native_confirm_yes_sprite.get_instance_id(), null) if native_confirm_yes_sprite != null else null
+			native_confirm_no_wrapper = player.host_sprite_controls.get(native_confirm_no_sprite.get_instance_id(), null) if native_confirm_no_sprite != null else null
+			native_confirm_yes_button = native_confirm_yes_wrapper.get_node_or_null("NativeButton") if native_confirm_yes_wrapper != null else null
+			native_confirm_no_button = native_confirm_no_wrapper.get_node_or_null("NativeButton") if native_confirm_no_wrapper != null else null
+		if (
+			_native_stack_has(player.vm.call_stack, "Confirm")
+			and native_confirm_page != null
+			and native_confirm_yes_button != null and native_confirm_yes_button.is_visible_in_tree() and not native_confirm_yes_button.disabled
+			and native_confirm_no_button != null and native_confirm_no_button.is_visible_in_tree() and not native_confirm_no_button.disabled
+		):
 			break
-	if not player.confirm_panel.is_visible_in_tree() or player.confirm_panel.find_child("ID_NO", true, false) == null:
+	if (
+		not _native_stack_has(player.vm.call_stack, "Confirm")
+		or native_confirm_page == null
+		or native_confirm_yes_button == null or not native_confirm_yes_button.is_visible_in_tree()
+		or native_confirm_no_button == null or not native_confirm_no_button.is_visible_in_tree()
+	):
 		var native_stack_after_click: Array[String] = []
 		for stack_frame: Variant in player.vm.call_stack:
 			native_stack_after_click.append(str(stack_frame.name))
-		var native_button_window: CsxHostClass.HostWindow = native_slot_button_sprite.get_root_window()
-		printerr("FAIL Selecting native Save003 must await the original CSX confirmation (modal=%s title=%s visible=%s disabled=%s mouse_filter=%s global_rect=%s button_window=%s current_window=%s pending=%s scoped_pending=%s stack=%s vm_error='%s' host_error='%s')" % [str(player.is_save_load_open), str(player.is_title_mode), str(native_slot_button.is_visible_in_tree()), str(native_slot_button.disabled), str(native_slot_button.mouse_filter), str(native_slot_button.get_global_rect()), str(native_button_window.get_instance_id()) if native_button_window != null else "null", str(native_host_window.get_instance_id()), str(player.host.has_pending_commands()), str(player.host.has_pending_commands_for_window(native_host_window.get_instance_id())), str(native_stack_after_click), player.vm.last_error, player.host.last_error])
+		printerr("FAIL Selecting native Save003 must show original CSX ID_PAGE_CONFIRM with interactive ID_YES/ID_NO (active_window=%s page=%s yes=%s no=%s title=%s custom_modal=%s stack=%s vm_error='%s' host_error='%s')" % [str(native_confirm_window.get_instance_id()) if native_confirm_window != null else "null", str(native_confirm_page), str(native_confirm_yes_button), str(native_confirm_no_button), str(player.is_title_mode), str(player.confirm_panel.is_visible_in_tree()), str(native_stack_after_click), player.vm.last_error, player.host.last_error])
 		quit(1)
 		return
-	_click(player.confirm_panel.find_child("ID_NO", true, false))
+	_click(native_confirm_no_button)
 	for frame in range(120):
 		await process_frame
-		if not player.confirm_panel.is_visible_in_tree():
+		if not _native_stack_has(player.vm.call_stack, "Confirm"):
 			break
-	if player.confirm_panel.is_visible_in_tree() or not _native_stack_has(player.vm.call_stack, "LoadSaveWindow::run") or player.host.pending_confirmation_active:
-		printerr("FAIL Rejecting native load confirmation must return to the live LoadSaveWindow")
+	if _native_stack_has(player.vm.call_stack, "Confirm") or not _native_stack_has(player.vm.call_stack, "LoadSaveWindow::run") or player.host.pending_confirmation_active:
+		printerr("FAIL Rejecting native CSX confirmation must return to the live LoadSaveWindow")
 		quit(1)
 		return
 	var close_load_event := InputEventKey.new()
@@ -478,23 +515,79 @@ func _run() -> void:
 		quit(1)
 		return
 	_click(accepted_slot_button)
+	var accepted_confirm_window: CsxHostClass.HostWindow = null
+	var accepted_confirm_page: CsxHostClass.HostSprite = null
+	var accepted_confirm_yes_sprite: CsxHostClass.HostSprite = null
+	var accepted_confirm_no_sprite: CsxHostClass.HostSprite = null
+	var accepted_confirm_yes_wrapper: Control = null
+	var accepted_confirm_no_wrapper: Control = null
+	var accepted_confirm_yes_button: TextureButton = null
+	var accepted_confirm_no_button: TextureButton = null
 	for frame in range(120):
 		await process_frame
-		if player.confirm_panel.is_visible_in_tree():
+		var accepted_active_window: Variant = player.vm.data_vars[4].get("value", null) if player.vm.data_vars.size() > 4 else null
+		if accepted_active_window is CsxHostClass.HostWindow:
+			accepted_confirm_window = accepted_active_window
+			accepted_confirm_page = _find_host_sprite_by_form_page(accepted_confirm_window.root_sprites, "ID_PAGE_CONFIRM")
+			accepted_confirm_yes_sprite = _find_button_sprite(accepted_confirm_window.root_sprites, "ID_YES")
+			accepted_confirm_no_sprite = _find_button_sprite(accepted_confirm_window.root_sprites, "ID_NO")
+			accepted_confirm_yes_wrapper = player.host_sprite_controls.get(accepted_confirm_yes_sprite.get_instance_id(), null) if accepted_confirm_yes_sprite != null else null
+			accepted_confirm_no_wrapper = player.host_sprite_controls.get(accepted_confirm_no_sprite.get_instance_id(), null) if accepted_confirm_no_sprite != null else null
+			accepted_confirm_yes_button = accepted_confirm_yes_wrapper.get_node_or_null("NativeButton") if accepted_confirm_yes_wrapper != null else null
+			accepted_confirm_no_button = accepted_confirm_no_wrapper.get_node_or_null("NativeButton") if accepted_confirm_no_wrapper != null else null
+		if (
+			_native_stack_has(player.vm.call_stack, "Confirm")
+			and accepted_confirm_page != null
+			and accepted_confirm_yes_button != null and accepted_confirm_yes_button.is_visible_in_tree() and not accepted_confirm_yes_button.disabled
+			and accepted_confirm_no_button != null and accepted_confirm_no_button.is_visible_in_tree() and not accepted_confirm_no_button.disabled
+		):
 			break
-	if not player.confirm_panel.is_visible_in_tree():
-		printerr("FAIL Accepted native slot selection must present CSX Confirm")
+	if (
+		not _native_stack_has(player.vm.call_stack, "Confirm")
+		or accepted_confirm_page == null
+		or accepted_confirm_yes_button == null or not accepted_confirm_yes_button.is_visible_in_tree()
+		or accepted_confirm_no_button == null or not accepted_confirm_no_button.is_visible_in_tree()
+		or player.host.pending_confirmation_active
+	):
+		printerr("FAIL Accepted native slot selection must show original CSX ID_PAGE_CONFIRM with enabled ID_YES/ID_NO controls (window=%s page=%s yes=%s no=%s host_confirm_pending=%s)" % [str(accepted_confirm_window.get_instance_id()) if accepted_confirm_window != null else "null", str(accepted_confirm_page), str(accepted_confirm_yes_button), str(accepted_confirm_no_button), str(player.host.pending_confirmation_active)])
 		quit(1)
 		return
-	_click(player.confirm_panel.find_child("ID_YES", true, false))
+	var pre_load_sc_obj: Variant = player.vm.globals_by_name.get("scObj", null)
+	if not pre_load_sc_obj is CsxVMReader.CsxInstance:
+		printerr("FAIL Native Title load must begin with an original scObj instance")
+		quit(1)
+		return
+	var native_load_mutation := "__NATIVE_TITLE_LOAD_MUTATION__"
+	pre_load_sc_obj.set_field("scenarioCall", native_load_mutation)
+	if pre_load_sc_obj.get_field("scenarioCall") != native_load_mutation:
+		printerr("FAIL Could not inject the native-load restore discriminator")
+		quit(1)
+		return
+	_click(accepted_confirm_yes_button)
 	for frame in range(240):
 		await process_frame
 		if not player.is_title_mode and not _native_stack_has(player.vm.call_stack, "LoadSaveWindow::run"):
 			break
 	if player.is_title_mode or player.title_panel.visible or _native_stack_has(player.vm.call_stack, "LoadSaveWindow::run") or player.vm.awaiting_host_confirmation:
-		printerr("FAIL Accepting native Save003 confirmation must resume the loaded scenario")
+		var accepted_stack_names: Array[String] = []
+		for accepted_frame: Variant in player.vm.call_stack:
+			accepted_stack_names.append(str(accepted_frame.name))
+		var accepted_active_window: Variant = player.vm.data_vars[4].get("value", null) if player.vm.data_vars.size() > 4 else null
+		printerr("FAIL Accepting native Save003 confirmation must resume loaded scenario (title=%s title_panel=%s loadsave_frame=%s confirm_frame=%s awaiting_host_confirm=%s running=%s waiting_input=%s active_window=%s stack=%s ip=0x%X vm_error='%s' host_error='%s')" % [str(player.is_title_mode), str(player.title_panel.visible), str(_native_stack_has(player.vm.call_stack, "LoadSaveWindow::run")), str(_native_stack_has(player.vm.call_stack, "Confirm")), str(player.vm.awaiting_host_confirmation), str(player.is_running), str(player.host.is_waiting_input), str(accepted_active_window.get_instance_id()) if accepted_active_window is Object else "null", str(accepted_stack_names), player.vm.ip, player.vm.last_error, player.host.last_error])
 		quit(1)
 		return
+	var restored_native_sc_obj: Variant = player.vm.globals_by_name.get("scObj", null)
+	if (
+		not restored_native_sc_obj is CsxVMReader.CsxInstance
+		or str(restored_native_sc_obj.get_field("scenarioCall")) != saved_native_scenario_call
+		or player.vm.ip != int(player.vm.functions.get("ScenarioLoop", -1))
+		or player.vm.pending_call_args.size() != 1
+		or str(player.vm.pending_call_args[0]) != saved_native_scenario_call
+	):
+		printerr("FAIL Native Title load must restore Save003 scenarioCall and enqueue that continuation (expected='%s' actual='%s' ip=0x%X pending=%s)" % [saved_native_scenario_call, str(restored_native_sc_obj.get_field("scenarioCall")) if restored_native_sc_obj is CsxVMReader.CsxInstance else "invalid", player.vm.ip, str(player.vm.pending_call_args)])
+		quit(1)
+		return
+	print("  Native Title load restored Save003 scenarioCall '%s' after an in-memory mutation." % saved_native_scenario_call)
 	var native_load_dialogues := 0
 	frames = 0
 	while native_load_dialogues < 2 and frames < 200:
