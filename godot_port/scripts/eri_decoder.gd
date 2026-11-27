@@ -1,6 +1,5 @@
 extends RefCounted
 
-const ExternalCodec = preload("res://scripts/external_codec.gd")
 const EriMetadata = preload("res://scripts/eri_metadata.gd")
 const MAX_IMAGE_PIXELS := 64 * 1024 * 1024
 
@@ -35,19 +34,10 @@ static func decode(data: PackedByteArray) -> Dictionary:
 				return _split_frames(image, metadata)
 			if native_result is Dictionary:
 				native_error = str(native_result.get("error", "原生 ERI 解码失败。"))
-	if OS.get_name() != "Linux":
-		return {
-			"ok": false,
-			"error": native_error if not native_error.is_empty() else "此平台未加载进程内 ERI 解码扩展。"
-		}
-	var result := ExternalCodec.convert(data, "entis/eri", "eri", "png")
-	if not result.get("ok", false):
-		return result
-	var image := Image.new()
-	var load_error := image.load_png_from_buffer(result["data"])
-	if load_error != OK or image.is_empty():
-		return {"ok": false, "error": "无法读取解码后的图片：%s" % error_string(load_error)}
-	return _split_frames(image, metadata)
+	return {
+		"ok": false,
+		"error": native_error if not native_error.is_empty() else "未加载进程内 ERI 解码扩展。"
+	}
 
 
 static func _split_frames(stacked_image: Image, metadata: Dictionary) -> Dictionary:

@@ -8,6 +8,7 @@ const NativeMessageFadeEffect = preload("res://scripts/native_message_fade_effec
 const BoundedFileReader = preload("res://scripts/bounded_file_reader.gd")
 const MAX_MEI_FILE_BYTES := 128 * 1024 * 1024
 const MAX_MEI_GOP_BUFFER_BYTES := 64 * 1024 * 1024
+const SAVE_LOAD_SYNC_STEP_BUDGET := 1_000_000
 
 const CG_CATEGORIES: Array[Dictionary] = [
 	{"id": "EA", "name": "春日野 穹", "sub": "Kasugano Sora"},
@@ -809,6 +810,7 @@ func _start_engine() -> void:
 	host.movie_close_requested.connect(_on_movie_close_requested)
 	host.movie_seek_requested.connect(_on_movie_seek_requested)
 	host.tone_filter_updated.connect(_on_tone_filter_updated)
+	host.confirmation_requested.connect(_on_host_confirmation_requested)
 	_apply_dialogue_skin()
 	_apply_config_skin()
 	_apply_voice_details_skin()
@@ -2272,6 +2274,17 @@ func _build_confirm_dialog() -> void:
 	ok_btn.size = Vector2(82, 25)
 	ok_btn.pressed.connect(_on_confirm_dialog_ok)
 	dialog_box.add_child(ok_btn)
+	var ok_label := Label.new()
+	ok_label.name = "ID_YES_LABEL"
+	ok_label.text = "确定"
+	ok_label.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	ok_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	ok_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	ok_label.add_theme_color_override("font_color", Color("#eeeeee"))
+	ok_label.add_theme_color_override("font_outline_color", Color.BLACK)
+	ok_label.add_theme_constant_override("outline_size", 2)
+	ok_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ok_btn.add_child(ok_label)
 
 	var cancel_btn := TextureButton.new()
 	cancel_btn.name = "ID_NO"
@@ -2279,6 +2292,17 @@ func _build_confirm_dialog() -> void:
 	cancel_btn.size = Vector2(82, 25)
 	cancel_btn.pressed.connect(_close_confirm_dialog)
 	dialog_box.add_child(cancel_btn)
+	var cancel_label := Label.new()
+	cancel_label.name = "ID_NO_LABEL"
+	cancel_label.text = "取消"
+	cancel_label.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	cancel_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	cancel_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	cancel_label.add_theme_color_override("font_color", Color("#eeeeee"))
+	cancel_label.add_theme_color_override("font_outline_color", Color.BLACK)
+	cancel_label.add_theme_constant_override("outline_size", 2)
+	cancel_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	cancel_btn.add_child(cancel_label)
 
 
 func _show_confirm_dialog(prompt: String, callback: Callable) -> void:
@@ -2290,14 +2314,27 @@ func _show_confirm_dialog(prompt: String, callback: Callable) -> void:
 
 func _close_confirm_dialog() -> void:
 	confirm_panel.visible = false
+	if host != null:
+		host.resolve_confirmation(0)
 	confirm_callback = Callable()
 
 
 func _on_confirm_dialog_ok() -> void:
 	confirm_panel.visible = false
-	if confirm_callback.is_valid():
-		confirm_callback.call()
+	var callback := confirm_callback
 	confirm_callback = Callable()
+	if host != null and host.resolve_confirmation(-1):
+		return
+	if callback.is_valid():
+		callback.call()
+
+
+func _on_host_confirmation_requested(prompt: String) -> void:
+	if confirm_panel == null or confirm_panel.visible:
+		if host != null:
+			host.resolve_confirmation(0)
+		return
+	_show_confirm_dialog(prompt, Callable())
 
 
 func _apply_confirm_skin() -> void:
@@ -3008,6 +3045,8 @@ func _sync_host_sprite(sprite: CsxHostClass.HostSprite, parent: Control, seen: D
 	if native_button != null:
 		if sprite.btn_state == "pushed" and sprite.btn_pushed_tex != null:
 			native_button.texture_normal = sprite.btn_pushed_tex
+		elif (sprite.has_window_focus or sprite.btn_state == "focus") and sprite.btn_focus_tex != null:
+			native_button.texture_normal = sprite.btn_focus_tex
 		else:
 			native_button.texture_normal = sprite.btn_normal_tex if sprite.btn_normal_tex != null else sprite.texture
 		native_button.texture_hover = sprite.btn_focus_tex
@@ -4633,10 +4672,12 @@ func save_to_slot(slot: int) -> bool:
 		return false
 	var save_path := _slot_save_path(slot)
 	var res: Dictionary
+	# Original Story save routines serialize substantial live CSX state; the old
+	# 100k budget timed out on the real Yosuga QuickSave path.
 	if slot == 0:
-		res = vm.call_function_sync("QuickSave", [], 100_000)
+		res = vm.call_function_sync("QuickSave", [], SAVE_LOAD_SYNC_STEP_BUDGET)
 	else:
-		res = vm.call_function_sync("NormalSave", [slot, [], []], 100_000)
+		res = vm.call_function_sync("NormalSave", [slot, [], []], SAVE_LOAD_SYNC_STEP_BUDGET)
 
 	if _is_csx_operation_success(res) and _is_valid_save_document(save_path):
 		print("[AdvPlayer] Successfully saved to Slot %02d" % slot)
@@ -4665,9 +4706,9 @@ func load_from_slot(slot: int) -> bool:
 
 	var res: Dictionary
 	if slot == 0:
-		res = vm.call_function_sync("QuickLoad", [0], 100_000)
+		res = vm.call_function_sync("QuickLoad", [0], SAVE_LOAD_SYNC_STEP_BUDGET)
 	else:
-		res = vm.call_function_sync("NormalLoad", [slot], 100_000)
+		res = vm.call_function_sync("NormalLoad", [slot], SAVE_LOAD_SYNC_STEP_BUDGET)
 
 	if not _is_csx_operation_success(res):
 		var error_text := _csx_operation_error(res)

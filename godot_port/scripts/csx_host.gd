@@ -20,6 +20,7 @@ signal movie_stop_requested
 signal movie_close_requested
 signal movie_seek_requested(frame_index: int)
 signal tone_filter_updated(filter_type: String)
+signal confirmation_requested(prompt: String)
 
 const NoaArchiveReader = preload("res://scripts/noa_archive.gd")
 const EriDecoder = preload("res://scripts/eri_decoder.gd")
@@ -108,6 +109,9 @@ var virtual_time_ms: int = 1000
 var cursor_position_provider: Callable = Callable()
 var command_cursor_override: Vector2i = Vector2i.ZERO
 var command_cursor_override_valid: bool = false
+var pending_confirmation_vm: WeakRef = null
+var pending_confirmation_active: bool = false
+var pending_confirmation_prompt: String = ""
 var command_cursor_override_expires_usec: int = 0
 var active_input_filter_ref: WeakRef = null
 var active_sprites: Dictionary[int, WeakRef] = {}
@@ -1210,9 +1214,26 @@ class HostResourceManager extends RefCounted:
 			text_sprite.text_content = item["text"]
 			parent_sprite.add_sprite(buttons.size() + 1, text_sprite)
 
+		if page_id in ["ID_PAGE_LOAD", "ID_PAGE_SAVE"] and not _create_save_slot_pages(parent_sprite):
+			return 0
 		parent_sprite.refresh_command_ids()
 
 		return 1
+
+	func _create_save_slot_pages(parent_sprite: HostSprite) -> bool:
+		if not skin_pages.has("ID_PAGE_SAVE_INDEX"):
+			if host != null:
+				host.last_error = "frame.noa 缺少存档卡片模板 ID_PAGE_SAVE_INDEX。"
+			return false
+		for slot_index in range(1, 10):
+			var slot_page := HostSprite.new(0, host)
+			slot_page.fields["form_item_id"] = "ID_SELECT%02d" % slot_index
+			slot_page.position = Vector2i(87 + ((slot_index - 1) % 3) * 224, 31 + int((slot_index - 1) / 3) * 174)
+			slot_page.is_visible = true
+			if create_form_page(slot_page, "ID_PAGE_SAVE_INDEX") != 1:
+				return false
+			parent_sprite.add_sprite(10 + slot_index, slot_page)
+		return true
 
 	func _set_form_texture(sprite: HostSprite, resource_id: String) -> bool:
 		var info := _resolve_skin_image(resource_id)
@@ -1318,6 +1339,7 @@ class HostSprite extends RefCounted:
 	var full_btn_id: String = ""
 	var is_button: bool = false
 	var btn_state: String = "normal"
+	var has_window_focus: bool = false
 	var btn_normal_tex: Texture2D = null
 	var btn_focus_tex: Texture2D = null
 	var btn_pushed_tex: Texture2D = null
@@ -1377,7 +1399,7 @@ class HostSprite extends RefCounted:
 		var enabled_items: Dictionary = fields.get("item_enabled_status", {})
 		enabled_items[item_id] = enabled
 		fields["item_enabled_status"] = enabled_items
-		var target := find_form_item(item_id)
+		var target := find_sprite_item(item_id)
 		if target != null:
 			target.is_enabled = enabled
 		return 0
@@ -1385,7 +1407,7 @@ class HostSprite extends RefCounted:
 	func is_enabled_native(item_id: String = "") -> bool:
 		if item_id.is_empty():
 			return is_enabled
-		var target := find_form_item(item_id)
+		var target := find_sprite_item(item_id)
 		if target != null:
 			return target.is_enabled
 		var enabled_items: Dictionary = fields.get("item_enabled_status", {})
@@ -1483,7 +1505,7 @@ class HostSprite extends RefCounted:
 						animation_sequence.append(frame_index)
 				size = Vector2i(image.get_width(), image.get_height())
 				is_visible = true
-				if host.current_bg.is_empty() or filename.begins_with("B") or filename.begins_with("EA"):
+				if not bool(res.get("is_save_thumbnail", false)) and (host.current_bg.is_empty() or filename.begins_with("B") or filename.begins_with("EA")):
 					host.current_bg = p_filename.get_file().get_basename()
 					host.current_bg_texture = texture
 					host.emit_signal("bg_updated", host.current_bg, texture)
@@ -1663,9 +1685,9 @@ class HostSprite extends RefCounted:
 		return 1
 
 	func set_sprite_text(item_id: String, value: String) -> int:
-		var target := find_form_item(item_id) if not item_id.is_empty() else self
+		var target := find_sprite_item(item_id) if not item_id.is_empty() else self
 		if target == null:
-			target = self
+			return 0
 		target.text_content = value
 		target.message_visible_count = -1
 		target.message_pending = false
@@ -1675,7 +1697,7 @@ class HostSprite extends RefCounted:
 		return 1
 
 	func get_sprite_text(item_id: String) -> String:
-		var target := find_form_item(item_id) if not item_id.is_empty() else self
+		var target := find_sprite_item(item_id) if not item_id.is_empty() else self
 		return target.text_content if target != null else ""
 
 	func get_render_size() -> Vector2i:
@@ -1935,9 +1957,39 @@ class HostSprite extends RefCounted:
 		return set_scroll_position(get_scroll_position(item_id, axis), item_id, axis)
 
 	func is_hit_at(x: int, y: int) -> bool:
-		if not is_visible or not is_enabled or transparency >= 256:
+		if not is_enabled:
 			return false
-		return get_sprite_rect().has_point(Vector2(x, y))
+		var ancestor: HostSprite = self
+		while ancestor != null:
+			if not ancestor.is_visible or ancestor.transparency >= 256:
+				return false
+			ancestor = ancestor.parent_sprite
+		var render_size := get_render_size()
+		if render_size.x <= 0 or render_size.y <= 0:
+			return false
+		var local_to_host := get_sprite_to_host_transform()
+		if absf(local_to_host.determinant()) <= 0.000001:
+			return false
+		var local_point := local_to_host.affine_inverse() * Vector2(x, y)
+		return Rect2(Vector2.ZERO, Vector2(render_size)).has_point(local_point)
+
+	func get_sprite_to_host_transform() -> Transform2D:
+		var chain: Array[HostSprite] = []
+		var ancestor: HostSprite = self
+		while ancestor != null:
+			chain.push_front(ancestor)
+			ancestor = ancestor.parent_sprite
+		var local_to_host := Transform2D.IDENTITY
+		for sprite: HostSprite in chain:
+			var sprite_transform := Transform2D(
+				deg_to_rad(sprite.rotation_degrees),
+				sprite.magnification,
+				0.0,
+				Vector2(sprite.position)
+			)
+			sprite_transform *= Transform2D(0.0, Vector2.ONE, 0.0, -Vector2(sprite.rev_center))
+			local_to_host *= sprite_transform
+		return local_to_host
 
 	func get_sprite_rect() -> Rect2:
 		var render_size := get_render_size()
@@ -2083,11 +2135,19 @@ class HostSprite extends RefCounted:
 			host.report_unsupported("HostSprite.SendCommand <%s>" % tag)
 
 	func set_form_image(item_id: String, resource_id: String) -> bool:
-		var item := find_form_item(item_id)
+		var item := find_sprite_item(item_id)
 		return item != null and form_resources != null and form_resources._set_form_texture(item, resource_id)
 
 	func refresh_command_ids() -> void:
 		var page_id := str(fields.get("form_page_id", ""))
+		if page_id == "ID_PAGE_SAVE_INDEX":
+			var container_page_id := str(parent_sprite.fields.get("form_page_id", "")) if parent_sprite != null else ""
+			var slot_item_id := str(fields.get("form_item_id", ""))
+			if container_page_id in ["ID_PAGE_LOAD", "ID_PAGE_SAVE"] and slot_item_id.begins_with("ID_SELECT"):
+				for child in children:
+					if child is HostSprite and not child.btn_id.is_empty():
+						child.full_btn_id = "%s\\\\%s\\\\%s" % [container_page_id, slot_item_id, child.btn_id]
+				return
 		if not page_id.begins_with("ID_PAGE_TAG"):
 			return
 		var tag_index := int(page_id.trim_prefix("ID_PAGE_TAG"))
@@ -2511,12 +2571,15 @@ class HostWindow extends RefCounted:
 		return null
 
 	func _apply_focus(target: HostSprite, path: String) -> void:
-		if focused_sprite != null and focused_sprite.is_button and focused_sprite.btn_state == "focus":
-			focused_sprite.set_button_state("normal")
+		if focused_sprite != null:
+			focused_sprite.has_window_focus = false
+			if focused_sprite.is_button and focused_sprite.btn_state == "focus":
+				var remains_checked := bool(focused_sprite.fields.get("checked", false))
+				focused_sprite.set_button_state("pushed" if remains_checked else "normal")
 		focused_sprite = target
 		focused_path = path
-		if target != null and target.is_button:
-			target.set_button_state("focus")
+		if target != null:
+			target.has_window_focus = true
 
 	func get_focus() -> String:
 		return focused_path
@@ -2664,6 +2727,9 @@ class HostFile extends RefCounted:
 	const MODE_READ := 0
 	const MODE_WRITE := 1
 	const MODE_READ_WRITE := 2
+	# Observed in the original Yosuga CSX Save(filename, ...): mode 5 opens a
+	# save/create path; preserve the project-local 0/1/2 modes as well.
+	const MODE_CREATE_WRITE := 5
 	var host: CsxHost = null
 	var vm: RefCounted = null
 	var current_path: String = ""
@@ -2679,7 +2745,7 @@ class HostFile extends RefCounted:
 	func open(path: String, mode: int = 2) -> int:
 		is_open = false
 		current_path = ""
-		if mode not in [MODE_READ, MODE_WRITE, MODE_READ_WRITE]:
+		if mode not in [MODE_READ, MODE_WRITE, MODE_READ_WRITE, MODE_CREATE_WRITE]:
 			return 1
 		if host == null or path.is_empty():
 			return 1
@@ -2962,6 +3028,8 @@ func _init(p_game_dir: String = "") -> void:
 func shutdown_runtime() -> void:
 	if runtime_shutdown:
 		return
+	if pending_confirmation_active:
+		resolve_confirmation(0)
 	runtime_shutdown = true
 	if active_input_filter_ref != null:
 		var active_filter: Variant = active_input_filter_ref.get_ref()
@@ -3349,6 +3417,26 @@ func is_file_existing(filename: String) -> bool:
 
 
 func load_image(filename: String, archive_hint: String = "") -> Dictionary:
+	var save_image_name := filename.get_file()
+	var save_image_stem := save_image_name.get_basename().to_lower()
+	if save_image_name.get_extension().to_lower() == "dat" and save_image_stem.begins_with("save"):
+		var thumbnail_result := load_thumbnail_image(save_image_name)
+		if not thumbnail_result.get("ok", false):
+			last_error = str(thumbnail_result.get("error", "无法读取存档缩略图。"))
+			return {"ok": false, "error": last_error}
+		var thumbnail_image: Image = thumbnail_result["image"]
+		var thumbnail_texture := ImageTexture.create_from_image(thumbnail_image)
+		var thumbnail_frames: Array[Image] = [thumbnail_image]
+		var thumbnail_sequence: Array[int] = [0]
+		return {
+			"ok": true,
+			"image": thumbnail_image,
+			"texture": thumbnail_texture,
+			"frames": thumbnail_frames,
+			"frame_sequence": thumbnail_sequence,
+			"total_time_ms": 0,
+			"is_save_thumbnail": true
+		}
 	var norm := _normalize_vfs_path(filename)
 	if not norm.ends_with(".eri"):
 		norm += ".eri"
@@ -3947,6 +4035,23 @@ func report_unsupported(capability: String) -> void:
 		push_warning(last_error)
 
 
+func present_pending_confirmation() -> void:
+	if pending_confirmation_active:
+		confirmation_requested.emit(pending_confirmation_prompt)
+
+
+func resolve_confirmation(result: int) -> bool:
+	if not pending_confirmation_active:
+		return false
+	var target_vm: Variant = pending_confirmation_vm.get_ref() if pending_confirmation_vm != null else null
+	pending_confirmation_vm = null
+	pending_confirmation_active = false
+	pending_confirmation_prompt = ""
+	if target_vm == null or not target_vm.has_method("resolve_host_confirmation"):
+		return false
+	return bool(target_vm.call("resolve_host_confirmation", result))
+
+
 func call_host_function(func_name: String, args: Array, vm: RefCounted) -> Dictionary:
 	match func_name:
 		"GetCurrentTime":
@@ -4020,6 +4125,17 @@ func call_host_function(func_name: String, args: Array, vm: RefCounted) -> Dicti
 		"LeaveLoad":
 			return {"handled": true, "result": 0}
 		"Confirm":
+			if (
+				vm != null
+				and vm.has_method("can_defer_host_call")
+				and bool(vm.call("can_defer_host_call"))
+				and not get_signal_connection_list("confirmation_requested").is_empty()
+				and not pending_confirmation_active
+			):
+				pending_confirmation_vm = weakref(vm)
+				pending_confirmation_active = true
+				pending_confirmation_prompt = str(args[0]) if not args.is_empty() else "确定要继续吗？"
+				return {"handled": true, "deferred": true}
 			return {"handled": true, "result": 0}
 		"PlayBgm", "RestartBgm", "ScRestartBgm", "ScPlayBgm":
 			if args.size() > 0:

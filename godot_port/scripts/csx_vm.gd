@@ -239,6 +239,9 @@ var executed_instructions: int = 0
 var max_call_depth: int = 1000
 var cooperative_sleep_deadline_usec: int = 0
 var cooperative_yield_requested: bool = false
+var awaiting_host_confirmation: bool = false
+var host_confirmation_resolved: bool = false
+var host_confirmation_result: Variant = 0
 
 var host: CsxHostClass
 
@@ -254,6 +257,8 @@ func _init(p_host: CsxHostClass = null) -> void:
 ## not be resumed. It severs reachable CSX container/object references before
 ## dropping VM roots so RefCounted cycles among those values can be released.
 func shutdown_runtime() -> void:
+	if host != null and host.has_method("resolve_confirmation"):
+		host.call("resolve_confirmation", 0)
 	var visited: Array[Variant] = []
 	for entry in global_vars:
 		_detach_runtime_value(entry.get("value"), visited)
@@ -286,6 +291,9 @@ func shutdown_runtime() -> void:
 	executed_instructions = 0
 	cooperative_sleep_deadline_usec = 0
 	cooperative_yield_requested = false
+	awaiting_host_confirmation = false
+	host_confirmation_resolved = false
+	host_confirmation_result = 0
 	_image = PackedByteArray()
 	const_strings.clear()
 	instruction_starts = PackedInt32Array()
@@ -735,6 +743,9 @@ func call_function_sync(func_name: String, args: Array, max_steps: int = 1_000_0
 
 func call_address_sync(address: int, args: Array, max_steps: int = 1_000_000) -> Dictionary:
 	last_error = ""
+	if awaiting_host_confirmation:
+		last_error = "等待宿主确认期间不能执行同步 CSX 调用。"
+		return {"ok": false, "error": last_error, "steps": 0, "side_effects_may_have_occurred": false}
 	if args.size() > MAX_VM_CALL_ARGUMENTS:
 		last_error = "同步调用参数超过上限 (%d)。" % MAX_VM_CALL_ARGUMENTS
 		return {"ok": false, "error": last_error, "steps": 0, "side_effects_may_have_occurred": false}
@@ -807,6 +818,18 @@ func call_address_sync(address: int, args: Array, max_steps: int = 1_000_000) ->
 	return {"ok": true, "result": ret, "steps": steps, "side_effects_may_have_occurred": steps > 0}
 
 
+func can_defer_host_call() -> bool:
+	return not is_synchronous_call
+
+
+func resolve_host_confirmation(result: int) -> bool:
+	if not awaiting_host_confirmation or host_confirmation_resolved:
+		return false
+	host_confirmation_result = result
+	host_confirmation_resolved = true
+	return true
+
+
 func refresh_cooperative_sleep() -> bool:
 	if cooperative_sleep_deadline_usec <= 0:
 		cooperative_yield_requested = false
@@ -838,6 +861,14 @@ func step() -> bool:
 	# An error belongs to the previous step only; a failed synchronous call
 	# returns its own error and must not poison the next resumed VM instruction.
 	last_error = ""
+	if awaiting_host_confirmation:
+		if not host_confirmation_resolved:
+			cooperative_yield_requested = true
+			return true
+		eval_stack.append(host_confirmation_result)
+		awaiting_host_confirmation = false
+		host_confirmation_resolved = false
+		host_confirmation_result = 0
 	if not _ensure_image_validated():
 		return false
 	if ip < 0 or ip >= image.size():
@@ -1246,21 +1277,25 @@ func step() -> bool:
 					elif inst.type_name == "InputFilter":
 						var f_dummy := CsxHostClass.HostInputFilter.new(host)
 						var fres = _dispatch_input_filter_method(f_dummy, func_name, method_args)
+						if not last_error.is_empty(): return false
 						eval_stack.append(fres)
 						return true
 					elif inst.type_name == "Resource":
 						var r_dummy := CsxHostClass.HostResource.new("", "", -1, 0, 0, host)
 						var rres = _dispatch_resource_method(r_dummy, func_name, method_args)
+						if not last_error.is_empty(): return false
 						eval_stack.append(rres)
 						return true
 					elif inst.type_name == "ToneFilter":
 						var tone_filter := _tone_filter_for_value(inst)
 						var tone_result = _dispatch_tone_filter_method(tone_filter, func_name, method_args)
+						if not last_error.is_empty(): return false
 						eval_stack.append(tone_result)
 						return true
 					elif inst.type_name == "File":
 						var f_dummy := CsxHostClass.HostFile.new(host, self)
 						var fres = _dispatch_file_method(f_dummy, func_name, method_args)
+						if not last_error.is_empty(): return false
 						eval_stack.append(fres)
 						return true
 
@@ -1311,55 +1346,43 @@ func step() -> bool:
 					return true
 				elif receiver is CsxHostClass.HostInputFilter:
 					var res = _dispatch_input_filter_method(receiver as CsxHostClass.HostInputFilter, func_name, method_args)
+					if not last_error.is_empty(): return false
 					eval_stack.append(res)
 					return true
 				elif receiver is CsxHostClass.HostResource:
 					var resource_args := args.slice(1) if func_name == "GetVolume" else method_args
 					var res = _dispatch_resource_method(receiver as CsxHostClass.HostResource, func_name, resource_args)
+					if not last_error.is_empty(): return false
 					eval_stack.append(res)
 					return true
 				elif receiver is CsxHostClass.HostToneFilter:
 					var tf := receiver as CsxHostClass.HostToneFilter
 					var tres = _dispatch_tone_filter_method(tf, func_name, method_args)
+					if not last_error.is_empty(): return false
 					eval_stack.append(tres)
 					return true
 				elif receiver is CsxHostClass.HostResourceManager:
 					var hrm := receiver as CsxHostClass.HostResourceManager
-					if func_name == "DeleteContents":
-						eval_stack.append(hrm.delete_contents())
-						return true
-					elif func_name == "LoadResource":
-						var archive_name: String = str(method_args[0]) if method_args.size() > 0 else ""
-						var res_code := _resource_error_code(hrm.load_resource(archive_name))
-						eval_stack.append(res_code)
-						return true
-					elif func_name == "CreateFormPage":
-						var parent_spr = method_args[0] if method_args.size() > 0 else null
-						var page_id: String = str(method_args[1]) if method_args.size() > 1 else ""
-						var form_code := 0
-						if parent_spr is CsxHostClass.HostSprite:
-							form_code = _resource_error_code(hrm.create_form_page(parent_spr, page_id))
-						else:
-							form_code = 1
-						eval_stack.append(form_code)
-						return true
-					else:
-						host.report_unsupported("HostResourceManager.%s" % func_name)
-						eval_stack.append(0)
-						return true
+					var hrm_result = _dispatch_resource_manager_method(hrm, func_name, method_args)
+					if not last_error.is_empty(): return false
+					eval_stack.append(hrm_result)
+					return true
 				elif receiver is CsxHostClass.HostFile:
 					var file := receiver as CsxHostClass.HostFile
 					var fres = _dispatch_file_method(file, func_name, method_args)
+					if not last_error.is_empty(): return false
 					eval_stack.append(fres)
 					return true
 				elif receiver is CsxHostClass.HostSprite:
 					var spr := receiver as CsxHostClass.HostSprite
 					var sres = _dispatch_sprite_method(spr, func_name, method_args)
+					if not last_error.is_empty(): return false
 					eval_stack.append(sres)
 					return true
 				elif receiver is CsxHostClass.HostWindow:
 					var win := receiver as CsxHostClass.HostWindow
 					var wres = _dispatch_window_method(win, func_name, method_args)
+					if not last_error.is_empty(): return false
 					eval_stack.append(wres)
 					return true
 				elif receiver is Array:
@@ -1451,6 +1474,14 @@ func step() -> bool:
 
 				var host_res := host.call_host_function(func_name, resolved_args, self)
 				if host_res.get("handled", false):
+					if host_res.get("deferred", false):
+						awaiting_host_confirmation = true
+						host_confirmation_resolved = false
+						host_confirmation_result = 0
+						cooperative_yield_requested = true
+						if host.has_method("present_pending_confirmation"):
+							host.call("present_pending_confirmation")
+						return true
 					var res_val = host_res.get("result", null)
 					if res_val != null:
 						eval_stack.append(res_val)
@@ -1593,6 +1624,9 @@ func _is_match_usage(value: String, usage: String, captures: Variant) -> String:
 			regex_source += "([0-9]*)"
 			capture_count += 1
 			cursor += digit_capture.length()
+		elif usage.substr(cursor, 2) == "%s":
+			regex_source += ".*?"
+			cursor += 2
 		elif usage.substr(cursor, 1) == "&":
 			var close_at := usage.find("&", cursor + 1)
 			if close_at < 0:
@@ -1712,6 +1746,12 @@ func _dispatch_hash_method(h: Dictionary, method: String, args: Array) -> Varian
 	match method:
 		"GetLength":
 			return h.size()
+		"GetTagName":
+			var index := int(args[0]) if not args.is_empty() else -1
+			var keys: Array = h.keys()
+			if index < 0 or index >= keys.size():
+				return ""
+			return str(keys[index])
 		"IsEmpty":
 			return -1 if h.is_empty() else 0
 		"Remove":
@@ -1758,13 +1798,13 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 			return -1 if spr.is_enabled_native(enabled_item) else 0
 		"SetTransparency":
 			if not args.is_empty():
-				var item := spr.find_form_item(str(args[1])) if args.size() > 1 else spr
+				var item := spr.find_sprite_item(str(args[1])) if args.size() > 1 else spr
 				if item != null:
 					item.set_transparency(_to_int(args[0]))
 			return 0
 		"CheckButton":
 			if args.size() >= 2:
-				var button := spr.find_form_item(str(args[0]))
+				var button := spr.find_sprite_item(str(args[0]))
 				if button != null and button.is_button:
 					button.fields["checked"] = is_truthy(args[1])
 					button.set_button_state("pushed" if button.fields["checked"] else "normal")
@@ -1998,9 +2038,8 @@ func _dispatch_sprite_method(spr: CsxHostClass.HostSprite, method: String, args:
 			var msg: String = str(args[0]) if args.size() > 0 else ""
 			return spr.output_message(msg)
 		_:
-			if spr.host != null:
-				spr.host.report_unsupported("HostSprite.%s" % method)
-			return 0
+			_report_unsupported_host_method(spr.host, "HostSprite.%s" % method)
+			return null
 
 
 func _sprite_error_code(host_status: int, success_status: int = 0) -> int:
@@ -2018,6 +2057,14 @@ func _sprite_has_checked_button(sprite: CsxHostClass.HostSprite, button_id: Stri
 
 func _is_polling_sprite_activation() -> bool:
 	return not call_stack.is_empty() and call_stack.back().name == "WaitUntilSpriteActive"
+
+
+func _report_unsupported_host_method(owner_host: Variant, capability: String) -> void:
+	if owner_host != null:
+		owner_host.report_unsupported(capability)
+		last_error = str(owner_host.last_error)
+	else:
+		last_error = "当前未实现宿主能力: %s" % capability
 
 
 func _dispatch_input_filter_method(flt: CsxHostClass.HostInputFilter, method: String, args: Array) -> Variant:
@@ -2067,9 +2114,8 @@ func _dispatch_input_filter_method(flt: CsxHostClass.HostInputFilter, method: St
 			var timeout := int(args[1]) if args.size() > 1 else 0
 			return flt.get_input_event(ev_ref, timeout)
 		_:
-			if flt.host != null:
-				flt.host.report_unsupported("HostInputFilter.%s" % method)
-			return 0
+			_report_unsupported_host_method(flt.host, "HostInputFilter.%s" % method)
+			return null
 
 
 func _dispatch_tone_filter_method(tf: CsxHostClass.HostToneFilter, method: String, args: Array) -> Variant:
@@ -2108,9 +2154,8 @@ func _dispatch_tone_filter_method(tf: CsxHostClass.HostToneFilter, method: Strin
 		"DeleteToneFilter":
 			return tf.delete_tone_filter()
 		_:
-			if tf.host != null:
-				tf.host.report_unsupported("HostToneFilter.%s" % method)
-			return 0
+			_report_unsupported_host_method(tf.host, "HostToneFilter.%s" % method)
+			return null
 
 
 func _tone_filter_for_value(value: Variant) -> CsxHostClass.HostToneFilter:
@@ -2232,9 +2277,8 @@ func _dispatch_resource_method(res: CsxHostClass.HostResource, method: String, a
 			image_info.set_field("yHotSpot", 0)
 			return image_info
 		_:
-			if res.host != null:
-				res.host.report_unsupported("HostResource.%s" % method)
-			return 0
+			_report_unsupported_host_method(res.host, "HostResource.%s" % method)
+			return null
 
 
 func _resource_error_code(host_status: int) -> int:
@@ -2372,6 +2416,24 @@ func _dispatch_real_method(_target_ref: Variant, val: float, method: String, arg
 			return 0.0
 
 
+func _dispatch_resource_manager_method(manager: CsxHostClass.HostResourceManager, method: String, args: Array) -> Variant:
+	match method:
+		"DeleteContents":
+			return manager.delete_contents()
+		"LoadResource":
+			var archive_name: String = str(args[0]) if not args.is_empty() else ""
+			return _resource_error_code(manager.load_resource(archive_name))
+		"CreateFormPage":
+			var parent_spr = args[0] if not args.is_empty() else null
+			var page_id: String = str(args[1]) if args.size() > 1 else ""
+			if parent_spr is CsxHostClass.HostSprite:
+				return _resource_error_code(manager.create_form_page(parent_spr, page_id))
+			return 1
+		_:
+			_report_unsupported_host_method(manager.host, "HostResourceManager.%s" % method)
+			return null
+
+
 func _dispatch_file_method(file: CsxHostClass.HostFile, method: String, args: Array) -> Variant:
 	match method:
 		"Open":
@@ -2402,9 +2464,8 @@ func _dispatch_file_method(file: CsxHostClass.HostFile, method: String, args: Ar
 			var text := str(args[1]) if args.size() > 1 else ""
 			return file.output_log_text(path, text)
 		_:
-			if file.host != null:
-				file.host.report_unsupported("HostFile.%s" % method)
-			return 0
+			_report_unsupported_host_method(file.host, "HostFile.%s" % method)
+			return null
 
 
 func _dispatch_window_method(win: CsxHostClass.HostWindow, method: String, args: Array) -> Variant:
@@ -2478,9 +2539,8 @@ func _dispatch_window_method(win: CsxHostClass.HostWindow, method: String, args:
 			_write_cursor_point(point, win.host.get_cursor_position() if win.host != null else Vector2i.ZERO)
 			return point if point is CsxInstance else 0
 		_:
-			if win.host != null:
-				win.host.report_unsupported("HostWindow.%s" % method)
-			return 0
+			_report_unsupported_host_method(win.host, "HostWindow.%s" % method)
+			return null
 
 
 func _apply_operate(op: int, a: Variant, b: Variant) -> Variant:

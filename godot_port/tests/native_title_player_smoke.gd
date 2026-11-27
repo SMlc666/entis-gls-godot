@@ -379,6 +379,9 @@ func _run() -> void:
 	if not _require(rec_tab_sprite.full_btn_id == "ID_PAGE_TAG1\\\\ID_REC", "Nested Appreciation button must preserve its full CSX command path"): return
 	var rec_captures: Array = []
 	if not _require(player.vm._is_match_usage(rec_tab_sprite.full_btn_id, "&ID_PAGE_TAG&(<0-9>*)&\\\\ID_REC&", rec_captures) == "" and rec_captures == [1], "CSX IsMatchUsage must match nested page commands and capture the one-based page index"): return
+	var save_slot_captures: Array = []
+	var save_slot_usage := player.vm._is_match_usage("ID_PAGE_LOAD\\\\ID_SELECT04\\\\ID_SELECT", "&ID_PAGE_LOAD&\\\\ID_SELECT&(<0-9>*)&\\\\ID_SELECT&", save_slot_captures)
+	if not _require(save_slot_usage == "" and save_slot_captures == [4], "CSX IsMatchUsage must capture a nested native save slot's one-based page index"): return
 	var appreciation_view = null
 	for app_frame: Variant in player.vm.call_stack:
 		if app_frame.name == "Appreciation":

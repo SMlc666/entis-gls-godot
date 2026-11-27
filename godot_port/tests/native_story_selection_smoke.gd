@@ -206,5 +206,12 @@ func _find_selection_frame(frames: Array) -> CsxVMReader.StackFrame:
 
 func _cleanup(player: Node, save_dir: String) -> void:
 	if is_instance_valid(player):
+		if player.has_method("_shutdown_runtime_session"):
+			player.call("_shutdown_runtime_session")
+		if not bool(player.get("runtime_shutdown")):
+			printerr("FAIL AdvPlayer runtime shutdown hook did not complete")
 		player.free()
+		# AdvPlayer teardown queues compositor wrappers and asks AudioServer to release active WAV playback.
+		await process_frame
+		await create_timer(0.25).timeout
 	TestSupport.remove_test_saves(save_dir)

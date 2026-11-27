@@ -66,7 +66,9 @@ sha256sum --check assets/STAGED_GAME_ASSETS.sha256
 
 ## 原生 Codec 构建
 
-`tools/build_codec_extension.sh` 会将固定版本的 `arc_unpacker`、`godot-cpp` 源码和 CMake 构建树保存在项目外的 `../reference-sources/`，Linux 运行库安装到 `tools/bin/linux/`。源码和构建树可用 `YOSUGA_REFERENCE_ROOT`、`YOSUGA_CODEC_SOURCE_DIR`、`YOSUGA_CODEC_BUILD_DIR` 改变位置；Android 构建使用同一组持久化源码，构建树可用 `YOSUGA_ANDROID_CODEC_BUILD_DIR` 指定。构建脚本不会把参考 SDK 源码复制进 Godot 项目，也不会把编译过程丢在 `/tmp`。
+`tools/build_codec_extension.sh` 会将固定版本的 `arc_unpacker`、`godot-cpp` 源码和 CMake 构建树保存在项目外的 `../reference-sources/`，Linux 运行库安装到 `tools/bin/linux/`。Linux 原生构建支持 x86_64 与 ARM64；源码和构建树可用 `YOSUGA_REFERENCE_ROOT`、`YOSUGA_CODEC_SOURCE_DIR`、`YOSUGA_CODEC_BUILD_DIR` 改变位置；Android 构建使用同一组持久化源码，构建树可用 `YOSUGA_ANDROID_CODEC_BUILD_DIR` 指定。构建脚本不会把参考 SDK 源码复制进 Godot 项目，也不会把编译过程丢在 `/tmp`。
+
+构建后用 `./tools/verify_linux_runtime.sh` 校验架构、入口符号和哈希，再运行 `godot --headless --audio-driver Dummy --path . --script res://tests/native_codec_smoke.gd` 验证扩展加载与 GDScript 接口。
 
 MEI open 与 I/P/B 单帧解码都按输入、音频 chunk/PCM、图像和索引元数据估算 live working set，并在估算超过 256 MiB 时拒绝解码。MIO 输入副本按其实际生命周期分阶段估算；section table 最多接受 32,768 条。该值是 **estimated live working set**，不是 RSS 硬限制；allocator/RSS overhead、碎片和进程内其他资源不包含在估算中。
 
@@ -100,6 +102,6 @@ Linux helper 的构建输出放在非隐藏目录 `tools/bin/linux/`。Godot 能
 
 ### Linux 导出包与外部辅助程序
 
-`arc_unpacker` 和 `erisan_decode` 是需要从普通文件系统启动的 Linux ELF。运行时按以下位置解析 sidecar：开发目录中的 `tools/bin/linux/`、独立导出程序旁的 `tools/bin/linux/`，或由 `YOSUGA_ARC_UNPACKER` / `YOSUGA_ERISAN_DECODER` 指定的绝对路径。指定路径的文件必须存在且有执行权限；找不到时解码会明确失败。
+`erisan_decode` 是仅在原生 ERISAN 解码不可用时使用的 Linux 回退 ELF；正常播放优先使用进程内 GDExtension。`arc_unpacker` 不再是 ERI/MIO 播放回退，只供可选的 `native_codec_differential_smoke.gd` 做参考对照。需要 sidecar 时，运行时从开发目录的 `tools/bin/linux/`、独立导出程序旁的 `tools/bin/linux/`，或 `YOSUGA_ERISAN_DECODER` 指定的绝对路径解析 `erisan_decode`；找不到时相应回退会明确失败。
 
 PCK 中的 `res://` 资源不会自动解包成可执行文件。工程目前没有 Linux 导出 preset 或 sidecar 自动部署流程，也没有验证“导出为 PCK 后运行外部 ELF”的闭环。若由系统 Godot 加载独立 PCK，请把 helper 放在普通文件系统路径，并显式设置对应环境变量；不能依赖 `globalize_path("res://...")` 将 PCK 内容转换为可执行路径。
