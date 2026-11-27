@@ -88,6 +88,7 @@ var advance_ticks: int = 0
 var skip_input_pending: bool = false
 var advance_query_count: int = 0
 var is_waiting_input: bool = false
+var native_command_dispatch_windows: Dictionary[int, bool] = {}
 var yield_for_sprite_activation: bool = false
 var is_movie_playing: bool = false
 var movie_current_frame: int = -1
@@ -626,9 +627,18 @@ class HostInputFilter extends RefCounted:
 	func is_joy_button_pushing(key: int, _dev: int = 0) -> int:
 		return -1 if _is_button_pressed(key) else 0
 
-	func get_joy_button_pushed(key: int, _dev: int = 0, during_activation: bool = false) -> int:
+	func _native_dispatch_window_id() -> int:
+		var target_window: Variant = window_ref
+		if target_window is WeakRef:
+			target_window = target_window.get_ref()
+		if target_window is Object and is_instance_valid(target_window) and target_window.has_method("get_command"):
+			return target_window.get_instance_id()
+		return -1
+
+	func get_joy_button_pushed(key: int, _dev: int = 0, during_activation: bool = false, window_id: int = -1) -> int:
 		if host != null:
-			var host_result := host.poll_advance_button(key, during_activation)
+			var dispatch_window_id := window_id if window_id != -1 else _native_dispatch_window_id()
+			var host_result := host.poll_advance_button(key, during_activation, dispatch_window_id)
 			if host_result != 0:
 				joy_buttons[key] = _is_button_pressed(key)
 				return host_result
@@ -2630,8 +2640,8 @@ class HostWindow extends RefCounted:
 		if host != null and host.active_input_filter_ref != null:
 			var active_filter = host.active_input_filter_ref.get_ref()
 			if active_filter is HostInputFilter:
-				return active_filter.get_joy_button_pushed(key, 0, during_activation)
-		return host.poll_advance_button(key, during_activation) if host != null else 0
+				return active_filter.get_joy_button_pushed(key, 0, during_activation, get_instance_id())
+		return host.poll_advance_button(key, during_activation, get_instance_id()) if host != null else 0
 
 	func is_joy_button_pushing(key: int, _dev: int = 0) -> int:
 		if host != null and host.active_input_filter_ref != null:
@@ -2694,7 +2704,9 @@ class HostWindow extends RefCounted:
 		if host != null:
 			var event: Dictionary = host.pop_command_for_window(get_instance_id())
 			if event.is_empty():
+				host.clear_native_command_dispatch(get_instance_id())
 				return 0
+			host.mark_native_command_dispatch(get_instance_id())
 			host.clear_command_cursor_override()
 			var cmd_id: String = ""
 			var full_id: String = ""
@@ -2820,7 +2832,7 @@ class HostFile extends RefCounted:
 
 
 
-func poll_advance_button(key: int, during_activation: bool) -> int:
+func poll_advance_button(key: int, during_activation: bool, window_id: int = -1) -> int:
 	if during_activation:
 		yield_for_sprite_activation = true
 	if key == 4:
@@ -2832,7 +2844,12 @@ func poll_advance_button(key: int, during_activation: bool) -> int:
 	var pushed := advance_ticks > 0 or auto_advance
 	if advance_ticks > 0:
 		advance_ticks -= 1
-	is_waiting_input = not pushed and not during_activation
+	# A queued native command wakes the CSX, but the script may poll advance
+	# buttons before it inspects the command ID. Do not re-arm the scheduler's
+	# input wait until that command has been dispatched and the next empty
+	# GetCommand poll is reached.
+	if not is_native_command_dispatch_pending(window_id):
+		is_waiting_input = not pushed and not during_activation
 	return 1 if pushed else 0
 
 
@@ -2905,10 +2922,37 @@ func advance_audio_envelopes(delta: float) -> void:
 			resource.advance_volume_envelope(delta * 1000.0)
 
 
+func mark_native_command_dispatch(window_id: int) -> void:
+	if not runtime_shutdown and runtime_windows.has(window_id):
+		native_command_dispatch_windows[window_id] = true
+
+
+func clear_native_command_dispatch(window_id: int) -> void:
+	native_command_dispatch_windows.erase(window_id)
+
+
+func is_native_command_dispatch_pending(window_id: int = -1) -> bool:
+	_prune_native_command_dispatch_windows()
+	if window_id == -1:
+		return not native_command_dispatch_windows.is_empty()
+	return native_command_dispatch_windows.has(window_id)
+
+
+func _prune_native_command_dispatch_windows() -> void:
+	var stale_window_ids: Array[int] = []
+	for window_id: int in native_command_dispatch_windows.keys():
+		var window_ref: Variant = runtime_windows.get(window_id, null)
+		if not window_ref is WeakRef or window_ref.get_ref() == null:
+			stale_window_ids.append(window_id)
+	for window_id: int in stale_window_ids:
+		native_command_dispatch_windows.erase(window_id)
+
+
 func begin_command_scope(context_id: String) -> int:
 	if runtime_shutdown:
 		return -1
 	var scope := _command_events.begin_scope(context_id)
+	native_command_dispatch_windows.clear()
 	clear_command_cursor_override()
 	command_overflow_reported = false
 	return scope
@@ -3038,6 +3082,7 @@ func shutdown_runtime() -> void:
 	active_input_filter_ref = null
 	cursor_position_provider = Callable()
 	_command_events.shutdown()
+	native_command_dispatch_windows.clear()
 	clear_command_cursor_override()
 	movie_owner_ref = null
 	movie_owner_instance_id = -1
@@ -3412,7 +3457,14 @@ func is_file_existing(filename: String) -> bool:
 		return true
 	if FileAccess.file_exists(game_dir.path_join(filename)) or FileAccess.file_exists(game_dir.path_join("system").path_join(filename)) or FileAccess.file_exists("user://".path_join(filename)):
 		return true
-	return not find_vfs_entry(filename).is_empty()
+	# File::IsExisting is routinely used for optional resources. A normal VFS
+	# miss is a false predicate, not a host failure; preserve any earlier error
+	# rather than reporting the expected absence as the current diagnostic.
+	var previous_error := last_error
+	var exists := not find_vfs_entry(filename).is_empty()
+	if not exists and last_error == "VFS entry not found: %s" % filename:
+		last_error = previous_error
+	return exists
 
 
 

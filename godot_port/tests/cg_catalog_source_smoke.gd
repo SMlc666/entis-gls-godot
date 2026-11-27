@@ -28,6 +28,8 @@ func _initialize() -> void:
 func _run() -> void:
 	fixture_dir = "user://test_fixtures/cg_sources_%d_%d" % [OS.get_process_id(), Time.get_ticks_usec()]
 	var absolute_dir := ProjectSettings.globalize_path(fixture_dir)
+	var expected_data1_archive := absolute_dir.path_join("data1.noa").simplify_path()
+	var expected_data2_archive := absolute_dir.path_join("data2.noa").simplify_path()
 	var mkdir_error := DirAccess.make_dir_recursive_absolute(absolute_dir)
 	if mkdir_error != OK:
 		_fail("Unable to create isolated CG source fixtures: %s" % error_string(mkdir_error))
@@ -71,8 +73,8 @@ func _run() -> void:
 
 		var first_vfs_entry: Dictionary = host.find_vfs_entry(str(first_ref["name"]), str(first_ref["archive_hint"]))
 		var second_vfs_entry: Dictionary = host.find_vfs_entry(str(second_ref["name"]), str(second_ref["archive_hint"]))
-		_check(str(first_vfs_entry.get("archive", "")) == absolute_dir.path_join("data1.noa").to_lower(), "data1 hint should resolve to the matching VFS candidate")
-		_check(str(second_vfs_entry.get("archive", "")) == absolute_dir.path_join("data2.noa").to_lower(), "data2 hint should resolve to the matching VFS candidate")
+		_check(str(first_vfs_entry.get("archive", "")) == expected_data1_archive, "data1 hint should resolve to the matching VFS candidate")
+		_check(str(second_vfs_entry.get("archive", "")) == expected_data2_archive, "data2 hint should resolve to the matching VFS candidate")
 		var first_cache_key := player._cg_thumbnail_cache_key(first_ref)
 		var second_cache_key := player._cg_thumbnail_cache_key(second_ref)
 		_check(first_cache_key != second_cache_key, "Thumbnail cache keys must differ for the same internal name from different archives")
@@ -80,7 +82,7 @@ func _run() -> void:
 
 		var card: Control = player._create_cg_card(scene)
 		_check(host.image_requests.size() == 1 and str(host.image_requests[0].get("archive_hint", "")) == "data1.noa", "CG card thumbnail load should pass its source archive hint")
-		_check(str(host.image_requests[0].get("archive", "")) == absolute_dir.path_join("data1.noa").to_lower(), "CG card thumbnail should resolve from its recorded archive")
+		_check(str(host.image_requests[0].get("archive", "")) == expected_data1_archive, "CG card thumbnail should resolve from its recorded archive")
 		_check(player.cg_thumbnail_cache.get_texture(first_cache_key) != null, "CG card should cache its thumbnail under the source identity key")
 
 		player.cg_fullscreen_panel = PanelContainer.new()
@@ -91,7 +93,7 @@ func _run() -> void:
 		player._next_cg_variant()
 		_check(player.fullscreen_variant_index == 1 and host.image_requests.size() == 3, "Next fullscreen variant should load the second archive source")
 		_check(str(host.image_requests[2].get("archive_hint", "")) == "data2.noa", "Second fullscreen variant should pass data2 archive hint")
-		_check(str(host.image_requests[2].get("archive", "")) == absolute_dir.path_join("data2.noa").to_lower(), "Second fullscreen variant should resolve from data2")
+		_check(str(host.image_requests[2].get("archive", "")) == expected_data2_archive, "Second fullscreen variant should resolve from data2")
 		card.free()
 		player.cg_fullscreen_panel.free()
 		player.fullscreen_cg_rect.free()

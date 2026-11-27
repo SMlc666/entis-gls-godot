@@ -462,11 +462,13 @@ func _run() -> void:
 	var timeout_result: Dictionary = player.vm.call_function_sync("Title", [], 1)
 	if not _require(not timeout_result.get("ok", true) and timeout_result.get("timeout", false), "A synchronous Title() budget exhaustion must report timeout failure"): return
 
-	print("PASS Native CSX Title() and Appreciation() Player Smoke Test!")
+	if player.has_method("_shutdown_runtime_session"):
+		player.call("_shutdown_runtime_session")
 	TestSupport.remove_test_saves(test_save_dir)
 	player.free()
 	await process_frame
-	await process_frame
+	await create_timer(0.25).timeout
+	print("PASS Native CSX Title() and Appreciation() Player Smoke Test!")
 	quit(0)
 
 

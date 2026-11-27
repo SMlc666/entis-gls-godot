@@ -310,5 +310,9 @@ func _test_button_surface_opacity() -> bool:
 
 func _cleanup(player: Node, save_dir: String) -> void:
 	if is_instance_valid(player):
+		if player.has_method("_shutdown_runtime_session"):
+			player.call("_shutdown_runtime_session")
 		player.free()
+		await process_frame
+		await create_timer(0.25).timeout
 	TestSupport.remove_test_saves(save_dir)
