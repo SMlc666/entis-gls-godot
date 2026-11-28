@@ -4,6 +4,11 @@ const CsxVMReader = preload("res://scripts/csx_vm.gd")
 const CsxHostClass = preload("res://scripts/csx_host.gd")
 const TestSupport = preload("res://tests/test_support.gd")
 
+var _owned_player: Node = null
+var _test_save_dir := ""
+var _finish_started := false
+
+
 func _initialize() -> void:
 	call_deferred("_run")
 
@@ -12,7 +17,7 @@ func _run() -> void:
 	var args := OS.get_cmdline_user_args()
 	if args.is_empty():
 		printerr("FAIL Pass game directory after --")
-		quit(1)
+		await _finish(1)
 		return
 
 	var game_dir: String = args[0]
@@ -30,13 +35,15 @@ func _run() -> void:
 	var scene_res = load("res://scenes/adv_player.tscn")
 	if scene_res == null:
 		printerr("FAIL Could not load adv_player.tscn")
-		quit(1)
+		await _finish(1)
 		return
 
 	var player = scene_res.instantiate()
+	_owned_player = player
 	player.game_dir = game_dir
 	player.start_in_title = true
 	var test_save_dir: String = TestSupport.new_save_dir("title_saveload")
+	_test_save_dir = test_save_dir
 	player.save_dir_override = test_save_dir
 	root.add_child(player)
 
@@ -47,22 +54,22 @@ func _run() -> void:
 
 	if not player.is_initialized:
 		printerr("FAIL AdvPlayer failed to initialize in %d frames" % wait_frames)
-		quit(1)
+		await _finish(1)
 		return
 	if not TestSupport.uses_isolated_saves(player.host, test_save_dir):
 		printerr("FAIL AdvPlayer did not use isolated test saves: %s" % player.host.save_dir)
-		quit(1)
+		await _finish(1)
 		return
 	print("  AdvPlayer initialized in %d frames" % wait_frames)
 
 	# Verify Title Screen state
 	if not player.is_title_mode:
 		printerr("FAIL Expected is_title_mode == true")
-		quit(1)
+		await _finish(1)
 		return
 	if not player.title_panel.visible:
 		printerr("FAIL Expected title_panel.visible == true")
-		quit(1)
+		await _finish(1)
 		return
 
 	# Verify that the original CSX Title() script created the visible title tree.
@@ -77,17 +84,17 @@ func _run() -> void:
 				break
 	if not (title_window is CsxHostClass.HostWindow):
 		printerr("FAIL Native Title() did not create a HostWindow")
-		quit(1)
+		await _finish(1)
 		return
 	var title_bg_sprite = _find_sprite_by_size(title_window.root_sprites, Vector2i(800, 600))
 	var title_logo_sprite = _find_sprite_by_size(title_window.root_sprites, Vector2i(354, 75))
 	if title_bg_sprite == null or title_bg_sprite.texture == null:
 		printerr("FAIL Native title tree has no 800x600 background texture")
-		quit(1)
+		await _finish(1)
 		return
 	if title_logo_sprite == null or title_logo_sprite.texture == null:
 		printerr("FAIL Native title tree has no 354x75 logo texture")
-		quit(1)
+		await _finish(1)
 		return
 	print("  Native Title() background: %s (%dx%d), logo: (%dx%d)" % [
 		title_bg_sprite.filename,
@@ -96,31 +103,31 @@ func _run() -> void:
 	])
 	if player.host_window_layer == null or not player.host_window_layer.visible:
 		printerr("FAIL Native HostWindow renderer is hidden")
-		quit(1)
+		await _finish(1)
 		return
 	if player.title_bg.visible or player.title_logo.visible:
 		printerr("FAIL Legacy title artwork should be hidden while the native title runs")
-		quit(1)
+		await _finish(1)
 		return
 
 	# Verify title BGM
 	print("  Current Title BGM: %s" % player.host.current_bgm)
 	if player.host.current_bgm.to_lower() != "bgm07.mio":
 		printerr("FAIL Expected title theme BGM07.mio, got %s" % player.host.current_bgm)
-		quit(1)
+		await _finish(1)
 		return
 
 	var title_stream := player.bgm_player.stream as AudioStreamWAV
 	if title_stream == null or title_stream.loop_mode != AudioStreamWAV.LOOP_FORWARD or title_stream.loop_begin != 161922 or title_stream.loop_end != 4973038:
 		printerr("FAIL Original Title() must start the BGM07 PCM loop from the CSX parameters")
-		quit(1)
+		await _finish(1)
 		return
 
 	print("[2/6] Transitioning from Title to New Game ...")
 	player._on_title_start_game()
 	if player.is_title_mode or player.title_panel.visible:
 		printerr("FAIL Title panel should be hidden after start game")
-		quit(1)
+		await _finish(1)
 		return
 
 	# Advance scenario to build dialogue history
@@ -138,14 +145,14 @@ func _run() -> void:
 
 	if dialogues_seen < 4:
 		printerr("FAIL Expected at least 4 dialogue lines before save, got %d" % dialogues_seen)
-		quit(1)
+		await _finish(1)
 		return
 
 	print("[3/6] Testing Save/Load Modal & Multi-slot Pagination ...")
 	player._open_save_load_modal("save")
 	if not player.is_save_load_open or not player.save_load_panel.visible:
 		printerr("FAIL Save modal did not open")
-		quit(1)
+		await _finish(1)
 		return
 
 	# Test pagination
@@ -153,21 +160,21 @@ func _run() -> void:
 	print("  Page 1 active, slot count displayed: %d" % player.save_load_grid.get_child_count())
 	if player.save_load_grid.get_child_count() != 10:
 		printerr("FAIL Expected 10 slots on page 1, got %d" % player.save_load_grid.get_child_count())
-		quit(1)
+		await _finish(1)
 		return
 
 	player._select_save_load_page(2) # Page 2: slots 11-20
 	print("  Page 2 active, slot count displayed: %d" % player.save_load_grid.get_child_count())
 	if player.save_load_grid.get_child_count() != 10:
 		printerr("FAIL Expected 10 slots on page 2, got %d" % player.save_load_grid.get_child_count())
-		quit(1)
+		await _finish(1)
 		return
 
 	player._select_save_load_page(0) # Page 0: Quick save
 	print("  Page 0 active, slot count displayed: %d" % player.save_load_grid.get_child_count())
 	if player.save_load_grid.get_child_count() != 1:
 		printerr("FAIL Expected 1 slot on page 0, got %d" % player.save_load_grid.get_child_count())
-		quit(1)
+		await _finish(1)
 		return
 
 	print("[4/6] Saving to Slot 3 and verifying slot metadata & thumbnail ...")
@@ -175,17 +182,17 @@ func _run() -> void:
 	var ok_save = player.save_to_slot(3)
 	if not ok_save:
 		printerr("FAIL save_to_slot(3) failed")
-		quit(1)
+		await _finish(1)
 		return
 	var saved_sc_obj: Variant = player.vm.globals_by_name.get("scObj", null)
 	if not saved_sc_obj is CsxVMReader.CsxInstance:
 		printerr("FAIL Original scObj must remain available after Save003")
-		quit(1)
+		await _finish(1)
 		return
 	var saved_native_scenario_call := str(saved_sc_obj.get_field("scenarioCall"))
 	if saved_native_scenario_call.is_empty():
 		printerr("FAIL Save003 must retain its original scenarioCall")
-		quit(1)
+		await _finish(1)
 		return
 
 	var info3: Dictionary = player.get_slot_info(3)
@@ -194,21 +201,21 @@ func _run() -> void:
 	])
 	if not info3["exists"]:
 		printerr("FAIL Slot 3 reported non-existent after save")
-		quit(1)
+		await _finish(1)
 		return
 	if info3["comment"].is_empty():
 		printerr("FAIL Slot 3 comment is empty")
-		quit(1)
+		await _finish(1)
 		return
 	if info3["thumbnail"] == null:
 		printerr("FAIL Slot 3 thumbnail is null")
-		quit(1)
+		await _finish(1)
 		return
 
 	player._close_save_load_modal()
 	if player.is_save_load_open or player.save_load_panel.visible:
 		printerr("FAIL Save modal did not close")
-		quit(1)
+		await _finish(1)
 		return
 
 	print("[5/6] Testing Return to Title and Loading Slot 3 ...")
@@ -216,25 +223,25 @@ func _run() -> void:
 	player._show_title_screen()
 	if not player.is_title_mode:
 		printerr("FAIL Return to title screen failed")
-		quit(1)
+		await _finish(1)
 		return
 
 	var slot_path: String = player.host.get_save_path("Save003.dat")
 	var absolute_slot := ProjectSettings.globalize_path(slot_path)
 	if DirAccess.rename_absolute(absolute_slot, absolute_slot + ".bak") != OK:
 		printerr("FAIL Could not simulate interrupted slot commit")
-		quit(1)
+		await _finish(1)
 		return
 	var corrupt_file := FileAccess.open(player.host.get_save_path("Save004.dat"), FileAccess.WRITE)
 	corrupt_file.store_string("{}")
 	corrupt_file.close()
 	if player.get_slot_info(4)["exists"]:
 		printerr("FAIL Corrupt slot without a backup must be empty in the slot list")
-		quit(1)
+		await _finish(1)
 		return
 	if DirAccess.rename_absolute(absolute_slot + ".bak", absolute_slot) != OK:
 		printerr("FAIL Could not restore slot 3 for native LoadSaveWindow selection")
-		quit(1)
+		await _finish(1)
 		return
 
 	# Use the actual title button and slot-card confirmation.
@@ -255,7 +262,7 @@ func _run() -> void:
 			break
 	if continue_button == null:
 		printerr("FAIL Title Continue is missing")
-		quit(1)
+		await _finish(1)
 		return
 	_click(continue_button)
 	var native_save_load_root: CsxHostClass.HostSprite
@@ -280,22 +287,22 @@ func _run() -> void:
 				break
 	if native_save_load_root == null or native_save_load_wrapper == null or not native_save_load_wrapper.is_visible_in_tree():
 		printerr("FAIL Original Title Continue must display LoadSaveWindow::run with a visible HostWindow tree (vm_error='%s', host_error='%s')" % [player.vm.last_error, player.host.last_error])
-		quit(1)
+		await _finish(1)
 		return
 	if native_save_load_root.size != Vector2i(690, 574) or native_save_load_root.position != Vector2i(400, 300):
 		printerr("FAIL Original LoadSaveWindow geometry mismatch: size=%s position=%s" % [native_save_load_root.size, native_save_load_root.position])
-		quit(1)
+		await _finish(1)
 		return
 	if _find_button_sprite(native_save_load_root.children, "ID_QSAVE") == null:
 		printerr("FAIL Original LoadSaveWindow must expose its ID_QSAVE control")
-		quit(1)
+		await _finish(1)
 		return
 	print("  Original Title Continue opened the native LoadSaveWindow HostWindow tree.")
 	var native_load_page: CsxHostClass.HostSprite = _find_host_sprite_by_form_page(native_host_window.root_sprites, "ID_PAGE_LOAD")
 	var native_slot_page: CsxHostClass.HostSprite = native_load_page.find_form_item("ID_SELECT04") if native_load_page != null else null
 	if native_slot_page == null or native_slot_page.position != Vector2i(87, 205) or native_slot_page.size != Vector2i(220, 170):
 		printerr("FAIL Native LoadSaveWindow must render slot 04 (Save003) at its original card geometry: sprite=%s position=%s size=%s" % [str(native_slot_page), str(native_slot_page.position) if native_slot_page != null else "null", str(native_slot_page.size) if native_slot_page != null else "null"])
-		quit(1)
+		await _finish(1)
 		return
 	var native_slot_button_sprite: CsxHostClass.HostSprite = native_slot_page.find_form_item("ID_SELECT")
 	var native_slot_number: CsxHostClass.HostSprite = native_slot_page.find_form_item("ID_NUMBER")
@@ -303,31 +310,31 @@ func _run() -> void:
 	var native_slot_comment: CsxHostClass.HostSprite = native_slot_page.find_form_item("ID_COMMENT")
 	if native_slot_button_sprite == null or native_slot_number == null or native_slot_date == null or native_slot_comment == null:
 		printerr("FAIL Native Save003 card must expose select, number, date, and comment items")
-		quit(1)
+		await _finish(1)
 		return
 	if native_slot_button_sprite.full_btn_id != "ID_PAGE_LOAD\\\\ID_SELECT04\\\\ID_SELECT":
 		printerr("FAIL Native Save003 button command path mismatch: %s" % native_slot_button_sprite.full_btn_id)
-		quit(1)
+		await _finish(1)
 		return
 	var native_slot_captures: Array = []
 	var native_slot_usage: String = player.vm._is_match_usage(native_slot_button_sprite.full_btn_id, "%s&\\\\ID_SELECT&(<0-9>*)&\\\\ID_SELECT&", native_slot_captures)
 	if native_slot_usage != "" or native_slot_captures != ["04"]:
 		printerr("FAIL Original LoadSaveWindow selector must preserve its zero-padded slot capture: usage='%s' captures=%s" % [native_slot_usage, str(native_slot_captures)])
-		quit(1)
+		await _finish(1)
 		return
 	if native_slot_number.text_content != "０４" or native_slot_date.text_content.is_empty() or native_slot_comment.text_content != str(info3["comment"]):
 		printerr("FAIL Native Save003 metadata mismatch: number='%s' date='%s' comment='%s'" % [native_slot_number.text_content, native_slot_date.text_content, native_slot_comment.text_content])
-		quit(1)
+		await _finish(1)
 		return
 	var native_slot_thumbnail: CsxHostClass.HostSprite = _find_host_sprite_by_geometry(native_host_window.root_sprites, Vector2i(120, 90), Vector2i(95, 208))
 	if native_slot_thumbnail == null or native_slot_thumbnail.children.size() != 1:
 		printerr("FAIL Native Save003 thumbnail overlay is missing")
-		quit(1)
+		await _finish(1)
 		return
 	var native_slot_thumbnail_image: CsxHostClass.HostSprite = native_slot_thumbnail.children[0]
 	if native_slot_thumbnail_image.filename.to_lower() != "save003.dat" or native_slot_thumbnail_image.texture == null or native_slot_thumbnail_image.image == null or native_slot_thumbnail_image.image.get_size() != Vector2i(120, 90):
 		printerr("FAIL Native Save003 thumbnail did not load from the isolated save slot: filename='%s' size=%s" % [native_slot_thumbnail_image.filename, str(native_slot_thumbnail_image.size)])
-		quit(1)
+		await _finish(1)
 		return
 	print("  Native Save003 card shows the original command path, metadata, and 120x90 thumbnail.")
 	if OS.get_environment("Y2K_DUMP_NATIVE_SAVELOAD") == "1":
@@ -354,7 +361,7 @@ func _run() -> void:
 	var native_slot_button: TextureButton = native_slot_wrapper.get_node_or_null("NativeButton") if native_slot_wrapper != null else null
 	if native_slot_button == null or native_slot_button.disabled:
 		printerr("FAIL Native Save003 selector must be enabled and rendered as a TextureButton")
-		quit(1)
+		await _finish(1)
 		return
 	_click(native_slot_button)
 	var native_confirm_window: CsxHostClass.HostWindow = null
@@ -394,7 +401,7 @@ func _run() -> void:
 		for stack_frame: Variant in player.vm.call_stack:
 			native_stack_after_click.append(str(stack_frame.name))
 		printerr("FAIL Selecting native Save003 must show original CSX ID_PAGE_CONFIRM with interactive ID_YES/ID_NO (active_window=%s page=%s yes=%s no=%s title=%s custom_modal=%s stack=%s vm_error='%s' host_error='%s')" % [str(native_confirm_window.get_instance_id()) if native_confirm_window != null else "null", str(native_confirm_page), str(native_confirm_yes_button), str(native_confirm_no_button), str(player.is_title_mode), str(player.confirm_panel.is_visible_in_tree()), str(native_stack_after_click), player.vm.last_error, player.host.last_error])
-		quit(1)
+		await _finish(1)
 		return
 	_click(native_confirm_no_button)
 	for frame in range(120):
@@ -403,7 +410,7 @@ func _run() -> void:
 			break
 	if _native_stack_has(player.vm.call_stack, "Confirm") or not _native_stack_has(player.vm.call_stack, "LoadSaveWindow::run") or player.host.pending_confirmation_active:
 		printerr("FAIL Rejecting native CSX confirmation must return to the live LoadSaveWindow")
-		quit(1)
+		await _finish(1)
 		return
 	var close_load_event := InputEventKey.new()
 	close_load_event.keycode = KEY_Q
@@ -421,11 +428,11 @@ func _run() -> void:
 	Input.parse_input_event(release_load_event)
 	if _native_stack_has(player.vm.call_stack, "LoadSaveWindow::run") or not player.is_title_mode:
 		printerr("FAIL Original LoadSaveWindow must return to the Title() loop on Q")
-		quit(1)
+		await _finish(1)
 		return
 	if DirAccess.rename_absolute(absolute_slot, absolute_slot + ".bak") != OK:
 		printerr("FAIL Could not re-create interrupted slot commit for backup recovery test")
-		quit(1)
+		await _finish(1)
 		return
 	player._open_save_load_modal("load")
 	player._select_save_load_page(1)
@@ -437,22 +444,22 @@ func _run() -> void:
 			break
 	if not player.is_save_load_open or slot_card == null or not slot_card.is_visible_in_tree():
 		printerr("FAIL Explicit project Save/Load modal must display recoverable slot 3")
-		quit(1)
+		await _finish(1)
 		return
 	if not player.save_load_box.get_global_rect().get_center().is_equal_approx(root.get_visible_rect().get_center()):
 		printerr("FAIL Project Save/Load modal panel must be centered")
-		quit(1)
+		await _finish(1)
 		return
 	_click(slot_card)
 	if not player.confirm_panel.is_visible_in_tree():
 		printerr("FAIL Choosing a saved slot must show the load confirmation")
-		quit(1)
+		await _finish(1)
 		return
 	_click(player.confirm_panel.find_child("ID_YES", true, false))
 
 	if player.is_title_mode or player.title_panel.visible:
 		printerr("FAIL Loading save did not exit title mode")
-		quit(1)
+		await _finish(1)
 		return
 
 	# Advance scenario again to confirm story continues
@@ -467,7 +474,7 @@ func _run() -> void:
 
 	if post_load_dialogues < 3:
 		printerr("FAIL Story did not advance after loading Slot 3")
-		quit(1)
+		await _finish(1)
 		return
 	print("  Successfully progressed %d steps after loading Slot 3" % post_load_dialogues)
 
@@ -489,7 +496,7 @@ func _run() -> void:
 			break
 	if reload_continue_button == null:
 		printerr("FAIL Re-entered Title() must expose Continue for the native accepted-load path")
-		quit(1)
+		await _finish(1)
 		return
 	_click(reload_continue_button)
 	var accepted_native_window: CsxHostClass.HostWindow
@@ -504,7 +511,7 @@ func _run() -> void:
 			break
 	if accepted_native_load_root == null:
 		printerr("FAIL Native Continue did not open the LoadSaveWindow load page")
-		quit(1)
+		await _finish(1)
 		return
 	var accepted_slot_page: CsxHostClass.HostSprite = accepted_native_load_root.find_form_item("ID_SELECT04")
 	var accepted_slot_sprite: CsxHostClass.HostSprite = accepted_slot_page.find_form_item("ID_SELECT") if accepted_slot_page != null else null
@@ -512,7 +519,7 @@ func _run() -> void:
 	var accepted_slot_button: TextureButton = accepted_slot_wrapper.get_node_or_null("NativeButton") if accepted_slot_wrapper != null else null
 	if accepted_slot_button == null or accepted_slot_button.disabled:
 		printerr("FAIL Native LoadSaveWindow must enable the populated Save003 slot")
-		quit(1)
+		await _finish(1)
 		return
 	_click(accepted_slot_button)
 	var accepted_confirm_window: CsxHostClass.HostWindow = null
@@ -550,18 +557,18 @@ func _run() -> void:
 		or player.host.pending_confirmation_active
 	):
 		printerr("FAIL Accepted native slot selection must show original CSX ID_PAGE_CONFIRM with enabled ID_YES/ID_NO controls (window=%s page=%s yes=%s no=%s host_confirm_pending=%s)" % [str(accepted_confirm_window.get_instance_id()) if accepted_confirm_window != null else "null", str(accepted_confirm_page), str(accepted_confirm_yes_button), str(accepted_confirm_no_button), str(player.host.pending_confirmation_active)])
-		quit(1)
+		await _finish(1)
 		return
 	var pre_load_sc_obj: Variant = player.vm.globals_by_name.get("scObj", null)
 	if not pre_load_sc_obj is CsxVMReader.CsxInstance:
 		printerr("FAIL Native Title load must begin with an original scObj instance")
-		quit(1)
+		await _finish(1)
 		return
 	var native_load_mutation := "__NATIVE_TITLE_LOAD_MUTATION__"
 	pre_load_sc_obj.set_field("scenarioCall", native_load_mutation)
 	if pre_load_sc_obj.get_field("scenarioCall") != native_load_mutation:
 		printerr("FAIL Could not inject the native-load restore discriminator")
-		quit(1)
+		await _finish(1)
 		return
 	_click(accepted_confirm_yes_button)
 	for frame in range(240):
@@ -574,7 +581,7 @@ func _run() -> void:
 			accepted_stack_names.append(str(accepted_frame.name))
 		var accepted_active_window: Variant = player.vm.data_vars[4].get("value", null) if player.vm.data_vars.size() > 4 else null
 		printerr("FAIL Accepting native Save003 confirmation must resume loaded scenario (title=%s title_panel=%s loadsave_frame=%s confirm_frame=%s awaiting_host_confirm=%s running=%s waiting_input=%s active_window=%s stack=%s ip=0x%X vm_error='%s' host_error='%s')" % [str(player.is_title_mode), str(player.title_panel.visible), str(_native_stack_has(player.vm.call_stack, "LoadSaveWindow::run")), str(_native_stack_has(player.vm.call_stack, "Confirm")), str(player.vm.awaiting_host_confirmation), str(player.is_running), str(player.host.is_waiting_input), str(accepted_active_window.get_instance_id()) if accepted_active_window is Object else "null", str(accepted_stack_names), player.vm.ip, player.vm.last_error, player.host.last_error])
-		quit(1)
+		await _finish(1)
 		return
 	var restored_native_sc_obj: Variant = player.vm.globals_by_name.get("scObj", null)
 	if (
@@ -585,7 +592,7 @@ func _run() -> void:
 		or str(player.vm.pending_call_args[0]) != saved_native_scenario_call
 	):
 		printerr("FAIL Native Title load must restore Save003 scenarioCall and enqueue that continuation (expected='%s' actual='%s' ip=0x%X pending=%s)" % [saved_native_scenario_call, str(restored_native_sc_obj.get_field("scenarioCall")) if restored_native_sc_obj is CsxVMReader.CsxInstance else "invalid", player.vm.ip, str(player.vm.pending_call_args)])
-		quit(1)
+		await _finish(1)
 		return
 	print("  Native Title load restored Save003 scenarioCall '%s' after an in-memory mutation." % saved_native_scenario_call)
 	var native_load_dialogues := 0
@@ -598,7 +605,7 @@ func _run() -> void:
 			player._advance_line()
 	if native_load_dialogues < 2 or not player.vm.last_error.is_empty():
 		printerr("FAIL Native LoadSaveWindow load did not resume and advance story dialogue")
-		quit(1)
+		await _finish(1)
 		return
 	print("  Native Title Continue loaded Save003 and resumed story input.")
 
@@ -609,7 +616,7 @@ func _run() -> void:
 	print("  SEPIA filter mode: %s (expected 1)" % sepia_mode)
 	if int(sepia_mode) != 1:
 		printerr("FAIL Expected filter_mode 1 for SEPIA, got ", sepia_mode)
-		quit(1)
+		await _finish(1)
 		return
 
 	player.host.set_tone_filter("MONO")
@@ -617,7 +624,7 @@ func _run() -> void:
 	print("  MONO filter mode: %s (expected 2)" % mono_mode)
 	if int(mono_mode) != 2:
 		printerr("FAIL Expected filter_mode 2 for MONO, got ", mono_mode)
-		quit(1)
+		await _finish(1)
 		return
 
 	player.host.set_tone_filter("NORMAL")
@@ -625,7 +632,7 @@ func _run() -> void:
 	print("  NORMAL filter mode: %s (expected 0)" % normal_mode)
 	if int(normal_mode) != 0:
 		printerr("FAIL Expected filter_mode 0 for NORMAL, got ", normal_mode)
-		quit(1)
+		await _finish(1)
 		return
 
 	# Integrity verification of original assets
@@ -637,27 +644,24 @@ func _run() -> void:
 
 	if csx_hash_before != csx_hash_after:
 		printerr("FAIL csx file modified! Before: %s, After: %s" % [csx_hash_before, csx_hash_after])
-		quit(1)
+		await _finish(1)
 		return
 	if data1_hash_before != data1_hash_after:
 		printerr("FAIL data1.noa file modified! Before: %s, After: %s" % [data1_hash_before, data1_hash_after])
-		quit(1)
+		await _finish(1)
 		return
 	if sound_hash_before != sound_hash_after:
 		printerr("FAIL sound.noa file modified! Before: %s, After: %s" % [sound_hash_before, sound_hash_after])
-		quit(1)
+		await _finish(1)
 		return
 	if title_hash_before != title_hash_after:
 		printerr("FAIL title.noa file modified! Before: %s, After: %s" % [title_hash_before, title_hash_after])
-		quit(1)
+		await _finish(1)
 		return
 
 	print("  All local game archives remain 100% pristine and unmodified.")
 	print("PASS Title Screen, Native LoadSaveWindow, Multi-Slot Save/Load and ToneFilter Smoke Test!")
-	TestSupport.remove_test_saves(test_save_dir)
-	player.queue_free()
-	await process_frame
-	quit(0)
+	await _finish(0)
 
 
 func _find_button_sprite(sprites: Array, button_id: String):
@@ -748,3 +752,20 @@ func _click(control: Control) -> void:
 		click.button_index = MOUSE_BUTTON_LEFT
 		click.pressed = pressed
 		root.push_input(click, true)
+
+
+func _finish(exit_code: int) -> void:
+	if _finish_started:
+		return
+	_finish_started = true
+	if is_instance_valid(_owned_player):
+		if _owned_player.has_method("_shutdown_runtime_session"):
+			_owned_player.call("_shutdown_runtime_session")
+		_owned_player.queue_free()
+		await process_frame
+		# WAV playbacks are released asynchronously by AudioServer; drain before
+		# process exit so ObjectDB diagnostics distinguish test teardown from leaks.
+		await create_timer(0.25).timeout
+	if not _test_save_dir.is_empty():
+		TestSupport.remove_test_saves(_test_save_dir)
+	quit(exit_code)

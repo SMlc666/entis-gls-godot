@@ -86,7 +86,12 @@ func _initialize() -> void:
 	if vm._dispatch_sprite_method(sprite, "IsMoviePlaying", []) != 0:
 		_fail("MovieSprite.IsMoviePlaying false must return Entis Boolean false 0")
 		return
+	# Model an active movie playback owned by this MovieSprite; the host's
+	# playback flag alone is not enough to identify the caller's media stream.
 	host.is_movie_playing = true
+	host.movie_opened = true
+	host.movie_owner_instance_id = sprite.get_instance_id()
+	host.active_movie_instance_id = sprite.get_instance_id()
 	if vm._dispatch_sprite_method(sprite, "IsMoviePlaying", []) != -1:
 		_fail("MovieSprite.IsMoviePlaying true must return Entis Boolean true -1")
 		return
