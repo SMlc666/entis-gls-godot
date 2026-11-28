@@ -38,7 +38,20 @@ Temporary evidence (not committed):
 - Original-asset manifests: `/tmp/yzk-a14-evidence/assets-before.sha256` and `/tmp/yzk-a14-evidence/assets-after.sha256`.
 - Instrumented project copy: `/tmp/yzk-a14-trace-project`.
 
-The three run logs contain the same 80-line run output. Counting the `[A14_TRACE]` entries in the full log gives 18 `IsExisting`, 2 `Open` (both mode 5), and 2 `SaveObject`; the recorded IP/frame context shows initialization saves under `Initialize`/`LoadSystemData` and `Initialize`/`LoadConfigData`, and Story lookups under `ScenarioLoop`/`sc00_Z000`/`Hitret`/`AdvScreen::hitret`. There were no `OutputLogText`, `Open` mode 4 (or 4→5 fallback), `Seek`, `WriteText`, `Close`, or unsupported File dispatches. The VM reached the smoke's PASS result; no runtime abort from unsupported File dispatch occurred.
+The three run logs contain the same 80-line run output. The trace rows, grouped by identical IP and caller frames, account for all 22 `[A14_TRACE]` entries:
+
+| Count | File dispatch and arguments | IP | `call_stack` frames |
+|---:|---|---:|---|
+| 15 | `IsExisting(".mio")` | `0x14140` | `ScenarioLoop` → `sc00_Z000` → `Hitret` → `AdvScreen::hitret` |
+| 1 | `IsExisting("SR000001.mio")` | `0x14140` | `ScenarioLoop` → `sc00_Z000` → `Hitret` → `AdvScreen::hitret` |
+| 1 | `IsExisting("system.dat")` | `0x7C7F` | `Initialize` → `LoadSystemData` |
+| 1 | `IsExisting("config.dat")` | `0x8095` | `Initialize` → `LoadConfigData` |
+| 1 | `Open("system.dat", 5)` | `0xAAD2` | `Initialize` → `LoadSystemData` → `SaveSystemData` → `SaveObject` |
+| 1 | `Open("config.dat", 5)` | `0xAAD2` | `Initialize` → `LoadConfigData` → `SaveConfigData` → `SaveObject` |
+| 1 | `SaveObject(...)` | `0xAB0D` | `Initialize` → `LoadSystemData` → `SaveSystemData` → `SaveObject` |
+| 1 | `SaveObject(...)` | `0xAB0D` | `Initialize` → `LoadConfigData` → `SaveConfigData` → `SaveObject` |
+
+There were no `OutputLogText`, `Open` mode 4 (or 4→5 fallback), `Seek`, `WriteText`, `Close`, or unsupported File dispatches. The VM reached the smoke's PASS result; no runtime abort from unsupported File dispatch occurred.
 
 ## Hypothetical unsupported-call path (source only)
 
