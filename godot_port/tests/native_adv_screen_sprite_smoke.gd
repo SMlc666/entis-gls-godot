@@ -4,6 +4,8 @@ const Host = preload("res://scripts/csx_host.gd")
 const CsxVM = preload("res://scripts/csx_vm.gd")
 const TestSupport = preload("res://tests/test_support.gd")
 
+var _finish_started := false
+
 
 func _initialize() -> void:
 	call_deferred("_run")
@@ -33,11 +35,11 @@ func _run() -> void:
 		await process_frame
 		frames += 1
 	if not player.is_initialized or not TestSupport.uses_isolated_saves(player.host, save_dir):
-		_fail("Original AdvScreen must initialize with isolated test saves")
+		await _finish(player, save_dir, 1, "Original AdvScreen must initialize with isolated test saves")
 		return
 	var adv = player.vm.globals_by_name.get("adv", null)
 	if adv == null or not adv.has_method("get_field"):
-		_fail("Original AdvScreen instance must exist")
+		await _finish(player, save_dir, 1, "Original AdvScreen instance must exist")
 		return
 	var sprite: Host.HostSprite = adv.get_field("sprCg")
 	frames = 0
@@ -45,23 +47,23 @@ func _run() -> void:
 		await process_frame
 		frames += 1
 	if sprite == null or not sprite.is_visible or sprite.texture == null:
-		_fail("Original opening scenario must load its visible CG Sprite")
+		await _finish(player, save_dir, 1, "Original opening scenario must load its visible CG Sprite")
 		return
 	player._sync_adv_cg_sprite(sprite)
 	if not player.adv_cg_layer.visible or player.bg_rect.visible:
-		_fail("Visible original CG Sprite must replace the stretched background fallback")
+		await _finish(player, save_dir, 1, "Visible original CG Sprite must replace the stretched background fallback")
 		return
 	if player.adv_cg_rect.texture != sprite.texture:
-		_fail("Native CG renderer must use the original Sprite texture")
+		await _finish(player, save_dir, 1, "Native CG renderer must use the original Sprite texture")
 		return
 	if player.adv_cg_rect.position != Vector2(sprite.position - sprite.rev_center):
-		_fail("Native CG renderer must preserve original Sprite position and reverse center")
+		await _finish(player, save_dir, 1, "Native CG renderer must preserve original Sprite position and reverse center")
 		return
 	if player.adv_cg_rect.size != Vector2(sprite.get_render_size()) or player.adv_cg_rect.scale != sprite.magnification:
-		_fail("Native CG renderer must preserve original dimensions and magnification")
+		await _finish(player, save_dir, 1, "Native CG renderer must preserve original dimensions and magnification")
 		return
 	if sprite.filename != "B27A.eri" or sprite.size != Vector2i(800, 1200) or sprite.position != Vector2i(0, -300):
-		_fail("The startup CG's original 800x1200 vertical-pan state must reach the renderer")
+		await _finish(player, save_dir, 1, "The startup CG's original 800x1200 vertical-pan state must reach the renderer")
 		return
 	var tile_effect := CsxVM.CsxInstance.new("EffectParam")
 	var view_size := CsxVM.CsxInstance.new("ISize")
@@ -76,25 +78,44 @@ func _run() -> void:
 	tile_effect.set_field("nInterval", 100)
 	tile_effect.set_field("nDegreeStep", 0)
 	if sprite.set_effect_parameter(tile_effect) != 0:
-		_fail("Native AdvScreen CG must accept Entis TileImage effect parameters")
+		await _finish(player, save_dir, 1, "Native AdvScreen CG must accept Entis TileImage effect parameters")
 		return
 	player._sync_adv_cg_sprite(sprite)
 	if not bool(player.adv_cg_material.get_shader_parameter("sprite_tile_image")) or player.adv_cg_rect.size != Vector2(800, 600):
-		_fail("TileImage must render the original CG inside its 800x600 view rectangle")
+		await _finish(player, save_dir, 1, "TileImage must render the original CG inside its 800x600 view rectangle")
 		return
 	player.host.advance_sprite_animations(0.1)
 	player._sync_adv_cg_sprite(sprite)
 	var expected_scroll := Vector2(sprite.fields.get("effect_scroll", Vector2i.ZERO)) / Vector2(sprite.texture.get_size())
 	if player.adv_cg_material.get_shader_parameter("sprite_scroll_uv") != expected_scroll:
-		_fail("TileImage shader must follow the native per-frame scroll offset")
+		await _finish(player, save_dir, 1, "TileImage shader must follow the native per-frame scroll offset")
 		return
 	if FileAccess.get_sha256(csx_path) != csx_hash or FileAccess.get_sha256(noa_path) != noa_hash:
-		_fail("Original CSX and NOA files must remain unchanged")
+		await _finish(player, save_dir, 1, "Original CSX and NOA files must remain unchanged")
 		return
-	print("PASS original AdvScreen B27A CG position, scale, clip and texture mapping")
-	player.queue_free()
+	await _finish(player, save_dir, 0, "PASS original AdvScreen B27A CG position, scale, clip and texture mapping")
+
+
+func _finish(player: Variant, save_dir: String, exit_status: int, message: String) -> void:
+	if _finish_started:
+		return
+	_finish_started = true
+	if is_instance_valid(player):
+		if player.has_method("_shutdown_runtime_session"):
+			player.call("_shutdown_runtime_session")
+		if not bool(player.get("runtime_shutdown")):
+			printerr("FAIL AdvPlayer runtime shutdown hook did not complete")
+			exit_status = 1
+		player.free()
 	await process_frame
-	quit(0)
+	# Allow AudioServer to release WAV playback references after the runtime is torn down.
+	await create_timer(0.25).timeout
+	TestSupport.remove_test_saves(save_dir)
+	if exit_status == 0:
+		print(message)
+	else:
+		printerr("FAIL ", message)
+	quit(exit_status)
 
 
 func _fail(message: String) -> void:
