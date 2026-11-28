@@ -366,8 +366,7 @@ class HostResource extends RefCounted:
 		configured_end_frame = -1
 		configured_repeat = false
 		audio_stream = null
-		image = null
-		texture = null
+		release_image_data()
 		return 0
 
 	func set_volume(left: float, right: float) -> int:
