@@ -1,6 +1,7 @@
 extends SceneTree
 
 const CsxHostClass = preload("res://scripts/csx_host.gd")
+const CsxVMClass = preload("res://scripts/csx_vm.gd")
 const TestSupport = preload("res://tests/test_support.gd")
 
 const START_SCENARIO := "00_Z000"
@@ -111,6 +112,35 @@ func _run() -> void:
 	if player.is_title_mode or player.is_config_open:
 		await _fail_after_cleanup(player, save_dir, original_hashes, "Story ID_CONFIG must use the original CSX ConfigWindow, not the title or project-owned fallback state")
 		return
+
+	var bgm_slider_sprite := _find_form_item(config_page.children, "ID_VOL_BGM")
+	var bgm_slider_wrapper: Control = player.host_sprite_controls.get(bgm_slider_sprite.get_instance_id(), null) if bgm_slider_sprite != null else null
+	var bgm_slider: Range = bgm_slider_wrapper.get_node_or_null("NativeScroll") as Range if bgm_slider_wrapper != null else null
+	if bgm_slider == null or not bgm_slider.editable:
+		await _fail_after_cleanup(player, save_dir, original_hashes, "Original Story ConfigWindow must expose an interactive ID_VOL_BGM scroll bar")
+		return
+	var native_config_state: Variant = player.vm.globals_by_name.get("cnfObj", null)
+	if not native_config_state is CsxVMClass.CsxInstance:
+		await _fail_after_cleanup(player, save_dir, original_hashes, "The original CSX cnfObj state must be available before adjusting the native slider")
+		return
+	var native_bgm_before := float(native_config_state.get_field("volBgm"))
+	var target_scroll_position := int(bgm_slider.value) + 1
+	if target_scroll_position > int(bgm_slider.max_value):
+		target_scroll_position = int(bgm_slider.value) - 1
+	if target_scroll_position < int(bgm_slider.min_value) or target_scroll_position > int(bgm_slider.max_value):
+		await _fail_after_cleanup(player, save_dir, original_hashes, "Original ID_VOL_BGM range must permit a one-step native setting change")
+		return
+	bgm_slider.value = target_scroll_position
+	var expected_native_bgm := float(target_scroll_position) / 256.0
+	for frame in range(120):
+		await process_frame
+		if is_equal_approx(float(native_config_state.get_field("volBgm")), expected_native_bgm):
+			break
+	var native_bgm_after := float(native_config_state.get_field("volBgm"))
+	if not is_equal_approx(native_bgm_after, expected_native_bgm):
+		var failure_message := "Original ConfigWindow did not apply native ID_VOL_BGM notification: before=%s expected=%s actual=%s stack=%s vm_error='%s'" % [str(native_bgm_before), str(expected_native_bgm), str(native_bgm_after), _stack_names(player.vm.call_stack), player.vm.last_error]
+		await _fail_after_cleanup(player, save_dir, original_hashes, failure_message)
+		return
 	if player.vm.last_error.contains("File::IsExisting") or player.host.last_error.contains("VFS entry not found: .mio"):
 		var failure_message := "The optional empty voice .mio existence probe must not leave an error behind (vm='%s' host='%s')" % [player.vm.last_error, player.host.last_error]
 		await _fail_after_cleanup(player, save_dir, original_hashes, failure_message)
@@ -139,6 +169,16 @@ func _find_form_page(sprites: Array, page_id: String) -> CsxHostClass.HostSprite
 			if str(sprite.fields.get("form_page_id", "")) == page_id:
 				return sprite
 			var nested := _find_form_page(sprite.children, page_id)
+			if nested != null:
+				return nested
+	return null
+
+func _find_form_item(sprites: Array, item_id: String) -> CsxHostClass.HostSprite:
+	for sprite: Variant in sprites:
+		if sprite is CsxHostClass.HostSprite:
+			if str(sprite.fields.get("form_item_id", "")) == item_id:
+				return sprite
+			var nested := _find_form_item(sprite.children, item_id)
 			if nested != null:
 				return nested
 	return null
