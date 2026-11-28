@@ -8,6 +8,7 @@ const NativeMessageFadeEffect = preload("res://scripts/native_message_fade_effec
 const BoundedFileReader = preload("res://scripts/bounded_file_reader.gd")
 const MAX_MEI_FILE_BYTES := 128 * 1024 * 1024
 const MAX_MEI_GOP_BUFFER_BYTES := 64 * 1024 * 1024
+const SAVE_LOAD_SYNC_STEP_BUDGET := 1_000_000
 
 const CG_CATEGORIES: Array[Dictionary] = [
 	{"id": "EA", "name": "春日野 穹", "sub": "Kasugano Sora"},
@@ -211,6 +212,7 @@ var host_texture_opacity_cache: Dictionary = {}
 var host_texture_opacity_cache_sweep_ticks: int = 0
 var last_host_input_was_pointer: bool = false
 var native_title_result_handled: bool = false
+var native_title_load_pending: bool = false
 var host_window_last_viewport_size: Vector2 = Vector2.ZERO
 
 # Confirmation Dialog
@@ -809,6 +811,7 @@ func _start_engine() -> void:
 	host.movie_close_requested.connect(_on_movie_close_requested)
 	host.movie_seek_requested.connect(_on_movie_seek_requested)
 	host.tone_filter_updated.connect(_on_tone_filter_updated)
+	host.confirmation_requested.connect(_on_host_confirmation_requested)
 	_apply_dialogue_skin()
 	_apply_config_skin()
 	_apply_voice_details_skin()
@@ -2272,6 +2275,17 @@ func _build_confirm_dialog() -> void:
 	ok_btn.size = Vector2(82, 25)
 	ok_btn.pressed.connect(_on_confirm_dialog_ok)
 	dialog_box.add_child(ok_btn)
+	var ok_label := Label.new()
+	ok_label.name = "ID_YES_LABEL"
+	ok_label.text = "确定"
+	ok_label.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	ok_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	ok_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	ok_label.add_theme_color_override("font_color", Color("#eeeeee"))
+	ok_label.add_theme_color_override("font_outline_color", Color.BLACK)
+	ok_label.add_theme_constant_override("outline_size", 2)
+	ok_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ok_btn.add_child(ok_label)
 
 	var cancel_btn := TextureButton.new()
 	cancel_btn.name = "ID_NO"
@@ -2279,6 +2293,17 @@ func _build_confirm_dialog() -> void:
 	cancel_btn.size = Vector2(82, 25)
 	cancel_btn.pressed.connect(_close_confirm_dialog)
 	dialog_box.add_child(cancel_btn)
+	var cancel_label := Label.new()
+	cancel_label.name = "ID_NO_LABEL"
+	cancel_label.text = "取消"
+	cancel_label.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	cancel_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	cancel_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	cancel_label.add_theme_color_override("font_color", Color("#eeeeee"))
+	cancel_label.add_theme_color_override("font_outline_color", Color.BLACK)
+	cancel_label.add_theme_constant_override("outline_size", 2)
+	cancel_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	cancel_btn.add_child(cancel_label)
 
 
 func _show_confirm_dialog(prompt: String, callback: Callable) -> void:
@@ -2290,14 +2315,27 @@ func _show_confirm_dialog(prompt: String, callback: Callable) -> void:
 
 func _close_confirm_dialog() -> void:
 	confirm_panel.visible = false
+	if host != null:
+		host.resolve_confirmation(0)
 	confirm_callback = Callable()
 
 
 func _on_confirm_dialog_ok() -> void:
 	confirm_panel.visible = false
-	if confirm_callback.is_valid():
-		confirm_callback.call()
+	var callback := confirm_callback
 	confirm_callback = Callable()
+	if host != null and host.resolve_confirmation(-1):
+		return
+	if callback.is_valid():
+		callback.call()
+
+
+func _on_host_confirmation_requested(prompt: String) -> void:
+	if confirm_panel == null or confirm_panel.visible:
+		if host != null:
+			host.resolve_confirmation(0)
+		return
+	_show_confirm_dialog(prompt, Callable())
 
 
 func _apply_confirm_skin() -> void:
@@ -2609,6 +2647,7 @@ func _start_native_title_script() -> bool:
 	vm.last_return_value = null
 	vm.last_error = ""
 	native_title_result_handled = false
+	native_title_load_pending = false
 	is_title_mode = true
 	is_running = true
 	return true
@@ -2652,6 +2691,8 @@ func _process_native_title() -> void:
 		return
 	_sync_host_window_canvas()
 	vm.refresh_cooperative_sleep()
+	if _try_resume_native_title_load():
+		return
 	if vm.is_halted:
 		if native_appreciation_mode:
 			_start_native_title_script()
@@ -2670,12 +2711,36 @@ func _process_native_title() -> void:
 			push_error("[AdvPlayer] Native screen stopped at 0x%X (%s): %s" % [vm.ip, " > ".join(frames), vm.last_error])
 			return
 		executed += 1
+		if _try_resume_native_title_load():
+			return
 	_sync_host_window_canvas()
 	if vm.is_halted:
 		if native_appreciation_mode:
 			_start_native_title_script()
 		else:
 			_handle_native_title_return()
+
+
+func _try_resume_native_title_load() -> bool:
+	if not is_title_mode or native_appreciation_mode or vm == null:
+		native_title_load_pending = false
+		return false
+	if not native_title_load_pending and not _native_stack_contains("EnterLoad"):
+		return false
+	var sc_obj: Variant = vm.globals_by_name.get("scObj", null)
+	if not sc_obj is CsxVMReader.CsxInstance:
+		return false
+	var is_load: Variant = sc_obj.get_field("isLoad")
+	if is_load != -1:
+		native_title_load_pending = false
+		return false
+	native_title_load_pending = true
+	for active_load_frame in ["EnterLoad", "Load", "NormalLoad", "QuickLoad", "LoadSaveWindow::loadsave", "LoadSaveWindow::run", "Confirm"]:
+		if _native_stack_contains(active_load_frame):
+			return false
+	native_title_load_pending = false
+	_resume_loaded_scenario_from_current_state("native-title-load")
+	return true
 
 
 func _handle_native_title_return() -> void:
@@ -3008,6 +3073,8 @@ func _sync_host_sprite(sprite: CsxHostClass.HostSprite, parent: Control, seen: D
 	if native_button != null:
 		if sprite.btn_state == "pushed" and sprite.btn_pushed_tex != null:
 			native_button.texture_normal = sprite.btn_pushed_tex
+		elif (sprite.has_window_focus or sprite.btn_state == "focus") and sprite.btn_focus_tex != null:
+			native_button.texture_normal = sprite.btn_focus_tex
 		else:
 			native_button.texture_normal = sprite.btn_normal_tex if sprite.btn_normal_tex != null else sprite.texture
 		native_button.texture_hover = sprite.btn_focus_tex
@@ -3966,7 +4033,7 @@ func _open_config_modal() -> void:
 		return
 	is_config_open = true
 	config_panel.visible = true
-	print("[AdvPlayer] Opened native Config Window.")
+	print("[AdvPlayer] Opened project-owned Config fallback modal.")
 
 
 func _close_config_modal() -> void:
@@ -3975,15 +4042,57 @@ func _close_config_modal() -> void:
 	_persist_player_settings()
 	is_config_open = false
 	config_panel.visible = false
-	print("[AdvPlayer] Closed native Config Window.")
+	print("[AdvPlayer] Closed project-owned Config fallback modal.")
 
 
 func _exit_title_to_game() -> void:
+	native_title_load_pending = false
 	is_title_mode = false
 	title_panel.visible = false
 	if host_window_layer != null:
 		host_window_layer.visible = false
 	print("[AdvPlayer] Exited Title Screen.")
+
+
+func _resume_loaded_scenario_from_current_state(context_id: String) -> bool:
+	if vm == null or host == null or not vm.functions.has("ScenarioLoop"):
+		var error_text := "读档后未找到 ScenarioLoop，无法恢复剧情。"
+		push_error("[AdvPlayer] " + error_text)
+		if message_label != null:
+			message_label.text = "[color=#e06c75]%s[/color]" % error_text
+		is_running = false
+		return false
+	var sc_obj: Variant = vm.globals_by_name.get("scObj", null)
+	var saved_scenario_value: Variant = sc_obj.get_field("scenarioCall") if sc_obj is CsxVMReader.CsxInstance else null
+	var saved_scenario_call := str(saved_scenario_value) if saved_scenario_value != null else ""
+	if saved_scenario_call.is_empty():
+		var error_text := "读档未恢复有效的 scObj.scenarioCall，无法继续原存档剧情。"
+		push_error("[AdvPlayer] " + error_text)
+		if message_label != null:
+			message_label.text = "[color=#e06c75]%s[/color]" % error_text
+		is_running = false
+		return false
+	var current_sc: String = saved_scenario_call
+	if is_title_mode:
+		_exit_title_to_game()
+	_reset_story_interaction_state(context_id)
+	vm.ip = vm.functions["ScenarioLoop"]
+	vm.is_halted = false
+	vm.pending_call_args = [current_sc]
+	vm.pending_return_ip = -1
+	vm.call_stack.clear()
+	vm.eval_stack.clear()
+	vm.last_return_value = null
+	vm.last_error = ""
+	is_running = true
+	if host.current_bg_texture != null and bg_rect != null:
+		bg_rect.texture = host.current_bg_texture
+	if speaker_label != null:
+		speaker_label.text = host.current_speaker
+	if message_label != null:
+		message_label.text = host.current_dialogue
+	print("[AdvPlayer] Resumed loaded scenario '%s' via ScenarioLoop (%s)." % [current_sc, context_id])
+	return true
 
 
 func _on_title_start_game() -> void:
@@ -4633,10 +4742,12 @@ func save_to_slot(slot: int) -> bool:
 		return false
 	var save_path := _slot_save_path(slot)
 	var res: Dictionary
+	# Original Story save routines serialize substantial live CSX state; the old
+	# 100k budget timed out on the real Yosuga QuickSave path.
 	if slot == 0:
-		res = vm.call_function_sync("QuickSave", [], 100_000)
+		res = vm.call_function_sync("QuickSave", [], SAVE_LOAD_SYNC_STEP_BUDGET)
 	else:
-		res = vm.call_function_sync("NormalSave", [slot, [], []], 100_000)
+		res = vm.call_function_sync("NormalSave", [slot, [], []], SAVE_LOAD_SYNC_STEP_BUDGET)
 
 	if _is_csx_operation_success(res) and _is_valid_save_document(save_path):
 		print("[AdvPlayer] Successfully saved to Slot %02d" % slot)
@@ -4665,9 +4776,9 @@ func load_from_slot(slot: int) -> bool:
 
 	var res: Dictionary
 	if slot == 0:
-		res = vm.call_function_sync("QuickLoad", [0], 100_000)
+		res = vm.call_function_sync("QuickLoad", [0], SAVE_LOAD_SYNC_STEP_BUDGET)
 	else:
-		res = vm.call_function_sync("NormalLoad", [slot], 100_000)
+		res = vm.call_function_sync("NormalLoad", [slot], SAVE_LOAD_SYNC_STEP_BUDGET)
 
 	if not _is_csx_operation_success(res):
 		var error_text := _csx_operation_error(res)
@@ -4676,33 +4787,11 @@ func load_from_slot(slot: int) -> bool:
 		return false
 
 	print("[AdvPlayer] Successfully loaded from Slot %02d" % slot)
-	_reset_story_interaction_state("load-slot:%d" % slot)
 	_close_save_load_modal()
-
-	var sc_obj = vm.globals_by_name.get("scObj", null)
-	var current_sc: String = start_scenario
-	if sc_obj is CsxVMReader.CsxInstance:
-		var sc_call: String = str(sc_obj.get_field("scenarioCall"))
-		if not sc_call.is_empty():
-			current_sc = sc_call
-
-	if is_title_mode:
-		_exit_title_to_game()
-
-	# Re-enter ScenarioLoop
-	if vm.functions.has("ScenarioLoop"):
-		vm.ip = vm.functions["ScenarioLoop"]
-		vm.is_halted = false
-		vm.pending_call_args = [current_sc]
-		vm.pending_return_ip = -1
-		vm.call_stack.clear()
-		vm.eval_stack.clear()
-		is_running = true
-
-	if host.current_bg_texture != null:
-		bg_rect.texture = host.current_bg_texture
-	speaker_label.text = host.current_speaker
-	message_label.text = "[color=#98c379]★ 已读取存档 (Slot %02d)[/color]\n" % slot + host.current_dialogue
+	if not _resume_loaded_scenario_from_current_state("load-slot:%d" % slot):
+		return false
+	if message_label != null:
+		message_label.text = "[color=#98c379]★ 已读取存档 (Slot %02d)[/color]\n" % slot + host.current_dialogue
 	return true
 
 

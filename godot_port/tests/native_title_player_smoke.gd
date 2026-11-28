@@ -378,7 +378,10 @@ func _run() -> void:
 	if not _require(native_rec_tab_button != null, "Native recollection tab must render as a TextureButton"): return
 	if not _require(rec_tab_sprite.full_btn_id == "ID_PAGE_TAG1\\\\ID_REC", "Nested Appreciation button must preserve its full CSX command path"): return
 	var rec_captures: Array = []
-	if not _require(player.vm._is_match_usage(rec_tab_sprite.full_btn_id, "&ID_PAGE_TAG&(<0-9>*)&\\\\ID_REC&", rec_captures) == "" and rec_captures == [1], "CSX IsMatchUsage must match nested page commands and capture the one-based page index"): return
+	if not _require(player.vm._is_match_usage(rec_tab_sprite.full_btn_id, "&ID_PAGE_TAG&(<0-9>*)&\\\\ID_REC&", rec_captures) == "" and rec_captures == ["1"], "CSX IsMatchUsage must preserve digit captures as strings"): return
+	var save_slot_captures: Array = []
+	var save_slot_usage: String = player.vm._is_match_usage("ID_PAGE_LOAD\\\\ID_SELECT04\\\\ID_SELECT", "&ID_PAGE_LOAD\\\\ID_SELECT&(<0-9>*)&\\\\ID_SELECT&", save_slot_captures)
+	if not _require(save_slot_usage == "" and save_slot_captures == ["04"], "CSX IsMatchUsage must preserve zero-padded native save slot captures"): return
 	var appreciation_view = null
 	for app_frame: Variant in player.vm.call_stack:
 		if app_frame.name == "Appreciation":
@@ -459,11 +462,13 @@ func _run() -> void:
 	var timeout_result: Dictionary = player.vm.call_function_sync("Title", [], 1)
 	if not _require(not timeout_result.get("ok", true) and timeout_result.get("timeout", false), "A synchronous Title() budget exhaustion must report timeout failure"): return
 
-	print("PASS Native CSX Title() and Appreciation() Player Smoke Test!")
+	if player.has_method("_shutdown_runtime_session"):
+		player.call("_shutdown_runtime_session")
 	TestSupport.remove_test_saves(test_save_dir)
 	player.free()
 	await process_frame
-	await process_frame
+	await create_timer(0.25).timeout
+	print("PASS Native CSX Title() and Appreciation() Player Smoke Test!")
 	quit(0)
 
 

@@ -1,7 +1,7 @@
 extends RefCounted
 
-const ExternalCodec = preload("res://scripts/external_codec.gd")
 const EntisSections = preload("res://scripts/entis_sections.gd")
+const MAX_OUTPUT_SIZE := 128 * 1024 * 1024
 
 
 static func decode(data: PackedByteArray) -> Dictionary:
@@ -24,7 +24,7 @@ static func decode(data: PackedByteArray) -> Dictionary:
 	var bits := data.decode_u32(offset + 36)
 	if channels < 1 or channels > 2 or rate < 1 or rate > 384000 or samples < 1 or bits not in [8, 16, 24, 32]:
 		return {"ok": false, "error": "MIO 音频参数不受支持。"}
-	if samples * channels * (bits >> 3) > ExternalCodec.MAX_OUTPUT_SIZE:
+	if samples * channels * (bits >> 3) > MAX_OUTPUT_SIZE:
 		return {"ok": false, "error": "MIO 解码结果预计超过预览上限。"}
 	var native_error := ""
 	if ClassDB.class_exists("YzkCodec"):
@@ -41,7 +41,7 @@ static func decode(data: PackedByteArray) -> Dictionary:
 					return {"ok": false, "error": "原生 MIO 解码器返回的音频格式与头部不一致。"}
 				if bits not in [8, 16]:
 					native_error = "Godot AudioStreamWAV 当前只支持本接口的 8 位或 16 位 PCM。"
-				elif not pcm is PackedByteArray or pcm.is_empty() or pcm.size() > ExternalCodec.MAX_OUTPUT_SIZE or pcm.size() % frame_bytes != 0:
+				elif not pcm is PackedByteArray or pcm.is_empty() or pcm.size() > MAX_OUTPUT_SIZE or pcm.size() % frame_bytes != 0:
 					return {"ok": false, "error": "原生 MIO 解码器返回了长度错误的 PCM 数据。"}
 				else:
 					var stream := AudioStreamWAV.new()
@@ -52,15 +52,7 @@ static func decode(data: PackedByteArray) -> Dictionary:
 					return {"ok": true, "stream": stream}
 			if native_result is Dictionary and not native_result.get("ok", false):
 				native_error = str(native_result.get("error", "原生 MIO 解码失败。"))
-	if OS.get_name() != "Linux":
-		return {
-			"ok": false,
-			"error": native_error if not native_error.is_empty() else "此平台未加载进程内 MIO 解码扩展。"
-		}
-	var result := ExternalCodec.convert(data, "entis/mio", "mio", "wav")
-	if not result.get("ok", false):
-		return result
-	var stream := AudioStreamWAV.load_from_buffer(result["data"])
-	if stream == null or stream.data.is_empty():
-		return {"ok": false, "error": "无法读取解码后的 WAV 音频。"}
-	return {"ok": true, "stream": stream}
+	return {
+		"ok": false,
+		"error": native_error if not native_error.is_empty() else "未加载进程内 MIO 解码扩展。"
+	}

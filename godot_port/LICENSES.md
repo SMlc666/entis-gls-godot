@@ -32,11 +32,14 @@ The build also uses the host compiler and system libraries; their exact versions
 are not locked here, so the script records source revisions but does not claim
 bit-for-bit reproducible binaries.
 
-`arc_unpacker` and `erisan_decode` must be available as ordinary executable
-files for `OS.execute()`. A PCK does not turn these resources into filesystem
-executables. A Linux distribution must place them under
+`erisan_decode` is an optional Linux fallback when the in-process ERISAN
+extension is unavailable. `arc_unpacker` is only used by the optional
+`native_codec_differential_smoke.gd` reference comparison; normal ERI/MIO
+runtime decoding uses the in-process extension. When a sidecar is needed, it
+must be an ordinary executable file because a PCK does not turn resources into
+filesystem executables. A Linux distribution must place it under
 `tools/bin/linux/` beside the standalone app or configure the corresponding
-absolute-path environment variables. This workspace has no Linux export
+absolute-path environment variable. This workspace has no Linux export
 sidecar deployment step and has not verified PCK execution.
 
 After a successful Linux build, the script writes `tools/bin/linux/SHA256SUMS`.

@@ -20,6 +20,7 @@ signal movie_stop_requested
 signal movie_close_requested
 signal movie_seek_requested(frame_index: int)
 signal tone_filter_updated(filter_type: String)
+signal confirmation_requested(prompt: String)
 
 const NoaArchiveReader = preload("res://scripts/noa_archive.gd")
 const EriDecoder = preload("res://scripts/eri_decoder.gd")
@@ -87,6 +88,7 @@ var advance_ticks: int = 0
 var skip_input_pending: bool = false
 var advance_query_count: int = 0
 var is_waiting_input: bool = false
+var native_command_dispatch_windows: Dictionary[int, bool] = {}
 var yield_for_sprite_activation: bool = false
 var is_movie_playing: bool = false
 var movie_current_frame: int = -1
@@ -108,6 +110,9 @@ var virtual_time_ms: int = 1000
 var cursor_position_provider: Callable = Callable()
 var command_cursor_override: Vector2i = Vector2i.ZERO
 var command_cursor_override_valid: bool = false
+var pending_confirmation_vm: WeakRef = null
+var pending_confirmation_active: bool = false
+var pending_confirmation_prompt: String = ""
 var command_cursor_override_expires_usec: int = 0
 var active_input_filter_ref: WeakRef = null
 var active_sprites: Dictionary[int, WeakRef] = {}
@@ -361,8 +366,7 @@ class HostResource extends RefCounted:
 		configured_end_frame = -1
 		configured_repeat = false
 		audio_stream = null
-		image = null
-		texture = null
+		release_image_data()
 		return 0
 
 	func set_volume(left: float, right: float) -> int:
@@ -622,9 +626,18 @@ class HostInputFilter extends RefCounted:
 	func is_joy_button_pushing(key: int, _dev: int = 0) -> int:
 		return -1 if _is_button_pressed(key) else 0
 
-	func get_joy_button_pushed(key: int, _dev: int = 0, during_activation: bool = false) -> int:
+	func _native_dispatch_window_id() -> int:
+		var target_window: Variant = window_ref
+		if target_window is WeakRef:
+			target_window = target_window.get_ref()
+		if target_window is Object and is_instance_valid(target_window) and target_window.has_method("get_command"):
+			return target_window.get_instance_id()
+		return -1
+
+	func get_joy_button_pushed(key: int, _dev: int = 0, during_activation: bool = false, window_id: int = -1) -> int:
 		if host != null:
-			var host_result := host.poll_advance_button(key, during_activation)
+			var dispatch_window_id := window_id if window_id != -1 else _native_dispatch_window_id()
+			var host_result := host.poll_advance_button(key, during_activation, dispatch_window_id)
 			if host_result != 0:
 				joy_buttons[key] = _is_button_pressed(key)
 				return host_result
@@ -1210,9 +1223,26 @@ class HostResourceManager extends RefCounted:
 			text_sprite.text_content = item["text"]
 			parent_sprite.add_sprite(buttons.size() + 1, text_sprite)
 
+		if page_id in ["ID_PAGE_LOAD", "ID_PAGE_SAVE"] and not _create_save_slot_pages(parent_sprite):
+			return 0
 		parent_sprite.refresh_command_ids()
 
 		return 1
+
+	func _create_save_slot_pages(parent_sprite: HostSprite) -> bool:
+		if not skin_pages.has("ID_PAGE_SAVE_INDEX"):
+			if host != null:
+				host.last_error = "frame.noa 缺少存档卡片模板 ID_PAGE_SAVE_INDEX。"
+			return false
+		for slot_index in range(1, 10):
+			var slot_page := HostSprite.new(0, host)
+			slot_page.fields["form_item_id"] = "ID_SELECT%02d" % slot_index
+			slot_page.position = Vector2i(87 + ((slot_index - 1) % 3) * 224, 31 + int((slot_index - 1) / 3) * 174)
+			slot_page.is_visible = true
+			if create_form_page(slot_page, "ID_PAGE_SAVE_INDEX") != 1:
+				return false
+			parent_sprite.add_sprite(10 + slot_index, slot_page)
+		return true
 
 	func _set_form_texture(sprite: HostSprite, resource_id: String) -> bool:
 		var info := _resolve_skin_image(resource_id)
@@ -1318,6 +1348,7 @@ class HostSprite extends RefCounted:
 	var full_btn_id: String = ""
 	var is_button: bool = false
 	var btn_state: String = "normal"
+	var has_window_focus: bool = false
 	var btn_normal_tex: Texture2D = null
 	var btn_focus_tex: Texture2D = null
 	var btn_pushed_tex: Texture2D = null
@@ -1377,7 +1408,7 @@ class HostSprite extends RefCounted:
 		var enabled_items: Dictionary = fields.get("item_enabled_status", {})
 		enabled_items[item_id] = enabled
 		fields["item_enabled_status"] = enabled_items
-		var target := find_form_item(item_id)
+		var target := find_sprite_item(item_id)
 		if target != null:
 			target.is_enabled = enabled
 		return 0
@@ -1385,7 +1416,7 @@ class HostSprite extends RefCounted:
 	func is_enabled_native(item_id: String = "") -> bool:
 		if item_id.is_empty():
 			return is_enabled
-		var target := find_form_item(item_id)
+		var target := find_sprite_item(item_id)
 		if target != null:
 			return target.is_enabled
 		var enabled_items: Dictionary = fields.get("item_enabled_status", {})
@@ -1483,7 +1514,7 @@ class HostSprite extends RefCounted:
 						animation_sequence.append(frame_index)
 				size = Vector2i(image.get_width(), image.get_height())
 				is_visible = true
-				if host.current_bg.is_empty() or filename.begins_with("B") or filename.begins_with("EA"):
+				if not bool(res.get("is_save_thumbnail", false)) and (host.current_bg.is_empty() or filename.begins_with("B") or filename.begins_with("EA")):
 					host.current_bg = p_filename.get_file().get_basename()
 					host.current_bg_texture = texture
 					host.emit_signal("bg_updated", host.current_bg, texture)
@@ -1663,9 +1694,9 @@ class HostSprite extends RefCounted:
 		return 1
 
 	func set_sprite_text(item_id: String, value: String) -> int:
-		var target := find_form_item(item_id) if not item_id.is_empty() else self
+		var target := find_sprite_item(item_id) if not item_id.is_empty() else self
 		if target == null:
-			target = self
+			return 0
 		target.text_content = value
 		target.message_visible_count = -1
 		target.message_pending = false
@@ -1675,7 +1706,7 @@ class HostSprite extends RefCounted:
 		return 1
 
 	func get_sprite_text(item_id: String) -> String:
-		var target := find_form_item(item_id) if not item_id.is_empty() else self
+		var target := find_sprite_item(item_id) if not item_id.is_empty() else self
 		return target.text_content if target != null else ""
 
 	func get_render_size() -> Vector2i:
@@ -1935,9 +1966,39 @@ class HostSprite extends RefCounted:
 		return set_scroll_position(get_scroll_position(item_id, axis), item_id, axis)
 
 	func is_hit_at(x: int, y: int) -> bool:
-		if not is_visible or not is_enabled or transparency >= 256:
+		if not is_enabled:
 			return false
-		return get_sprite_rect().has_point(Vector2(x, y))
+		var ancestor: HostSprite = self
+		while ancestor != null:
+			if not ancestor.is_visible or ancestor.transparency >= 256:
+				return false
+			ancestor = ancestor.parent_sprite
+		var render_size := get_render_size()
+		if render_size.x <= 0 or render_size.y <= 0:
+			return false
+		var local_to_host := get_sprite_to_host_transform()
+		if absf(local_to_host.determinant()) <= 0.000001:
+			return false
+		var local_point := local_to_host.affine_inverse() * Vector2(x, y)
+		return Rect2(Vector2.ZERO, Vector2(render_size)).has_point(local_point)
+
+	func get_sprite_to_host_transform() -> Transform2D:
+		var chain: Array[HostSprite] = []
+		var ancestor: HostSprite = self
+		while ancestor != null:
+			chain.push_front(ancestor)
+			ancestor = ancestor.parent_sprite
+		var local_to_host := Transform2D.IDENTITY
+		for sprite: HostSprite in chain:
+			var sprite_transform := Transform2D(
+				deg_to_rad(sprite.rotation_degrees),
+				sprite.magnification,
+				0.0,
+				Vector2(sprite.position)
+			)
+			sprite_transform *= Transform2D(0.0, Vector2.ONE, 0.0, -Vector2(sprite.rev_center))
+			local_to_host *= sprite_transform
+		return local_to_host
 
 	func get_sprite_rect() -> Rect2:
 		var render_size := get_render_size()
@@ -2083,11 +2144,19 @@ class HostSprite extends RefCounted:
 			host.report_unsupported("HostSprite.SendCommand <%s>" % tag)
 
 	func set_form_image(item_id: String, resource_id: String) -> bool:
-		var item := find_form_item(item_id)
+		var item := find_sprite_item(item_id)
 		return item != null and form_resources != null and form_resources._set_form_texture(item, resource_id)
 
 	func refresh_command_ids() -> void:
 		var page_id := str(fields.get("form_page_id", ""))
+		if page_id == "ID_PAGE_SAVE_INDEX":
+			var container_page_id := str(parent_sprite.fields.get("form_page_id", "")) if parent_sprite != null else ""
+			var slot_item_id := str(fields.get("form_item_id", ""))
+			if container_page_id in ["ID_PAGE_LOAD", "ID_PAGE_SAVE"] and slot_item_id.begins_with("ID_SELECT"):
+				for child in children:
+					if child is HostSprite and not child.btn_id.is_empty():
+						child.full_btn_id = "%s\\\\%s\\\\%s" % [container_page_id, slot_item_id, child.btn_id]
+				return
 		if not page_id.begins_with("ID_PAGE_TAG"):
 			return
 		var tag_index := int(page_id.trim_prefix("ID_PAGE_TAG"))
@@ -2511,12 +2580,15 @@ class HostWindow extends RefCounted:
 		return null
 
 	func _apply_focus(target: HostSprite, path: String) -> void:
-		if focused_sprite != null and focused_sprite.is_button and focused_sprite.btn_state == "focus":
-			focused_sprite.set_button_state("normal")
+		if focused_sprite != null:
+			focused_sprite.has_window_focus = false
+			if focused_sprite.is_button and focused_sprite.btn_state == "focus":
+				var remains_checked := bool(focused_sprite.fields.get("checked", false))
+				focused_sprite.set_button_state("pushed" if remains_checked else "normal")
 		focused_sprite = target
 		focused_path = path
-		if target != null and target.is_button:
-			target.set_button_state("focus")
+		if target != null:
+			target.has_window_focus = true
 
 	func get_focus() -> String:
 		return focused_path
@@ -2567,8 +2639,8 @@ class HostWindow extends RefCounted:
 		if host != null and host.active_input_filter_ref != null:
 			var active_filter = host.active_input_filter_ref.get_ref()
 			if active_filter is HostInputFilter:
-				return active_filter.get_joy_button_pushed(key, 0, during_activation)
-		return host.poll_advance_button(key, during_activation) if host != null else 0
+				return active_filter.get_joy_button_pushed(key, 0, during_activation, get_instance_id())
+		return host.poll_advance_button(key, during_activation, get_instance_id()) if host != null else 0
 
 	func is_joy_button_pushing(key: int, _dev: int = 0) -> int:
 		if host != null and host.active_input_filter_ref != null:
@@ -2631,7 +2703,9 @@ class HostWindow extends RefCounted:
 		if host != null:
 			var event: Dictionary = host.pop_command_for_window(get_instance_id())
 			if event.is_empty():
+				host.clear_native_command_dispatch(get_instance_id())
 				return 0
+			host.mark_native_command_dispatch(get_instance_id())
 			host.clear_command_cursor_override()
 			var cmd_id: String = ""
 			var full_id: String = ""
@@ -2664,6 +2738,9 @@ class HostFile extends RefCounted:
 	const MODE_READ := 0
 	const MODE_WRITE := 1
 	const MODE_READ_WRITE := 2
+	# Observed in the original Yosuga CSX Save(filename, ...): mode 5 opens a
+	# save/create path; preserve the project-local 0/1/2 modes as well.
+	const MODE_CREATE_WRITE := 5
 	var host: CsxHost = null
 	var vm: RefCounted = null
 	var current_path: String = ""
@@ -2679,7 +2756,7 @@ class HostFile extends RefCounted:
 	func open(path: String, mode: int = 2) -> int:
 		is_open = false
 		current_path = ""
-		if mode not in [MODE_READ, MODE_WRITE, MODE_READ_WRITE]:
+		if mode not in [MODE_READ, MODE_WRITE, MODE_READ_WRITE, MODE_CREATE_WRITE]:
 			return 1
 		if host == null or path.is_empty():
 			return 1
@@ -2754,7 +2831,7 @@ class HostFile extends RefCounted:
 
 
 
-func poll_advance_button(key: int, during_activation: bool) -> int:
+func poll_advance_button(key: int, during_activation: bool, window_id: int = -1) -> int:
 	if during_activation:
 		yield_for_sprite_activation = true
 	if key == 4:
@@ -2766,7 +2843,12 @@ func poll_advance_button(key: int, during_activation: bool) -> int:
 	var pushed := advance_ticks > 0 or auto_advance
 	if advance_ticks > 0:
 		advance_ticks -= 1
-	is_waiting_input = not pushed and not during_activation
+	# A queued native command wakes the CSX, but the script may poll advance
+	# buttons before it inspects the command ID. Do not re-arm the scheduler's
+	# input wait until that command has been dispatched and the next empty
+	# GetCommand poll is reached.
+	if not is_native_command_dispatch_pending(window_id):
+		is_waiting_input = not pushed and not during_activation
 	return 1 if pushed else 0
 
 
@@ -2839,10 +2921,37 @@ func advance_audio_envelopes(delta: float) -> void:
 			resource.advance_volume_envelope(delta * 1000.0)
 
 
+func mark_native_command_dispatch(window_id: int) -> void:
+	if not runtime_shutdown and runtime_windows.has(window_id):
+		native_command_dispatch_windows[window_id] = true
+
+
+func clear_native_command_dispatch(window_id: int) -> void:
+	native_command_dispatch_windows.erase(window_id)
+
+
+func is_native_command_dispatch_pending(window_id: int = -1) -> bool:
+	_prune_native_command_dispatch_windows()
+	if window_id == -1:
+		return not native_command_dispatch_windows.is_empty()
+	return native_command_dispatch_windows.has(window_id)
+
+
+func _prune_native_command_dispatch_windows() -> void:
+	var stale_window_ids: Array[int] = []
+	for window_id: int in native_command_dispatch_windows.keys():
+		var window_ref: Variant = runtime_windows.get(window_id, null)
+		if not window_ref is WeakRef or window_ref.get_ref() == null:
+			stale_window_ids.append(window_id)
+	for window_id: int in stale_window_ids:
+		native_command_dispatch_windows.erase(window_id)
+
+
 func begin_command_scope(context_id: String) -> int:
 	if runtime_shutdown:
 		return -1
 	var scope := _command_events.begin_scope(context_id)
+	native_command_dispatch_windows.clear()
 	clear_command_cursor_override()
 	command_overflow_reported = false
 	return scope
@@ -2962,6 +3071,8 @@ func _init(p_game_dir: String = "") -> void:
 func shutdown_runtime() -> void:
 	if runtime_shutdown:
 		return
+	if pending_confirmation_active:
+		resolve_confirmation(0)
 	runtime_shutdown = true
 	if active_input_filter_ref != null:
 		var active_filter: Variant = active_input_filter_ref.get_ref()
@@ -2970,6 +3081,7 @@ func shutdown_runtime() -> void:
 	active_input_filter_ref = null
 	cursor_position_provider = Callable()
 	_command_events.shutdown()
+	native_command_dispatch_windows.clear()
 	clear_command_cursor_override()
 	movie_owner_ref = null
 	movie_owner_instance_id = -1
@@ -3344,11 +3456,38 @@ func is_file_existing(filename: String) -> bool:
 		return true
 	if FileAccess.file_exists(game_dir.path_join(filename)) or FileAccess.file_exists(game_dir.path_join("system").path_join(filename)) or FileAccess.file_exists("user://".path_join(filename)):
 		return true
-	return not find_vfs_entry(filename).is_empty()
+	# File::IsExisting is routinely used for optional resources. A normal VFS
+	# miss is a false predicate, not a host failure; preserve any earlier error
+	# rather than reporting the expected absence as the current diagnostic.
+	var previous_error := last_error
+	var exists := not find_vfs_entry(filename).is_empty()
+	if not exists and last_error == "VFS entry not found: %s" % filename:
+		last_error = previous_error
+	return exists
 
 
 
 func load_image(filename: String, archive_hint: String = "") -> Dictionary:
+	var save_image_name := filename.get_file()
+	var save_image_stem := save_image_name.get_basename().to_lower()
+	if save_image_name.get_extension().to_lower() == "dat" and save_image_stem.begins_with("save"):
+		var thumbnail_result := load_thumbnail_image(save_image_name)
+		if not thumbnail_result.get("ok", false):
+			last_error = str(thumbnail_result.get("error", "无法读取存档缩略图。"))
+			return {"ok": false, "error": last_error}
+		var thumbnail_image: Image = thumbnail_result["image"]
+		var thumbnail_texture := ImageTexture.create_from_image(thumbnail_image)
+		var thumbnail_frames: Array[Image] = [thumbnail_image]
+		var thumbnail_sequence: Array[int] = [0]
+		return {
+			"ok": true,
+			"image": thumbnail_image,
+			"texture": thumbnail_texture,
+			"frames": thumbnail_frames,
+			"frame_sequence": thumbnail_sequence,
+			"total_time_ms": 0,
+			"is_save_thumbnail": true
+		}
 	var norm := _normalize_vfs_path(filename)
 	if not norm.ends_with(".eri"):
 		norm += ".eri"
@@ -3947,6 +4086,23 @@ func report_unsupported(capability: String) -> void:
 		push_warning(last_error)
 
 
+func present_pending_confirmation() -> void:
+	if pending_confirmation_active:
+		confirmation_requested.emit(pending_confirmation_prompt)
+
+
+func resolve_confirmation(result: int) -> bool:
+	if not pending_confirmation_active:
+		return false
+	var target_vm: Variant = pending_confirmation_vm.get_ref() if pending_confirmation_vm != null else null
+	pending_confirmation_vm = null
+	pending_confirmation_active = false
+	pending_confirmation_prompt = ""
+	if target_vm == null or not target_vm.has_method("resolve_host_confirmation"):
+		return false
+	return bool(target_vm.call("resolve_host_confirmation", result))
+
+
 func call_host_function(func_name: String, args: Array, vm: RefCounted) -> Dictionary:
 	match func_name:
 		"GetCurrentTime":
@@ -4020,6 +4176,17 @@ func call_host_function(func_name: String, args: Array, vm: RefCounted) -> Dicti
 		"LeaveLoad":
 			return {"handled": true, "result": 0}
 		"Confirm":
+			if (
+				vm != null
+				and vm.has_method("can_defer_host_call")
+				and bool(vm.call("can_defer_host_call"))
+				and not get_signal_connection_list("confirmation_requested").is_empty()
+				and not pending_confirmation_active
+			):
+				pending_confirmation_vm = weakref(vm)
+				pending_confirmation_active = true
+				pending_confirmation_prompt = str(args[0]) if not args.is_empty() else "确定要继续吗？"
+				return {"handled": true, "deferred": true}
 			return {"handled": true, "result": 0}
 		"PlayBgm", "RestartBgm", "ScRestartBgm", "ScPlayBgm":
 			if args.size() > 0:

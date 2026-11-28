@@ -92,6 +92,10 @@ func _run() -> void:
 	bounded_append.resize(65536)
 	vm._dispatch_array_method(bounded_append, "Push", [1])
 	_check(bounded_append.size() == 65536 and not vm.last_error.is_empty(), "array helper must reject growth past its cap", failures)
+	var tagged_hash: Dictionary = {"SE270": true, "SE300": false}
+	_check(vm._dispatch_hash_method(tagged_hash, "GetTagName", [0]) == "SE270", "Hash.GetTagName must return the tag at the requested index", failures)
+	_check(vm._dispatch_hash_method(tagged_hash, "GetTagName", [1]) == "SE300", "Hash.GetTagName must preserve insertion order for tagged entries", failures)
+	_check(vm._dispatch_hash_method(tagged_hash, "GetTagName", [2]) == "", "Hash.GetTagName must return an empty tag for an out-of-range index", failures)
 	var deletion_fixture: Array = ["keep"]
 	vm.last_error = ""
 	vm._dispatch_array_method(deletion_fixture, "Remove", [-2147483648, 2147483647])

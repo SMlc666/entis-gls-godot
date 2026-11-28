@@ -52,7 +52,7 @@ func _run() -> void:
 		"GetVolume",
 		[CsxVMClass.CsxRef.new(volume_out, "left"), CsxVMClass.CsxRef.new(volume_out, "right")]
 	)
-	expect(volume_result == 1 and is_equal_approx(volume_out.left, 0.4) and is_equal_approx(volume_out.right, 0.4), "GetVolume must write both native output references")
+	expect(volume_result == 0 and is_equal_approx(volume_out.left, 0.4) and is_equal_approx(volume_out.right, 0.4), "GetVolume must return Entis success code 0 and write both native output references")
 	var sound_info: Variant = vm._dispatch_resource_method(bgm, "GetSoundInfo", [])
 	expect(sound_info is CsxVMClass.CsxInstance and sound_info.get_field("nSamplesPerSec") == 22050 and sound_info.get_field("nChannelCount") == 2, "GetSoundInfo must expose native PCM format metadata")
 	expect(sound_info.get_field("nSampleCount") == 22050 and sound_info.get_field("nResourceBytes") == bgm.audio_stream.data.size(), "GetSoundInfo must report PCM sample and byte counts")
@@ -75,9 +75,9 @@ func _run() -> void:
 	pixel_resource.image.set_pixel(1, 0, Color8(0x9a, 0xbc, 0xde, 0xf0))
 	expect(vm._dispatch_resource_method(pixel_resource, "GetPixel", [0, 0]) == 0x78123456, "GetPixel must expose native 0xAARRGGBB values")
 	var pixel_rect: Array = []
-	expect(vm._dispatch_resource_method(pixel_resource, "GetPixelRect", [pixel_rect, 0, 0, 2, 1]) == 1, "GetPixelRect must fill CSX arrays")
+	expect(vm._dispatch_resource_method(pixel_resource, "GetPixelRect", [pixel_rect, 0, 0, 2, 1]) == 0, "GetPixelRect must return Entis success code 0 and fill CSX arrays")
 	expect(pixel_rect == [0x78123456, 0xf09abcde], "GetPixelRect must preserve native pixel order and channel packing")
-	expect(vm._dispatch_resource_method(pixel_resource, "SetPixelRect", [[0x80402010, 0xffabcdef], 0, 1, 2, 1]) == 1, "SetPixelRect must write native packed colors into images")
+	expect(vm._dispatch_resource_method(pixel_resource, "SetPixelRect", [[0x80402010, 0xffabcdef], 0, 1, 2, 1]) == 0, "SetPixelRect must return Entis success code 0 and write native packed colors into images")
 	expect(vm._dispatch_resource_method(pixel_resource, "GetPixel", [0, 1]) == 0x80402010 and vm._dispatch_resource_method(pixel_resource, "GetPixel", [1, 1]) == 0xffabcdef, "SetPixelRect writes must round-trip through GetPixel")
 	expect(bgm.pause() == 1 and host.bgm_player.stream_paused, "HostResource.pause must pause the matching player")
 	expect(bgm.restart() == 1 and not host.bgm_player.stream_paused, "HostResource.restart must resume a paused player")
@@ -99,11 +99,11 @@ func _run() -> void:
 	expect(host.se_player.stream.loop_begin == 20 and host.se_player.stream.loop_end == 100, "An invalid request must preserve the active loop")
 	expect(se.play_from(0, 100, true, 100) == 0, "Rewind at the end frame must be rejected")
 	se.stop()
-	expect(vm._dispatch_resource_method(se, "SetRewindingPortion", [20, 100, -1]) == 1, "SetRewindingPortion must accept SDK frame bounds and repeat flag")
+	expect(vm._dispatch_resource_method(se, "SetRewindingPortion", [20, 100, -1]) == 0, "SetRewindingPortion must return Entis success code 0 for valid SDK frame bounds")
 	expect(se.play(-2, 1) == 1, "Play must apply a configured rewinding portion")
 	expect(host.se_player.stream.loop_mode == AudioStreamWAV.LOOP_FORWARD and host.se_player.stream.loop_begin == 20 and host.se_player.stream.loop_end == 100, "Configured rewinding bounds must drive native Play looping")
 	se.stop()
-	expect(vm._dispatch_resource_method(se, "SetRewindingPortion", [100, 100, 1]) == 0, "SetRewindingPortion must reject an empty range")
+	expect(vm._dispatch_resource_method(se, "SetRewindingPortion", [100, 100, 1]) == 1, "SetRewindingPortion must return Entis failure code 1 and reject an empty range")
 	expect(host.bgm_player.stream.loop_begin == 0 and host.bgm_player.stream.loop_end == 22050, "Default loop must cover the whole track")
 	se.stop()
 	expect(se.play_from(0, -1, false, -1, 1) == 1 and se.play_type == CsxHostClass.AUDIO_PLAY_TYPE_SOUND, "PlayFrom must accept the SDK Sound category flag")
@@ -169,12 +169,22 @@ func _run() -> void:
 	expect(playback_frame >= 1102 and playback_frame <= 2205, "The mixer must wrap to the rewind frame, not the intro")
 	se.stop()
 	var attached_resource = CsxHostClass.HostResource.new("attached-se", "sound.noa", -1, 0, 0, host)
-	expect(vm._dispatch_resource_method(attached_resource, "AttachSound", [se]) == 1, "AttachSound must bind a loaded waveform resource")
+	expect(vm._dispatch_resource_method(attached_resource, "AttachSound", [se]) == 0, "AttachSound must return Entis success code 0 and bind a loaded waveform resource")
 	var attached_stream: AudioStreamWAV = attached_resource.audio_stream
 	se.release()
 	expect(attached_resource.audio_stream == attached_stream and attached_resource.play() == 1, "Attached audio must remain playable after its source Resource is released")
 	expect(attached_resource.stop() == 1, "An attached sound Resource must stop its selected audio channel")
 
+	var test_players: Array[AudioStreamPlayer] = []
+	for player_value: Variant in [host.bgm_player, host.env_se_player, host.se_player, host.voice_player, host.system_player] + host.audio_players.values() + host.audio_right_players.values():
+		if player_value is AudioStreamPlayer and not test_players.has(player_value):
+			test_players.append(player_value)
+	host.shutdown_runtime()
+	for player: AudioStreamPlayer in test_players:
+		if is_instance_valid(player):
+			player.queue_free()
+	await process_frame
+	await create_timer(0.25).timeout
 	finish_success("PASS HostResource audio routing, PCM playback ranges, pause/resume, volume, and stop contract")
 
 

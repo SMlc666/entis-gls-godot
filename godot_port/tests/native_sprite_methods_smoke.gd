@@ -26,6 +26,34 @@ func _initialize() -> void:
 	vm._dispatch_sprite_method(parent, "Enable", [-1, "ID_TEST_BUTTON"])
 	_expect(button.is_enabled and vm._dispatch_sprite_method(parent, "IsEnabled", ["ID_TEST_BUTTON"]) == -1, "Enable(true) must restore child interaction")
 
+	var rotated := Host.HostSprite.new(5, host)
+	rotated.is_visible = true
+	rotated.position = Vector2i(200, 200)
+	rotated.rev_center = Vector2i(50, 10)
+	rotated.size = Vector2i(100, 20)
+	rotated.rotation_degrees = 45.0
+	_expect(rotated.is_hit_at(228, 228), "Rotated sprite hit testing must accept a point inside its rendered quad")
+	_expect(not rotated.is_hit_at(245, 200), "Rotated sprite hit testing must reject an unrotated-rectangle false positive")
+
+	var focus_window := Host.HostWindow.new(host)
+	var selected := Host.HostSprite.new(6, host)
+	selected.btn_id = "ID_SELECTED"
+	selected.is_button = true
+	selected.is_visible = true
+	selected.size = Vector2i(100, 40)
+	selected.set_button_state("pushed")
+	focus_window.add_sprite(0, selected)
+	_expect(vm._dispatch_sprite_method(selected, "IsButtonChecked", ["ID_SELECTED"]) == -1, "A pushed native button must be reported as checked")
+	focus_window.focus_sprite(selected)
+	_expect(selected.has_window_focus and selected.btn_state == "pushed", "Applying window focus must not overwrite a selected button's pushed state")
+	_expect(vm._dispatch_sprite_method(selected, "IsButtonChecked", ["ID_SELECTED"]) == -1, "IsButtonChecked must remain true after a selected button receives focus")
+	focus_window.set_focus("")
+	_expect(not selected.has_window_focus and selected.btn_state == "pushed", "Clearing focus must preserve the selected button state")
+	_expect(vm._dispatch_sprite_method(selected, "CheckButton", ["ID_SELECTED", 0]) == 0, "CheckButton must clear persistent selection")
+	_expect(vm._dispatch_sprite_method(selected, "CheckButton", ["ID_SELECTED", 1]) == 0, "CheckButton must set persistent selection")
+	focus_window.focus_sprite(selected)
+	_expect(vm._dispatch_sprite_method(selected, "IsButtonChecked", ["ID_SELECTED"]) == -1, "Persistent CheckButton selection must survive focus changes")
+
 	var message := Host.HostSprite.new(3, host)
 	vm._dispatch_sprite_method(message, "CreateMessage", [800, 152])
 	vm._dispatch_sprite_method(message, "MoveCursorPos", [37, 42])

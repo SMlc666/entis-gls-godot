@@ -5,6 +5,8 @@ compatibility_minimum = "4.1"
 [libraries]
 linux.debug.x86_64 = "res://tools/bin/linux/libyzk_codec.so"
 linux.release.x86_64 = "res://tools/bin/linux/libyzk_codec.so"
+linux.debug.arm64 = "res://tools/bin/linux/libyzk_codec.so"
+linux.release.arm64 = "res://tools/bin/linux/libyzk_codec.so"
 android.debug.arm64 = "res://android/libs/arm64-v8a/libyzk_codec.so"
 android.release.arm64 = "res://android/libs/arm64-v8a/libyzk_codec.so"
 android.debug.arm32 = "res://android/libs/armeabi-v7a/libyzk_codec.so"

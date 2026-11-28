@@ -1,12 +1,12 @@
 extends SceneTree
 
-const GAME_DIR := "/mnt/sdb1/devs/yzk2godot/缘之空（全cg步兵版）"
 const CsxHostClass = preload("res://scripts/csx_host.gd")
 const CsxVMClass = preload("res://scripts/csx_vm.gd")
 const TestSupport = preload("res://tests/test_support.gd")
 
 var test_save_dir := ""
 var test_player: Node = null
+var game_dir := ""
 
 class FailingGopCodec extends RefCounted:
 	var decoded_b_frames := 0
@@ -23,10 +23,14 @@ class FailingGopCodec extends RefCounted:
 
 
 func _initialize() -> void:
+	game_dir = TestSupport.resolve_game_dir(OS.get_cmdline_user_args())
 	call_deferred("_run")
 
 
 func _run() -> void:
+	if game_dir.is_empty():
+		_fail("Pass the original game directory after -- or set YOSUGA_GAME_DIR")
+		return
 	var scene := load("res://scenes/adv_player.tscn") as PackedScene
 	if scene == null:
 		_fail("ADV scene failed to load")
@@ -35,7 +39,7 @@ func _run() -> void:
 	test_player = player
 	test_save_dir = TestSupport.new_save_dir("mei_playback")
 	player.set("save_dir_override", test_save_dir)
-	player.set("game_dir", GAME_DIR)
+	player.set("game_dir", game_dir)
 	player.set("start_in_title", true)
 	root.add_child(player)
 	await process_frame
@@ -163,7 +167,7 @@ func _run() -> void:
 	if movie_resource.seek_frame(0) != 1 or movie_resource.get_current_frame() != 0:
 		_fail("MovieSprite could not reset its open stream before testing a new decode mode")
 		return
-	if not player.call("_start_native_mei_movie", GAME_DIR.path_join("opening.mei"), 0x0807):
+	if not player.call("_start_native_mei_movie", game_dir.path_join("opening.mei"), 0x0807):
 		_fail("native MEI player refused SDK UseLoopFilter and no-skip playback mode")
 		return
 	if int(player.get("mei_movie_decode_flags")) != 0x0800:
@@ -197,7 +201,7 @@ func _run() -> void:
 		_fail("PlayMovie after StopMovie must resume the stopped movie position")
 		return
 	player.call("_on_movie_stop_requested")
-	if not player.call("_start_native_mei_movie", GAME_DIR.path_join("opening.mei"), 0x02):
+	if not player.call("_start_native_mei_movie", game_dir.path_join("opening.mei"), 0x02):
 		_fail("native MEI player refused looping playback mode")
 		return
 	var loop_queue: Array = player.get("mei_movie_queue")
