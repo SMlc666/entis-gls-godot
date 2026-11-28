@@ -2185,6 +2185,18 @@ class HostSprite extends RefCounted:
 		if host != null:
 			host.flush_sprite_commands(get_instance_id())
 			host.active_sprites.erase(get_instance_id())
+		end_animation()
+		animation_frames.clear()
+		animation_frame_sizes.clear()
+		animation_sequence.clear()
+		animation_total_time_ms = 0
+		animation_elapsed_ms = 0.0
+		animation_duration_ms = 0.0
+		animation_begin_sequence = 0
+		animation_start_sequence = 0
+		animation_turn_sequence = -1
+		animation_rewind_sequence = 0
+		animation_view_frame = -1
 		is_visible = false
 		attached_resource = null
 		image = null

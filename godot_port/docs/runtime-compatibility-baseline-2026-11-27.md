@@ -53,6 +53,19 @@
 | **A19 未实现 Host API 假成功** / P1 | **代表性 dispatch 已解决；API 清单覆盖未完成** | `csx_vm.gd:1445–1451,1993,2014–2018` 令未实现全局/成员调用报错且不压入伪造返回值；`host_unsupported_api_smoke.gd` 通过。`UpdateWindow` 保留为 redraw 请求。真实 Story `ID_CONFIG` 流程还覆盖 `File::IsExisting(".mio")` 的可选资源缺失路径：`native_resource_error_contract_smoke.gd` 检查 Host predicate、HostFile 和 CSX handler 均返回 false 且保留前一诊断，`native_story_config_smoke.gd` 检查原始 CSX 在自研 VM 上执行后没有残留该 miss 诊断；这仍是自运行时证据，未与官方 Host 比对。已知一些窗口/输入 API 仍是 partial/no-op。 | 建立原始 CSX 实际调用点与 Host handlers 的完整差异表；每个 no-op 必须有证据支持或改为显式 unsupported；最终用官方 runtime 比较返回值。 |
 | **A20 存档缩略图边界** / P1 | **P2，主要边界已覆盖** | `csx_host.gd:4296–4341` 限制 16 MiB 文件、PNG IHDR 最大尺寸/像素数并在解码后复核；`thumbnail_bounds_smoke.gd:13–63` 测有效图、超尺寸 IHDR、hash。 | 对截断/畸形/边缘 PNG 扩展 fixture 或 fuzz；确认 Godot 解码器瞬时内存边界。 |
 
+## HostSprite.Release 动画生命周期修复（2026-11-28）
+
+独立只读审计确认一个自研 HostSprite 生命周期缺陷（P2）：`Release()` 清理显示图像但未停止活动动画或释放其帧/序列；Host animation advance 因而可重新创建 image/texture。`HostSprite.release()` 现调用 `end_animation()`、清空帧/尺寸/序列并重置动画计时与索引，同时保留原 Release 返回值。资产无关的 `host_sprite_release_lifecycle_smoke.gd` 以合成 Images、WeakRefs 和 release 后 host advance 覆盖释放、注册移除、无资源复活及幂等性；配合 `resource_lifecycle_smoke.gd` 检查 HostResource 路径。
+
+从仓库根目录复现（headless Godot，无游戏资源）：
+
+```sh
+godot --headless --audio-driver Dummy --path godot_port --script res://tests/host_sprite_release_lifecycle_smoke.gd
+godot --headless --audio-driver Dummy --path godot_port --script res://tests/resource_lifecycle_smoke.gd
+```
+
+这是项目自运行时生命周期修复证据，不证明 Native Cotopha 语义或 parity。
+
 ## 本轮可复现验证
 
 以下全部在 Godot 4.7、headless、Dummy audio 下运行；括号说明资源证据类别。命令模板均从仓库根目录执行：
